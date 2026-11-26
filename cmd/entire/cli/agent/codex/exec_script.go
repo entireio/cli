@@ -10,9 +10,13 @@ import (
 // Codex (0.172 with some models) runs shell commands through a custom tool
 // named "exec" whose input is JavaScript, e.g.
 // `text(await tools.exec_command({cmd:"git -C /d commit -m m"}))`. The script
-// is never evaluated: ExecScriptShellCalls only reads the string literals
-// given as exec_command's cmd, command and workdir. A command built at run
-// time (a variable, concatenation, or a template with ${}) is not read.
+// is never evaluated: ExecScriptShellCalls reads the string literals given as
+// exec_command's cmd, command and workdir, and every other whole string
+// literal in the script that looks like a shell command (such as an element
+// of an array of commands looped over). A template's ${NAME} is substituted
+// only when NAME is bound once to a plain literal (see execScriptBindings); a
+// command built any other way (concatenation, a call, an unresolved ${}) is
+// not read.
 
 // execScriptTool is the name of Codex's JavaScript tool.
 const execScriptTool = "exec"
@@ -44,9 +48,35 @@ func ExecScriptShellCalls(obj map[string]any) ([]map[string]any, bool) {
 	return execScriptCalls(script), true
 }
 
-// execScriptCalls returns the input of each exec_command call in script that
-// names its command as a string literal: {"cmd": ..., "workdir": ...}.
+// execScriptCalls returns the exec_command inputs of script, then each other
+// command-like whole literal as {"cmd": ...} when script calls exec_command.
 func execScriptCalls(script string) []map[string]any {
+	vars := execScriptBindings(script)
+	calls := execCommandCalls(script, vars)
+	if !strings.Contains(script, execScriptCallee) {
+		return calls
+	}
+	seen := map[string]bool{}
+	for _, call := range calls {
+		if cmd, ok := call["cmd"].(string); ok {
+			seen[cmd] = true
+		}
+		if cmd, ok := call["command"].(string); ok {
+			seen[cmd] = true
+		}
+	}
+	for _, cmd := range scriptCommandLiterals(script, vars) {
+		if !seen[cmd] {
+			seen[cmd] = true
+			calls = append(calls, map[string]any{"cmd": cmd})
+		}
+	}
+	return calls
+}
+
+// execCommandCalls returns the input of each exec_command call in script that
+// names its command as a string literal: {"cmd": ..., "workdir": ...}.
+func execCommandCalls(script string, vars map[string]string) []map[string]any {
 	var calls []map[string]any
 	for rest := script; ; {
 		i := strings.Index(rest, execScriptCallee)
@@ -54,7 +84,7 @@ func execScriptCalls(script string) []map[string]any {
 			return calls
 		}
 		rest = rest[i+len(execScriptCallee):]
-		if call := execCallArgs(rest); call != nil {
+		if call := execCallArgs(rest, vars); call != nil {
 			calls = append(calls, call)
 		}
 	}
@@ -63,7 +93,7 @@ func execScriptCalls(script string) []map[string]any {
 // execCallArgs reads the arguments after exec_command's opening parenthesis:
 // a string literal (the command), or an object literal's cmd, command and
 // workdir string values. It stops at the closing parenthesis.
-func execCallArgs(src string) map[string]any {
+func execCallArgs(src string, vars map[string]string) map[string]any {
 	call := map[string]any{}
 	depth := 1 // inside the call's parentheses; 2 is the argument object
 	key := ""
@@ -76,7 +106,7 @@ func execCallArgs(src string) map[string]any {
 		}
 		switch {
 		case c == '"' || c == '\'' || c == '`':
-			i = readExecArg(src, i, depth, positional, key, call)
+			i = readExecArg(src, i, vars, execArgPos{depth, positional, key}, call)
 			key = ""
 		case c == '(' || c == '{' || c == '[':
 			depth++
@@ -101,18 +131,25 @@ func execCallArgs(src string) map[string]any {
 	return call
 }
 
+// execArgPos is where a literal sits in exec_command's arguments.
+type execArgPos struct {
+	depth      int
+	positional bool
+	key        string
+}
+
 // readExecArg reads the string literal at src[i] into call when it is the
 // command argument or one of execCallKeys' values, and returns the index after
 // it. A literal that is only part of an expression, such as "cp x " + name,
 // is not read: its value is not the command.
-func readExecArg(src string, i, depth int, positional bool, key string, call map[string]any) int {
-	lit, end, ok := jsStringLiteral(src, i)
+func readExecArg(src string, i int, vars map[string]string, pos execArgPos, call map[string]any) int {
+	lit, end, ok := jsStringLiteral(src, i, vars)
 	switch {
 	case !ok || !endsValue(src, end):
-	case positional:
+	case pos.positional:
 		call["cmd"] = lit
-	case depth == 2 && slices.Contains(execCallKeys, key):
-		call[key] = lit
+	case pos.depth == 2 && slices.Contains(execCallKeys, pos.key):
+		call[pos.key] = lit
 	}
 	return end
 }
@@ -152,9 +189,10 @@ func isJSIdentStart(c byte) bool {
 }
 
 // jsStringLiteral decodes the JavaScript string literal opening at src[start]
-// and returns it with the index after its closing quote. ok is false for an
-// unterminated literal or a template literal with a substitution.
-func jsStringLiteral(src string, start int) (lit string, end int, ok bool) {
+// and returns it with the index after its closing quote. A template's ${NAME}
+// takes vars[NAME]; ok is false for an unterminated literal or a template
+// with any other substitution.
+func jsStringLiteral(src string, start int, vars map[string]string) (lit string, end int, ok bool) {
 	quote := src[start]
 	var b strings.Builder
 	for i := start + 1; i < len(src); {
@@ -163,7 +201,12 @@ func jsStringLiteral(src string, start int) (lit string, end int, ok bool) {
 		case c == quote:
 			return b.String(), i + 1, true
 		case quote == '`' && c == '$' && i+1 < len(src) && src[i+1] == '{':
-			return "", skipPast(src, i, quote), false
+			val, next, found := templateVar(src, i+2, vars)
+			if !found {
+				return "", skipPast(src, i, quote), false
+			}
+			b.WriteString(val)
+			i = next
 		case c == '\\' && i+1 < len(src):
 			i = decodeJSEscape(src, i+1, &b)
 		case c == '\n' && quote != '`':

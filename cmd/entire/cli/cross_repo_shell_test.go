@@ -198,3 +198,21 @@ func TestScanShellActivity_CodexExecReadOnlyAndDynamic(t *testing.T) {
 		t.Errorf("quietCalls %d, want 2", got.quietCalls)
 	}
 }
+
+func TestScanShellActivity_CodexExecBatchedTemplates(t *testing.T) {
+	t.Parallel()
+	script := "const p=\"/abs/work\";\nconst commands=[\n`git -C ${p}/D add d1.txt && git -C ${p}/D commit -m d1`,\n`echo x > ${p}/E/f && git -C ${p}/E add -A && git -C ${p}/E commit -m e1`,\n];\nfor (const c of commands) text(await tools.exec_command({cmd:c}));"
+	got := scanShellActivity(jsonl(t, codexExec("c1", script, "ok")...), 0, "/home/u/c")
+	if !slices.Contains(got.dirs, "/abs/work/D") || !slices.Contains(got.dirs, "/abs/work/E") {
+		t.Errorf("dirs %v", got.dirs)
+	}
+	if got.quietCalls != 0 {
+		t.Errorf("quietCalls %d", got.quietCalls)
+	}
+
+	readOnly := "const p=\"/abs/work\";\ntext(await tools.exec_command({cmd:`git -C ${p}/E log --oneline`}));"
+	got = scanShellActivity(jsonl(t, codexExec("c2", readOnly, "ok")...), 0, "/home/u/c")
+	if len(got.dirs) != 0 || got.quietCalls != 1 {
+		t.Errorf("read-only: dirs %v quietCalls %d", got.dirs, got.quietCalls)
+	}
+}
