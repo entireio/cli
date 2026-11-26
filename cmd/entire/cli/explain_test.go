@@ -6131,3 +6131,17 @@ func TestTimeoutDiagnostic_NonStreamingWithOutput(t *testing.T) {
 }
 
 const lessRawControlEnv = "LESS=-R"
+
+// Cross-repository fields come from checkpoint metadata a remote can supply:
+// none may carry terminal escape sequences into explain output.
+func TestFormatCrossRepoLines_SanitizesEveryField(t *testing.T) {
+	t.Parallel()
+	const esc = "\x1b]0;pwned\x07"
+	got := formatCrossRepoLines(checkpoint.Metadata{
+		CrossRepo:   &checkpoint.CrossRepoMarker{CommitSHA: "abc" + esc, HomeRepo: "home" + esc},
+		LinkedRepos: []checkpoint.LinkedRepoCommit{{RepoKey: "r" + esc, SHA: "def" + esc}},
+	})
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\x07') {
+		t.Fatalf("escape sequence in output: %q", got)
+	}
+}

@@ -198,11 +198,3 @@ func TestScanShellActivity_CodexExecReadOnlyAndDynamic(t *testing.T) {
 		t.Errorf("quietCalls %d, want 2", got.quietCalls)
 	}
 }
-
-func TestCodexExecCalls_Literals(t *testing.T) {
-	t.Parallel()
-	got := codexExecCalls(`tools.exec_command("ls \x2fa\u{62}c") ; tools.exec_command({cmd: ` + "`echo hi > /t`" + `, workdir: "/w", other: {cmd: "no"}})`)
-	if len(got) != 2 || got[0]["cmd"] != "ls /abc" || got[1]["cmd"] != "echo hi > /t" || got[1]["workdir"] != "/w" {
-		t.Fatalf("calls %v", got)
-	}
-}

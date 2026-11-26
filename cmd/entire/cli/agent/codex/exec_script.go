@@ -1,4 +1,4 @@
-package cli
+package codex
 
 import (
 	"slices"
@@ -10,41 +10,50 @@ import (
 // Codex (0.172 with some models) runs shell commands through a custom tool
 // named "exec" whose input is JavaScript, e.g.
 // `text(await tools.exec_command({cmd:"git -C /d commit -m m"}))`. The script
-// is never evaluated: codexExecCalls only reads the string literals given as
-// exec_command's cmd, command and workdir. A command built at run time (a
-// variable, concatenation, or a template with ${}) is not read.
+// is never evaluated: ExecScriptShellCalls only reads the string literals
+// given as exec_command's cmd, command and workdir. A command built at run
+// time (a variable, concatenation, or a template with ${}) is not read.
 
-// codexExecTool is the name of Codex's JavaScript tool.
-const codexExecTool = "exec"
+// execScriptTool is the name of Codex's JavaScript tool.
+const execScriptTool = "exec"
 
-// codexExecCallee is the nested shell tool a Codex script calls.
-const codexExecCallee = "exec_command("
+// execScriptCallee is the nested shell tool a Codex script calls.
+const execScriptCallee = "exec_command("
+
+// maxExecScript bounds the size of a script that is read.
+const maxExecScript = 1 << 20
 
 // execCallKeys are the exec_command arguments a scan reads.
-var execCallKeys = append([]string{"workdir"}, shellCommandKeys...)
+var execCallKeys = []string{"workdir", "command", "cmd"}
 
-// codexExecInput returns the script of obj when obj is a Codex exec call.
-func codexExecInput(obj map[string]any) (string, bool) {
+// ExecScriptShellCalls reports whether obj (a decoded rollout payload) is a
+// Codex exec custom tool call, and returns the input of each exec_command
+// call in its script that names its command as a string literal:
+// {"cmd": ..., "workdir": ...}.
+func ExecScriptShellCalls(obj map[string]any) ([]map[string]any, bool) {
 	if typ, _ := obj["type"].(string); typ != "custom_tool_call" { //nolint:errcheck // absent is no call
-		return "", false
+		return nil, false
 	}
-	if name, _ := obj["name"].(string); name != codexExecTool { //nolint:errcheck // absent is no call
-		return "", false
+	if name, _ := obj["name"].(string); name != execScriptTool { //nolint:errcheck // absent is no call
+		return nil, false
 	}
 	script, ok := obj["input"].(string)
-	return script, ok && len(script) <= maxEncodedArguments
+	if !ok || len(script) > maxExecScript {
+		return nil, false
+	}
+	return execScriptCalls(script), true
 }
 
-// codexExecCalls returns the input of each exec_command call in script that
+// execScriptCalls returns the input of each exec_command call in script that
 // names its command as a string literal: {"cmd": ..., "workdir": ...}.
-func codexExecCalls(script string) []map[string]any {
+func execScriptCalls(script string) []map[string]any {
 	var calls []map[string]any
 	for rest := script; ; {
-		i := strings.Index(rest, codexExecCallee)
+		i := strings.Index(rest, execScriptCallee)
 		if i < 0 {
 			return calls
 		}
-		rest = rest[i+len(codexExecCallee):]
+		rest = rest[i+len(execScriptCallee):]
 		if call := execCallArgs(rest); call != nil {
 			calls = append(calls, call)
 		}
@@ -58,11 +67,16 @@ func execCallArgs(src string) map[string]any {
 	call := map[string]any{}
 	depth := 1 // inside the call's parentheses; 2 is the argument object
 	key := ""
+	firstArg := true // no token of the positional argument read yet
 	for i := 0; i < len(src) && depth > 0; {
 		c := src[i]
+		positional := depth == 1 && firstArg
+		if depth == 1 && !isJSSpace(c) {
+			firstArg = false
+		}
 		switch {
 		case c == '"' || c == '\'' || c == '`':
-			i = readExecArg(src, i, depth, key, call)
+			i = readExecArg(src, i, depth, positional, key, call)
 			key = ""
 		case c == '(' || c == '{' || c == '[':
 			depth++
@@ -74,7 +88,7 @@ func execCallArgs(src string) map[string]any {
 			i++
 		case isJSIdentStart(c):
 			key, i = readJSKey(src, i)
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case isJSSpace(c):
 			i++
 		default:
 			key = ""
@@ -88,12 +102,14 @@ func execCallArgs(src string) map[string]any {
 }
 
 // readExecArg reads the string literal at src[i] into call when it is the
-// command argument or one of execCallKeys' values, and returns the index after it.
-func readExecArg(src string, i, depth int, key string, call map[string]any) int {
+// command argument or one of execCallKeys' values, and returns the index after
+// it. A literal that is only part of an expression, such as "cp x " + name,
+// is not read: its value is not the command.
+func readExecArg(src string, i, depth int, positional bool, key string, call map[string]any) int {
 	lit, end, ok := jsStringLiteral(src, i)
 	switch {
-	case !ok:
-	case depth == 1 && len(call) == 0:
+	case !ok || !endsValue(src, end):
+	case positional:
 		call["cmd"] = lit
 	case depth == 2 && slices.Contains(execCallKeys, key):
 		call[key] = lit
@@ -116,6 +132,19 @@ func readJSKey(src string, i int) (key string, next int) {
 		return src[i:j], k + 1
 	}
 	return "", k
+}
+
+// endsValue reports whether the value ending at src[i] is a whole argument or
+// property value: only a comma or closing bracket follows it.
+func endsValue(src string, i int) bool {
+	for i < len(src) && isJSSpace(src[i]) {
+		i++
+	}
+	return i == len(src) || src[i] == ',' || src[i] == '}' || src[i] == ')'
+}
+
+func isJSSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 func isJSIdentStart(c byte) bool {
