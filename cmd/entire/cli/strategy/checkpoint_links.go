@@ -10,7 +10,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // foldCrossRepoLinks adds to state's CheckpointLinks the marker checkpoints
@@ -46,7 +45,7 @@ func recordHomeCheckpointLink(ctx context.Context, repo *git.Repository, state *
 		}
 	}
 	if root, err := paths.WorktreeRoot(ctx); err == nil {
-		link.RepoKey, _ = settings.RepoKey(ctx, root) //nolint:errcheck // empty when unknown
+		link.RepoKey = publicRepoKey(ctx, root) // the same naming as the cross-repository entries
 	}
 	state.AddCheckpointLink(link)
 }

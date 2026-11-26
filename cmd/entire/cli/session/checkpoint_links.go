@@ -24,8 +24,9 @@ const (
 // CheckpointLink is one entry of State.CheckpointLinks.
 type CheckpointLink struct {
 	CheckpointID id.CheckpointID `json:"checkpoint_id"`
-	// RepoKey names the repository holding the checkpoint; empty for a home
-	// checkpoint whose repository key was unknown, or a migrated entry.
+	// RepoKey names the repository holding the checkpoint by its normalized
+	// origin, else its directory name (never a local path); empty for a
+	// migrated entry.
 	RepoKey string `json:"repo_key,omitempty"`
 	// LinkedCommits are the commits (full SHAs) the checkpoint was written
 	// for, in order. Empty for a checkpoint no commit carries (session end,
