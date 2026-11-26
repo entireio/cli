@@ -52,10 +52,32 @@ type ReviewerTemplate struct {
 	// command cannot work in (for example an agent CLI too old for the argv
 	// shape BuildCmd produces), so the review fails before any paid run.
 	Preflight func(ctx context.Context) error
+
+	// IsolatedWarnings, when set, returns notes printed before a run that uses
+	// the reviewer's own profile config (RunConfig.AgentConfig), for problems
+	// that degrade the run without stopping it.
+	IsolatedWarnings func(ctx context.Context) []string
 }
 
-// Compile-time check.
-var _ AgentReviewer = (*ReviewerTemplate)(nil)
+// IsolatedRunWarnings returns the template's IsolatedWarnings, if any.
+func (t *ReviewerTemplate) IsolatedRunWarnings(ctx context.Context) []string {
+	if t.IsolatedWarnings == nil {
+		return nil
+	}
+	return t.IsolatedWarnings(ctx)
+}
+
+// IsolatedRunWarner is an optional AgentReviewer capability: notes printed
+// before a run that uses the reviewer's own profile config.
+type IsolatedRunWarner interface {
+	IsolatedRunWarnings(ctx context.Context) []string
+}
+
+// Compile-time checks.
+var (
+	_ AgentReviewer     = (*ReviewerTemplate)(nil)
+	_ IsolatedRunWarner = (*ReviewerTemplate)(nil)
+)
 
 // Name returns the agent's stable identifier.
 func (t *ReviewerTemplate) Name() string { return t.AgentName }

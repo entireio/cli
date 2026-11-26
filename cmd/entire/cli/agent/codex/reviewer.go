@@ -32,6 +32,8 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		BuildCmd:  buildCodexReviewCmd,
 		Parser:    parseCodexOutput,
 		Prepare:   prepareCodexReviewConfig,
+
+		IsolatedWarnings: codexIsolatedWarnings,
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strings"
@@ -56,6 +55,9 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 	// session-flag hooks only with persisted trust or this bypass; it does
 	// not load the checkout's hooks, which stay untrusted.
 	cfg.ExtraArgs = append(cfg.ExtraArgs, entireHookOverrides(agent.UseWindowsProductionHooks(ctx))...)
+	// The user's own Codex config still loads; Entire hooks there would
+	// fire alongside the session-flag ones, so they are disabled for the run.
+	cfg.ExtraArgs = append(cfg.ExtraArgs, userEntireHookStateOverride(ctx)...)
 	cfg.ExtraArgs = append(cfg.ExtraArgs, "--dangerously-bypass-hook-trust")
 	cfg.WorkDir = run.CheckoutRoot
 	return cfg, nil, nil
@@ -67,11 +69,7 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 func untrustedProjectOverride(roots []string) string {
 	entries := make([]string, 0, len(roots))
 	for _, root := range roots {
-		quoted, err := json.Marshal(root)
-		if err != nil {
-			quoted = []byte(`""`)
-		}
-		entries = append(entries, string(quoted)+`={trust_level="untrusted"}`)
+		entries = append(entries, tomlQuotedKey(root)+`={trust_level="untrusted"}`)
 	}
 	return "projects={" + strings.Join(entries, ",") + "}"
 }
@@ -142,20 +140,12 @@ func refuseUserMCPServerClash(servers map[string]json.RawMessage) error {
 	if configPath == "" {
 		return errors.New("MCP servers in a Codex review profile: the Codex home can't be resolved to check config.toml for servers of the same name")
 	}
-	file, err := os.Open(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
+	data, err := readUserCodexFile(configPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("MCP servers in a Codex review profile: read %s: %w", configPath, err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
-	if err != nil {
-		return fmt.Errorf("MCP servers in a Codex review profile: read %s: %w", configPath, err)
-	}
-	if len(data) > maxHooksFileBytes {
-		return fmt.Errorf("MCP servers in a Codex review profile: %s is over %d bytes, too large to check for servers of the same name", configPath, maxHooksFileBytes)
+		return fmt.Errorf("MCP servers in a Codex review profile: %s: %w; can't check it for servers of the same name", configPath, err)
 	}
 	var config struct {
 		MCPServers map[string]any `toml:"mcp_servers"`

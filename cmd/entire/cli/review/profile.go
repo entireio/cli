@@ -387,7 +387,7 @@ func defaultReviewProfileForInstalledAgents(
 		agents[name] = cfg
 	}
 	if len(agents) == 0 {
-		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, or `entire configure --agent pi`")
+		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire agent add claude-code`, `entire agent add codex`, or `entire agent add pi`")
 	}
 	profile := settings.ReviewProfileConfig{
 		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),

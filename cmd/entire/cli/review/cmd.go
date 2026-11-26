@@ -151,7 +151,9 @@ Flags:
   --trust-target SHA
                  approve reviewing code by someone else at this commit. Reviews
                  of commits you did not author need approval because the
-                 reviewer loads the checkout's hooks, MCP servers, and settings.
+                 reviewer loads the checkout's hooks, MCP servers, and settings
+                 (with its own profile config, only its skills, commands and
+                 instructions).
 
 To tag an already-finished session as a review, use
 'entire session attach --review <id>'.`
@@ -314,7 +316,7 @@ func NewCommand(deps Deps) *cobra.Command {
 	cmd.Flags().StringVar(&setTask, "set-task", "", "with --configure: the profile's canonical task text")
 	cmd.Flags().StringArrayVar(&setModels, "set-model", nil, "with --configure: per-reviewer model as agent=model (repeatable)")
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
-	cmd.Flags().StringArrayVar(&setConfigs, "set-config", nil, "with --configure: a reviewer's own agent config as reviewer=<config.json|isolated|none> (repeatable; saved to clone-local preferences)")
+	cmd.Flags().StringArrayVar(&setConfigs, "set-config", nil, "with --configure: a reviewer's own agent config as reviewer=<config.json|isolated|none> (repeatable; saved to clone-local preferences, or .entire/settings.local.json with --local)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
 	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
@@ -597,7 +599,71 @@ func runReviewListProfiles(ctx context.Context, cmd *cobra.Command, deps Deps) e
 	return nil
 }
 
-const reviewHooksInstalledStatus = "hooks installed"
+const (
+	reviewHooksInstalledStatus = "hooks installed"
+	reviewIsolatedStatus       = "isolated; this checkout's hooks aren't needed"
+)
+
+// reviewerIsolatedWithAdapter reports whether a reviewer runs isolated
+// (its own profile config) through a review runner adapter. Each adapter's
+// isolated run registers Entire's hooks itself (Claude Code settings, Codex
+// session flags, Pi extension), so it doesn't need this checkout's hooks.
+// Without an adapter the run is a manual marker fallback that applies no
+// config, so it still needs them.
+func reviewerIsolatedWithAdapter(worker string, cfg settings.ReviewConfig, reviewerFor func(string) reviewtypes.AgentReviewer) bool {
+	return cfg.Config != nil && reviewerFor != nil && reviewerFor(reviewAgentName(worker, cfg)) != nil
+}
+
+// announceIsolatedReviewers prints which reviewers use their own profile
+// config, and refuses an isolated reviewer whose session would not be
+// recorded: its hooks run, but Entire's hook handler records nothing in a
+// repository where Entire isn't enabled.
+func announceIsolatedReviewers(ctx context.Context, errOut io.Writer, running map[string]settings.ReviewConfig, reviewerFor func(string) reviewtypes.AgentReviewer) error {
+	for _, worker := range sortedMapKeys(running) {
+		cfg := running[worker]
+		if cfg.Config == nil {
+			continue
+		}
+		agentName := reviewAgentName(worker, cfg)
+		if !reviewerIsolatedWithAdapter(worker, cfg, reviewerFor) {
+			fmt.Fprintf(errOut, "%s: has its own agent config, but %s has no review runner adapter, so the config is not applied.\n", worker, agentName)
+			continue
+		}
+		if !settings.IsSetUpAndEnabled(ctx) {
+			return fmt.Errorf("this repository does not have Entire enabled, so %s's review session would not be recorded; run `entire enable` first", worker)
+		}
+		fmt.Fprintf(errOut, "%s: using your profile's agent config; this checkout's hooks, MCP servers and extensions are not loaded.\n", worker)
+		warnAgentConfig(ctx, errOut, worker, cfg.Config)
+		if warner, ok := reviewerFor(agentName).(reviewtypes.IsolatedRunWarner); ok {
+			for _, msg := range warner.IsolatedRunWarnings(ctx) {
+				fmt.Fprintf(errOut, "Warning: %s: %s.\n", worker, msg)
+			}
+		}
+	}
+	return nil
+}
+
+// installedNameSet indexes installed agent names.
+func installedNameSet(installed []types.AgentName) map[string]struct{} {
+	set := make(map[string]struct{}, len(installed))
+	for _, name := range installed {
+		set[string(name)] = struct{}{}
+	}
+	return set
+}
+
+// reviewerHooksReady returns whether a reviewer's session can be tracked:
+// this checkout has its agent's hooks installed, or it is an isolated
+// reviewer that registers them itself.
+func reviewerHooksReady(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) func(string, settings.ReviewConfig) bool {
+	installedSet := installedNameSet(installed)
+	return func(worker string, cfg settings.ReviewConfig) bool {
+		if _, ok := installedSet[reviewAgentName(worker, cfg)]; ok {
+			return true
+		}
+		return reviewerIsolatedWithAdapter(worker, cfg, reviewerFor)
+	}
+}
 
 // runReviewListAgents lists the reviewer agents valid for `--agent` in the
 // resolved profile (with hook-install status). With no
@@ -605,10 +671,7 @@ const reviewHooksInstalledStatus = "hooks installed"
 func runReviewListAgents(ctx context.Context, cmd *cobra.Command, profileOverride string, deps Deps) error {
 	out := cmd.OutOrStdout()
 	installed := deps.GetAgentsWithHooksInstalled(ctx)
-	installedSet := make(map[string]struct{}, len(installed))
-	for _, n := range installed {
-		installedSet[string(n)] = struct{}{}
-	}
+	installedSet := installedNameSet(installed)
 
 	s, err := settings.Load(ctx)
 	if err == nil && s != nil {
@@ -618,8 +681,13 @@ func runReviewListAgents(ctx context.Context, cmd *cobra.Command, profileOverrid
 			for _, worker := range sortedMapKeys(profile.Agents) {
 				cfg := profile.Agents[worker]
 				status := reviewHooksInstalledStatus
-				if _, ok := installedSet[reviewAgentName(worker, cfg)]; !ok {
-					status = "hooks NOT installed; run `entire configure --agent " + reviewAgentName(worker, cfg) + "`"
+				_, installedHooks := installedSet[reviewAgentName(worker, cfg)]
+				switch {
+				case installedHooks:
+				case reviewerIsolatedWithAdapter(worker, cfg, deps.ReviewerFor):
+					status = reviewIsolatedStatus
+				default:
+					status = "hooks NOT installed; run `entire agent add " + reviewAgentName(worker, cfg) + "`"
 				}
 				fmt.Fprintf(out, "  %s: %s\n", reviewWorkerLabel(worker, cfg), status)
 			}
@@ -633,7 +701,7 @@ func runReviewListAgents(ctx context.Context, cmd *cobra.Command, profileOverrid
 	catalog := availableReviewAgents(installed, deps.ReviewerFor)
 	fmt.Fprintln(out, "No review profile configured yet. Available review agents:")
 	for _, e := range catalog {
-		status := "not installed; run `entire configure --agent " + e.Name + "`"
+		status := "not installed; run `entire agent add " + e.Name + "`"
 		if e.Installed {
 			status = reviewHooksInstalledStatus
 		}
@@ -655,10 +723,7 @@ type reviewAgentCatalogEntry struct {
 // installed in this repo. Derived from the registry + deps.ReviewerFor so it
 // never drifts from the set of agents `entire review` can actually launch.
 func availableReviewAgents(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []reviewAgentCatalogEntry {
-	installedSet := make(map[string]struct{}, len(installed))
-	for _, n := range installed {
-		installedSet[string(n)] = struct{}{}
-	}
+	installedSet := installedNameSet(installed)
 	var out []reviewAgentCatalogEntry
 	for _, name := range agent.List() {
 		ns := string(name)
@@ -674,10 +739,10 @@ func availableReviewAgents(installed []types.AgentName, reviewerFor func(string)
 func printReviewConfigCatalog(out io.Writer, profileName string, catalog []reviewAgentCatalogEntry, s *settings.EntireSettings) {
 	fmt.Fprintln(out, "Available review agents:")
 	if len(catalog) == 0 {
-		fmt.Fprintln(out, "  (none; install one with `entire configure --agent claude-code`)")
+		fmt.Fprintln(out, "  (none; install one with `entire agent add claude-code`)")
 	}
 	for _, e := range catalog {
-		status := "not installed; run `entire configure --agent " + e.Name + "`"
+		status := "not installed; run `entire agent add " + e.Name + "`"
 		if e.Installed {
 			status = reviewHooksInstalledStatus
 		}
@@ -1129,11 +1194,10 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			running = map[string]settings.ReviewConfig{worker: cfg}
 		}
 	}
-	for _, worker := range sortedMapKeys(running) {
-		if running[worker].Config != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "%s: using your profile's agent config; this checkout's hooks, MCP servers and extensions are not loaded.\n", worker)
-			warnAgentConfig(ctx, cmd.ErrOrStderr(), worker, running[worker].Config)
-		}
+	if err := announceIsolatedReviewers(ctx, cmd.ErrOrStderr(), running, deps.ReviewerFor); err != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return silentErr(err)
 	}
 
 	outputMode := profileOutput(profile)
@@ -1152,14 +1216,14 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		return runSingleAgentPath(ctx, cmd, profileName, workerName, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
 	}
 
-	if missing := missingInstalledProfileAgents(profile.Agents, installed); len(missing) > 0 {
+	if missing := missingInstalledProfileAgents(profile.Agents, reviewerHooksReady(installed, deps.ReviewerFor)); len(missing) > 0 {
 		cmd.SilenceUsage = true
-		err := fmt.Errorf("hooks are not installed for review profile %q agent(s): %s; run `entire configure --agent <name>` first, or edit the profile", profileName, strings.Join(missing, ", "))
+		err := fmt.Errorf("hooks are not installed for review profile %q agent(s): %s; run `entire agent add <name>` first, or edit the profile", profileName, strings.Join(missing, ", "))
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return silentErr(err)
 	}
 
-	eligible := ComputeEligibleConfiguredForProfile(profile, installed)
+	eligible := ComputeEligibleConfiguredForProfile(profile, installed, deps.ReviewerFor)
 	switch len(eligible) {
 	case 0:
 		cmd.SilenceUsage = true
@@ -1193,18 +1257,13 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	}
 }
 
-func missingInstalledProfileAgents(configured map[string]settings.ReviewConfig, installed []types.AgentName) []string {
-	installedSet := make(map[string]struct{}, len(installed))
-	for _, name := range installed {
-		installedSet[string(name)] = struct{}{}
-	}
+func missingInstalledProfileAgents(configured map[string]settings.ReviewConfig, ready func(string, settings.ReviewConfig) bool) []string {
 	var missing []string
 	for name, cfg := range configured {
 		if cfg.IsZero() {
 			continue
 		}
-		agentName := reviewAgentName(name, cfg)
-		if _, ok := installedSet[agentName]; !ok {
+		if !ready(name, cfg) {
 			missing = append(missing, reviewWorkerLabel(name, cfg))
 		}
 	}
@@ -1267,18 +1326,12 @@ func runSingleAgentPath(
 	agentName := reviewAgentName(workerName, cfg)
 	displayName := reviewWorkerLabel(workerName, cfg)
 
-	// 3.5. Verify hooks are installed for the selected agent.
-	found := false
-	for _, n := range installed {
-		if string(n) == agentName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	// 3.5. Verify hooks are installed for the selected agent, unless it is an
+	// isolated reviewer that registers Entire's hooks itself.
+	if !reviewerHooksReady(installed, deps.ReviewerFor)(workerName, cfg) {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Hooks are not installed for %q. Run `entire configure --agent %s` first, "+
+			"Hooks are not installed for %q. Run `entire agent add %s` first, "+
 				"or remove %q from review settings.\n",
 			agentName, agentName, displayName)
 		return silentErr(fmt.Errorf("hooks not installed for %s", agentName))

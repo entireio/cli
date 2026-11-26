@@ -2,9 +2,7 @@ package codex
 
 import (
 	"context"
-	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -95,13 +93,8 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\.(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)')\]`)
 
 func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
-	file, err := os.Open(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
+	data, err := readUserCodexFile(configPath)
 	if err != nil {
-		return nil, false
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
-	if err != nil || len(data) > maxHooksFileBytes {
 		return nil, false
 	}
 	text := string(data)

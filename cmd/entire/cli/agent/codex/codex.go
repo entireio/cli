@@ -560,7 +560,14 @@ func (c *CodexAgent) GetSessionID(input *agent.HookInput) string {
 // package goes through here — session dirs, config.toml, the user-wide hook
 // root check — so a blank or relative value means one thing to all of them.
 func resolveCodexHome() (string, error) {
-	return agent.ResolveHome("CODEX_HOME", ".codex") //nolint:wrapcheck // the error already names the override and its value
+	dir, _, err := resolveCodexHomeWithOverride()
+	return dir, err
+}
+
+// resolveCodexHomeWithOverride is resolveCodexHome, also reporting whether
+// CODEX_HOME set it.
+func resolveCodexHomeWithOverride() (string, bool, error) {
+	return agent.ResolveHomeWithOverride("CODEX_HOME", ".codex") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Codex stores session transcripts.
