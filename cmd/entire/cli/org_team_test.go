@@ -40,6 +40,7 @@ type teamCore struct {
 	writeStatus int
 	writeType   string
 	writes      []string
+	noIdentity  bool // every handle lookup answers 404
 }
 
 func (f *teamCore) serve(t *testing.T) *httptest.Server {
@@ -108,6 +109,8 @@ func (f *teamCore) serve(t *testing.T) *httptest.Server {
 			return
 		}
 		switch {
+		case strings.Contains(path, "/identity/handles/") && f.noIdentity:
+			writeNotFoundProblem(t, w)
 		case strings.Contains(path, "/identity/handles/"):
 			seg := strings.Split(strings.Trim(path, "/"), "/")
 			handle := seg[len(seg)-1]
@@ -201,7 +204,7 @@ func TestOrgTeam_MapsCoreConflicts(t *testing.T) {
 	}{
 		{"create name in use", []string{"create", testOrgULID, "platform"}, problemTypeTeamNameInUse, "org " + testOrgULID + " already has a team named platform"},
 		{"rename name in use", []string{"rename", testOrgULID, "platform", "eng"}, problemTypeTeamNameInUse, "already has a team named eng"},
-		{"rename directory team", []string{"rename", testOrgULID, "eng", "core"}, problemTypeTeamDirectoryManaged, "managed by your directory"},
+		{"rename directory team", []string{"rename", testOrgULID, "eng", "core"}, problemTypeTeamDirectoryManaged, "team eng is managed by your directory"},
 		{"delete directory team", []string{"delete", testOrgULID, "eng", "--force"}, problemTypeTeamDirectoryManaged, "team eng is managed by your directory"},
 	}
 	for _, tc := range cases {
@@ -418,4 +421,76 @@ func TestOrgTeamMemberRemove_NoPromptWithoutATerminal(t *testing.T) {
 	_, _, err := runOrgCmd(t, srv, "team", "member", "remove", testOrgULID, "platform", "github:alice")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"DELETE /api/v1/orgs/" + testOrgULID + "/teams/" + teamPlatformULID + "/members/acct-alice"}, f.writes)
+}
+
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgTeamMember_UnknownHandle(t *testing.T) {
+	f := newTeamCore()
+	f.noIdentity = true
+	srv := f.serve(t)
+
+	_, _, err := runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform", "github:ghost")
+	require.ErrorContains(t, err, `no identity for handle "github:ghost"`)
+	_, _, err = runOrgCmd(t, srv, "team", "member", "remove", testOrgULID, "platform", "github:ghost", "--yes")
+	require.ErrorContains(t, err, `no identity for handle "github:ghost"`)
+	assert.Empty(t, f.writes)
+}
+
+// Each empty pool says why, as the grant picker's empty states do.
+//
+// Not parallel: swaps the activeCoreClient and teamMemberPicker seams.
+func TestOrgTeamMemberAdd_EmptyPoolSaysWhy(t *testing.T) {
+	cases := []struct {
+		name    string
+		members []coreapi.OrgMemberListItem
+		onTeam  []coreapi.TeamMember
+		want    string
+	}{
+		{"no org members", nil, nil, "org " + testOrgULID + " has no members to choose from"},
+		{"none addressable", []coreapi.OrgMemberListItem{inactive("github:carol", "01HZX7QABCDEFGHJKMNPQRSTC3")}, nil,
+			"no member of org " + testOrgULID + " can be added to team platform: none is active with a handle"},
+		{"everyone on the team", []coreapi.OrgMemberListItem{member("github:alice", acctAlice.id)}, []coreapi.TeamMember{{AccountID: acctAlice.id, Status: "active"}},
+			"every active member of org " + testOrgULID + " is already on team platform"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ENTIRE_TEST_TTY", "1")
+			f := newTeamCore()
+			f.orgMembers, f.teamMembers = tc.members, tc.onTeam
+			srv := f.serve(t)
+			prev := teamMemberPicker
+			teamMemberPicker = func(*cobra.Command, grantPickerTarget, []grantCandidate) ([]grantCandidate, error) {
+				t.Error("an empty pool must not open the picker")
+				return nil, nil
+			}
+			t.Cleanup(func() { teamMemberPicker = prev })
+
+			out, _, err := runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform")
+			require.NoError(t, err)
+			assert.Contains(t, out, tc.want)
+			assert.Empty(t, f.writes)
+		})
+	}
+}
+
+// A directory-managed team refuses every add, so a picker run stops at the
+// first refusal and reports it once.
+//
+// Not parallel: swaps the activeCoreClient and teamMemberPicker seams.
+func TestOrgTeamMemberAdd_DirectoryManagedStopsTheBatch(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	f := newTeamCore()
+	f.orgMembers = []coreapi.OrgMemberListItem{member("github:alice", acctAlice.id), member("github:bob", acctBob.id)}
+	f.writeStatus, f.writeType = http.StatusConflict, problemTypeTeamDirectoryManaged
+	srv := f.serve(t)
+	prev := teamMemberPicker
+	teamMemberPicker = func(_ *cobra.Command, _ grantPickerTarget, candidates []grantCandidate) ([]grantCandidate, error) {
+		return candidates, nil
+	}
+	t.Cleanup(func() { teamMemberPicker = prev })
+
+	_, errOut, err := runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform")
+	require.EqualError(t, err, "team platform is managed by your directory; change its members in your identity provider")
+	assert.Len(t, f.writes, 1, "the batch stops at the first directory refusal")
+	assert.NotContains(t, errOut, "✗", "the team-level refusal is reported once, as the error")
 }

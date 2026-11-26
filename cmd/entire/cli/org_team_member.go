@@ -112,7 +112,7 @@ func newTeamMemberAddCmd() *cobra.Command {
 				}
 				var picked []grantCandidate
 				if user != "" {
-					accountID, err := resolveHandleAccount(ctx, c, user)
+					accountID, err := memberAccount(ctx, c, user)
 					if err != nil {
 						return err
 					}
@@ -136,23 +136,14 @@ func ensureMemberIsHandle(user string) error {
 	return ensureGranteeIsHandle(user)
 }
 
-// resolveHandleAccount resolves a provider-qualified handle to its account ULID.
-func resolveHandleAccount(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
-	provider, handle, err := parseGranteeHandle(ref)
-	if err != nil {
-		return "", err
+// memberAccount resolves a typed member, already checked as a handle, to its
+// account ULID.
+func memberAccount(ctx context.Context, c *coreapi.Client, user string) (string, error) {
+	id, err := resolveAccountRef(ctx, c, user)
+	if isCoreNotFound(err) {
+		return "", fmt.Errorf("no identity for handle %q", user)
 	}
-	id, err := c.ResolveHandle(ctx, coreapi.ResolveHandleParams{Provider: provider, Handle: handle})
-	if err != nil {
-		if isCoreNotFound(err) {
-			return "", fmt.Errorf("no %s identity for handle %q", provider, identityFor(provider).displayHandle(handle))
-		}
-		return "", err
-	}
-	if id.AccountId == "" {
-		return "", fmt.Errorf("handle %q resolved to no account", ref)
-	}
-	return id.AccountId, nil
+	return id, err
 }
 
 // teamMemberPicker is the seam the add picker sits behind, as grantPicker is.
@@ -163,11 +154,30 @@ var teamMemberPicker = func(cmd *cobra.Command, pt grantPickerTarget, candidates
 // pickTeamMembers offers the org's active members who are not on the team.
 // An empty pool reports why and adds nobody.
 func pickTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, orgRef, orgID string, team coreapi.Team) ([]grantCandidate, error) {
-	pt := grantPickerTarget{noun: cmdTeam, ref: team.Name}
-	// Unbounded: the team's members are the filter.
-	onTeam, err := pagedList(ctx, listTeamMembers(c, orgID, team.ID))
+	pool, err := teamMemberPool(ctx, c, orgID, team.ID)
 	if err != nil {
 		return nil, err
+	}
+	if len(pool.candidates) == 0 {
+		if pool.window.partial {
+			return nil, fmt.Errorf("none of the first %d members of org %s can be added, and it has more; pass a user as provider:handle", pool.window.scanned, orgRef)
+		}
+		reportNothingToAdd(cmd, emptyTeamPoolReason(pool, orgRef, team.Name))
+		return nil, nil
+	}
+	pt := grantPickerTarget{noun: cmdTeam, ref: team.Name}
+	if pool.window.partial {
+		pt.poolNote = partialPoolNote(pool.window, "members of org "+orgRef)
+	}
+	return teamMemberPicker(cmd, pt, pool.candidates)
+}
+
+// teamMemberPool is the org's addressable members who are not on the team.
+func teamMemberPool(ctx context.Context, c *coreapi.Client, orgID, teamID string) (memberPool, error) {
+	// Unbounded: the team's members are the filter.
+	onTeam, err := pagedList(ctx, listTeamMembers(c, orgID, teamID))
+	if err != nil {
+		return memberPool{}, err
 	}
 	held := make(map[string]bool, len(onTeam))
 	for _, m := range onTeam {
@@ -175,30 +185,36 @@ func pickTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client,
 	}
 	members, partial, err := boundedList(ctx, coreListFetchBudget, listOrgMembers(c, orgID))
 	if err != nil {
-		return nil, err
+		return memberPool{}, err
 	}
-	var candidates []grantCandidate
+	pool := memberPool{window: listWindow{scanned: len(members), partial: partial}}
 	for _, m := range members {
 		handle, ok := grantableMember(m)
-		if !ok || held[m.AccountId] {
+		if !ok {
+			continue
+		}
+		pool.addressable++
+		if held[m.AccountId] {
 			continue
 		}
 		cand := memberCandidate(handle, m)
 		cand.ref, cand.byID = m.AccountId, true
-		candidates = append(candidates, cand)
+		pool.candidates = append(pool.candidates, cand)
 	}
-	window := listWindow{scanned: len(members), partial: partial}
-	if len(candidates) == 0 {
-		if window.partial {
-			return nil, fmt.Errorf("none of the first %d members of org %s can be added, and it has more; pass a user as provider:handle", window.scanned, orgRef)
-		}
-		reportNothingToAdd(cmd, fmt.Sprintf("every active member of org %s is already on team %s", orgRef, team.Name))
-		return nil, nil
+	return pool, nil
+}
+
+// emptyTeamPoolReason says why a complete pool is empty, as the grant
+// picker's empty states do.
+func emptyTeamPoolReason(pool memberPool, orgRef, team string) string {
+	switch {
+	case pool.window.scanned == 0:
+		return fmt.Sprintf("org %s has no members to choose from", orgRef)
+	case pool.addressable == 0:
+		return fmt.Sprintf("no member of org %s can be added to team %s: none is active with a handle", orgRef, team)
+	default:
+		return fmt.Sprintf("every active member of org %s is already on team %s", orgRef, team)
 	}
-	if window.partial {
-		pt.poolNote = partialPoolNote(window, "members of org "+orgRef)
-	}
-	return teamMemberPicker(cmd, pt, candidates)
 }
 
 // addTeamMembers adds each picked account. A picker run moves past a refusal
@@ -206,15 +222,17 @@ func pickTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client,
 func addTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, orgRef, orgID string, team coreapi.Team, picked []grantCandidate, single bool) error {
 	added := make([]teamMemberChange, 0, len(picked))
 	failed := 0
+	var teamRefusal error
 	for _, p := range picked {
 		err := c.AddTeamMember(ctx, coreapi.AddTeamMemberParams{OrgId: orgID, TeamID: team.ID, AccountID: p.ref})
 		if err != nil {
-			fatal := grantFailureIsFatal(err)
-			err = teamMemberErr(err, orgRef, team.Name, p.label)
-			if single {
-				return err
+			// A directory-managed team refuses every add, so it ends the batch.
+			if single || coreapi.APIErrorType(err) == problemTypeTeamDirectoryManaged {
+				teamRefusal = teamMemberErr(err, orgRef, team.Name, p.label)
+				break
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s was not added to team %s: %v\n", p.label, team.Name, renderCoreError(err))
+			fatal := grantFailureIsFatal(err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s was not added to team %s: %v\n", p.label, team.Name, renderCoreError(teamMemberErr(err, orgRef, team.Name, p.label)))
 			failed++
 			if fatal {
 				break
@@ -226,21 +244,31 @@ func addTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, 
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ Added %s to team %s\n", p.label, team.Name)
 		}
 	}
-	if jsonRequested(cmd) {
-		var err error
-		if single {
-			err = printJSON(cmd.OutOrStdout(), added[0])
-		} else {
-			err = printJSON(cmd.OutOrStdout(), added)
-		}
-		if err != nil {
-			return err
-		}
+	if err := emitTeamMemberJSON(cmd, added, single); err != nil {
+		return err
+	}
+	if teamRefusal != nil {
+		return teamRefusal
 	}
 	if failed > 0 {
 		return NewSilentError(fmt.Errorf("%d of %d users were not added to team %s", len(picked)-len(added), len(picked), team.Name))
 	}
 	return nil
+}
+
+// emitTeamMemberJSON prints the added members under --json: one object for a
+// typed user, an array for a picker run.
+func emitTeamMemberJSON(cmd *cobra.Command, added []teamMemberChange, single bool) error {
+	if !jsonRequested(cmd) {
+		return nil
+	}
+	if single {
+		if len(added) == 0 {
+			return nil
+		}
+		return printJSON(cmd.OutOrStdout(), added[0])
+	}
+	return printJSON(cmd.OutOrStdout(), added)
 }
 
 // teamMemberErr turns Core's member refusals into what to do next.
@@ -278,7 +306,7 @@ func newTeamMemberRemoveCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				accountID, err := resolveHandleAccount(ctx, c, user)
+				accountID, err := memberAccount(ctx, c, user)
 				if err != nil {
 					return err
 				}

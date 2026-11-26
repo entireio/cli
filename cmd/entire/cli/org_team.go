@@ -80,7 +80,7 @@ func newOrgTeamCreateCmd() *cobra.Command {
 				}
 				team, err := c.CreateTeam(ctx, &coreapi.CreateTeamInputBody{Name: name}, coreapi.CreateTeamParams{OrgId: orgID})
 				if err != nil {
-					return "", nil, teamErr(err, orgRef, name)
+					return "", nil, teamErr(err, orgRef, name, name)
 				}
 				return fmt.Sprintf("✓ Created team %s in org %s", team.Name, orgRef), team, nil
 			})
@@ -107,7 +107,7 @@ func newOrgTeamRenameCmd() *cobra.Command {
 				body := &coreapi.UpdateTeamInputBody{Name: coreapi.NewOptString(newName)}
 				renamed, err := c.UpdateTeam(ctx, body, coreapi.UpdateTeamParams{OrgId: orgID, TeamID: team.ID})
 				if err != nil {
-					return "", nil, teamErr(err, orgRef, newName)
+					return "", nil, teamErr(err, orgRef, team.Name, newName)
 				}
 				return fmt.Sprintf("✓ Renamed team %s to %s in org %s", team.Name, renamed.Name, orgRef), renamed, nil
 			})
@@ -134,7 +134,7 @@ func newOrgTeamDeleteCmd() *cobra.Command {
 					return resolvedRef{ID: team.ID, Name: team.Name}, err
 				},
 				func(ctx context.Context, c *coreapi.Client, teamID string) error {
-					return teamErr(c.DeleteTeam(ctx, coreapi.DeleteTeamParams{OrgId: orgID, TeamID: teamID}), orgRef, name)
+					return teamErr(c.DeleteTeam(ctx, coreapi.DeleteTeamParams{OrgId: orgID, TeamID: teamID}), orgRef, name, name)
 				})
 		},
 	}
@@ -183,17 +183,17 @@ func resolveOrgTeam(ctx context.Context, c *coreapi.Client, orgRef, name string)
 	return orgID, team, nil
 }
 
-// teamErr turns Core's team refusals into what to do next. name is the team
-// the request named.
-func teamErr(err error, orgRef, name string) error {
+// teamErr turns Core's team refusals into what to do next. team is the
+// existing team; wantName is the name the request asked for.
+func teamErr(err error, orgRef, team, wantName string) error {
 	if err == nil {
 		return nil
 	}
 	switch coreapi.APIErrorType(err) {
 	case problemTypeTeamNameInUse:
-		return fmt.Errorf("org %s already has a team named %s", orgRef, name)
+		return fmt.Errorf("org %s already has a team named %s", orgRef, wantName)
 	case problemTypeTeamDirectoryManaged:
-		return fmt.Errorf("team %s is managed by your directory; change it in your identity provider", name)
+		return fmt.Errorf("team %s is managed by your directory; change it in your identity provider", team)
 	}
 	return err
 }
