@@ -59,6 +59,10 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 
 With the stream plugin installed, each turn's context names teammates' live sessions in the repo, but names files only where a session overlaps files this checkout has already changed: entire-api returns a session's edited files only for a list filtered by paths. For any other file the agent is told to run `entire stream list --live --touching -- <file>` before editing it. A list that returned each session's edited files without a filter would let the context name them directly (see [External commands](architecture/external-commands.md#teammates-live-sessions-in-the-turn-start-context)).
 
+### OpenCode 1: a Cold Live Sessions Cache Reaches Only the Second Turn
+
+Entire refreshes the live sessions cache at session start so the first turn can name teammates' live sessions. OpenCode 1 doesn't wait for the plugin's session-start before the first turn, and holding turn-start for it would let OpenCode build the first model call, and `opencode run` end the turn, before turn-start ran. So on OpenCode 1, when the cache was cold, the first turn gets Entire's usual context without the live sessions block, which arrives from the second turn. OpenCode 2 runs session-start before turn-start and is not affected.
+
 ## Upgrades and Downgrades
 
 ### Downgrading Discards Pending Agent Work

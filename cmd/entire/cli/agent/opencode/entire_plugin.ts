@@ -137,22 +137,6 @@ const EntirePlugin: Plugin = async ({ directory }) => {
   // them mid-run. Cancelling a job does not cancel a joined run already
   // executing, so the child's own idle, not the abort, is when it ends.
   const drainAtIdle = new Set<string>()
-  // Session -> its session-start still running. OpenCode does not wait for
-  // one event's handler before delivering the next, so a session's first
-  // message can arrive while session.created's handler runs session-start;
-  // its turn-start waits for it (at most sessionStartWaitMs), since
-  // session-start readies what the first turn injects.
-  const sessionStarts = new Map<string, Promise<void>>()
-  const sessionStartWaitMs = 10000
-
-  // sessionStarted waits for sessionID's session-start, if one is running.
-  async function sessionStarted(sessionID: string) {
-    const starting = sessionStarts.get(sessionID)
-    if (!starting) return
-    let timer: ReturnType<typeof setTimeout> | undefined
-    await Promise.race([starting, new Promise<void>((r) => { timer = setTimeout(r, sessionStartWaitMs) })])
-    clearTimeout(timer)
-  }
 
   /**
    * Pipe JSON payload to an entire hooks command (async).
@@ -485,12 +469,9 @@ const EntirePlugin: Plugin = async ({ directory }) => {
             if (!session?.id) break
             // Reset per-session tracking state when switching sessions.
             if (resetSessionTracking(session.id)) {
-              const started = callHook("session-start", {
+              await callHook("session-start", {
                 session_id: session.id,
               })
-              sessionStarts.set(session.id, started)
-              await started
-              sessionStarts.delete(session.id)
             }
             break
           }
@@ -519,7 +500,6 @@ const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
-                await sessionStarted(sessionID)
                 fireTurnStart({
                   session_id: sessionID,
                   prompt: "",
@@ -540,7 +520,6 @@ const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
-                await sessionStarted(sessionID)
                 // A synthetic part is OpenCode writing, not the user: a
                 // background task's result arrives this way. The parent does
                 // take a turn on it, so the turn still starts, with no prompt.
