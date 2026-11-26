@@ -759,8 +759,9 @@ func repoGrantRow(g coreapi.RepoGrant) []string {
 	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
-// grantRoleOrder ranks grant roles weakest first; an unknown role ranks below all.
-var grantRoleOrder = []string{leastAccessRole, "writer", roleAdmin, roleOwner}
+// grantRoleOrder ranks grant roles weakest first; the owning org's row outranks
+// them all and an unknown role ranks below all.
+var grantRoleOrder = append(slices.Clone(accessRoles), roleOwner)
 
 // effectiveGrants folds a listing to one row per grantee, in first-seen order.
 // The kept row is the grantee's strongest source, so ROLE is the effective role.
@@ -838,9 +839,8 @@ const granteeTypeAccount = "account"
 
 // accessRoles are the project and repo grant roles; the two targets share the
 // set because the server's SpiceDB relations are the same for both. They are
-// listed least-privileged first, which leastAccessRole names so nothing has to
-// rely on that order holding.
-var accessRoles = []string{"reader", "writer", "admin"}
+// listed least-privileged first: grantRoleOrder ranks roles by this order.
+var accessRoles = []string{leastAccessRole, "writer", roleAdmin}
 
 const leastAccessRole = "reader"
 
