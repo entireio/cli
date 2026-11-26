@@ -1730,9 +1730,12 @@ func executeLegacyTrailTest(t *testing.T, args ...string) (stdout, stderr string
 	return out.String(), errOut.String(), err
 }
 
-// Not parallel: swaps the package-level webOpenURL and newTrailAPIClient seams.
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
+// webOpenURL and newTrailAPIClient seams.
 func TestTrailShow_Web(t *testing.T) {
 	const page = "https://entire.io/gh/acme/repo/trails/7"
+	// openInWeb only opens pages on the web origin; match the fixture's URLs.
+	t.Setenv(api.WebBaseURLEnvVar, "https://entire.io")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the list the branch selector resolves through; --web must not
 		// go on to read the trail detail.
@@ -1743,7 +1746,9 @@ func TestTrailShow_Web(t *testing.T) {
 		}
 		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 			ID: "trl_1", Number: 7, URL: page, Branch: "feature/x", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
-		}}, Total: 1}); err != nil {
+		}, {
+			ID: "trl_2", Number: 8, URL: "https://evil.example/gh/acme/repo/trails/8", Branch: "feature/foreign", Base: "main", Title: "Foreign", Status: string(trail.StatusOpen),
+		}}, Total: 2}); err != nil {
 			t.Errorf("encode list response: %v", err)
 		}
 	}))
@@ -1761,6 +1766,14 @@ func TestTrailShow_Web(t *testing.T) {
 		require.Equal(t, page+"\n", stdout)
 		require.Empty(t, stderr)
 		require.Equal(t, []string{page}, *opened)
+	})
+
+	t.Run("a server URL on a foreign host is refused", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, "show", "feature/foreign", "--repo", "gh/acme/repo", "--web")
+		require.ErrorContains(t, err, "not on the Entire web app origin https://entire.io")
+		require.Empty(t, stdout)
+		require.Empty(t, *opened)
 	})
 
 	t.Run("json is refused", func(t *testing.T) {

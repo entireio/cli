@@ -261,7 +261,9 @@ func TestTrailFindingShow_Web(t *testing.T) {
 
 	t.Run("opens the trail page", func(t *testing.T) {
 		// The fixture's trail carries no server URL, so this is the page
-		// trailReviewWebURL builds from the change's number and branch.
+		// trailReviewWebURL builds from the change's number and branch. The
+		// branch is interpolated unescaped, so its "/" stays a path separator
+		// and the URL still passes openInWeb's validation.
 		const page = "https://web.example/gh/acme/widget/trails/7/feature/work"
 		opened := stubWebOpenURL(t, nil)
 		out, errOut, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme", "--web")

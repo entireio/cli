@@ -111,9 +111,12 @@ func TestTrailCommentDiscussionHelp(t *testing.T) {
 	}
 }
 
-// Not parallel: swaps the package-level webOpenURL and newTrailAPIClient seams.
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
+// webOpenURL and newTrailAPIClient seams.
 func TestTrailCommentShow_Web(t *testing.T) {
 	const page = "https://entire.io/gh/acme/widget/trails/7"
+	// openInWeb only opens pages on the web origin; match the fixture's URL.
+	t.Setenv(api.WebBaseURLEnvVar, "https://entire.io")
 	discussions := 0
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
