@@ -631,7 +631,8 @@ session's log stays in its home: the other repository gets only a marker.
   not write, and any repository that is disabled (`enabled: false` committed,
   or `entire disable` there).
 - **What the other repository stores.** Its checkpoint ref gets a marker
-  checkpoint: the commit SHA (also in its `linked_commits`), the repository,
+  checkpoint: the commit SHA (also in its `linked_commits` when the commit
+  has no trailer, i.e. a recorded link), the repository,
   the session ID and its Entire session ID (`<agent>:<session id>`, in
   `cross_repo.session_ids`), the home session's turn ID, the agent and the home
   repository (each its normalized origin, else its directory name; never a
@@ -646,8 +647,10 @@ session's log stays in its home: the other repository gets only a marker.
   also fold the file into the session state's `checkpoint_links`, the
   session's never-cleared list of every checkpoint it recorded, home and
   marker, with each one's commits, repository and turn; `entire status --json`
-  and `entire checkpoint explain --json` show it. Only the home's own hooks
-  write that state. If the home never commits again, the file still holds the
+  shows it (with links journaled since the last fold). It is local session
+  state, so `entire checkpoint explain --json` does not include it. A home
+  checkpoint records the commit it was written for as `written_for_commit`,
+  not as a link. Only the home's own hooks write that state. If the home never commits again, the file still holds the
   links.
 - **Commits made without the hooks.** At turn end, at subagent end, and at the
   start of a resumed session whose last turn never ended, Entire records a link

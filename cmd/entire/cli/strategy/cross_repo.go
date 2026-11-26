@@ -326,8 +326,10 @@ const (
 
 // writeCrossRepoMarker stores, on this repository's checkpoint ref, a marker
 // checkpoint saying the home session made commit sha here: no transcript,
-// prompts or tokens, which stay with the session's home. It names the commit
-// in LinkedCommits and the home session's turn, as a home checkpoint does.
+// prompts or tokens, which stay with the session's home. It names the home
+// session's turn, as a home checkpoint does; CrossRepo.CommitSHA names the
+// commit. A recorded link (the sweep, whose commit has no trailer) also names
+// it in LinkedCommits, as attach does.
 // The link is then appended to the home's journal, the handoff the home's
 // own hooks fold into the session's CheckpointLinks (foldCrossRepoLinks):
 // this repository never writes the home's session state.
@@ -348,8 +350,11 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 		CheckpointID: cpID, SessionID: home.state.SessionID, Strategy: StrategyNameManualCommit,
 		Branch: GetCurrentBranchName(repo), FilesTouched: committedFilesExcludingMetadata(committed),
 		Agent: home.state.AgentType, AuthorName: authorName, AuthorEmail: authorEmail,
-		TurnID: home.state.TurnID, LinkedCommits: []cpkg.LinkedCommit{{SHA: sha}},
+		TurnID:    home.state.TurnID,
 		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey, SessionIDs: []string{home.state.EntireSessionID()}},
+	}
+	if linkedBy == linkedBySweep {
+		opts.LinkedCommits = []cpkg.LinkedCommit{{SHA: sha}}
 	}
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)

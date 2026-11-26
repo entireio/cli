@@ -536,6 +536,10 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 	}
 
 	status := sessionPhaseLabel(state)
+	// A display copy: links journaled since the session last folded count too.
+	view := *state
+	view.CheckpointLinks = strategy.CheckpointLinksWithPending(ctx, state)
+	state = &view
 
 	switch mode {
 	case sessionOutputTranscript:

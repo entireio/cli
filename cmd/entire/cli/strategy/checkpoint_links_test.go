@@ -64,3 +64,23 @@ func TestClearDeletedCheckpointFromState_DropsTheLink(t *testing.T) {
 	assert.Len(t, st.CheckpointLinks, 1)
 	assert.False(t, clearDeletedCheckpointFromState(st, "000000000009"))
 }
+
+// A link journaled after the session's last fold (a detached link-session
+// child, a subagent-end sweep) shows in the display list without the state
+// changing: only the session's own hooks write it.
+func TestCheckpointLinksWithPending_IncludesLinksAfterTheLastFold(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	state := &SessionState{SessionID: "s1"}
+	state.AddCheckpointLink(session.CheckpointLink{CheckpointID: "000000000001", Kind: session.CheckpointLinkHome, LinkedCommits: []string{"c1sha"}})
+	home := &crossRepoHome{state: state, commonDir: filepath.Join(dir, ".git")}
+	require.NoError(t, appendCrossRepoLink(home, cpkg.LinkedRepoCommit{
+		RepoKey: "gh/o/d", SHA: "d1sha", CheckpointID: "0000000000d1", LinkedBy: linkedBySweep, At: time.Now().UTC(),
+	}))
+
+	got := CheckpointLinksWithPending(context.Background(), state)
+	require.Len(t, got, 2)
+	assert.Equal(t, id.CheckpointID("0000000000d1"), got[1].CheckpointID)
+	assert.Len(t, state.CheckpointLinks, 1, "the state itself must not change")
+}

@@ -653,10 +653,6 @@ func TestCrossRepo_SweepLinksLinkedWorktreeCommit(t *testing.T) {
 	assertRecordedLink(t, d, sess.ID, sha)
 }
 
-// The session's state in C lists every checkpoint it recorded, in order and
-// with their commits, across D, a worktree of D and C itself, and keeps them
-// across turn end and a new prompt: a home commit in the same turn as D's
-// folds D's links first, and a turn with no home commit folds them at its end.
 // waitNextSecond sleeps into the next wall-clock second, so the next commit's
 // committer time (whole seconds) is later than the previous one's.
 func waitNextSecond() {
@@ -704,6 +700,10 @@ func TestCrossRepo_SessionStateListsSweptCommitsInCommitOrder(t *testing.T) {
 	}
 }
 
+// The session's state in C lists every checkpoint it recorded, in order and
+// with their commits, across D, a worktree of D and C itself, and keeps them
+// across turn end and a new prompt: a home commit in the same turn as D's
+// folds D's links first, and a turn with no home commit folds them at its end.
 func TestCrossRepo_SessionStateListsEveryCheckpoint(t *testing.T) {
 	t.Parallel()
 	x := newCrossRepo(t, 1)
@@ -752,20 +752,24 @@ func TestCrossRepo_SessionStateListsEveryCheckpoint(t *testing.T) {
 	}
 
 	marker := readSessionMetadata(t, d, want[0].cpID)
-	if !slices.Contains(marker.CrossRepo.SessionIDs, state.EntireSessionID()) || marker.TurnID == "" ||
-		!slices.ContainsFunc(checkpointFor(t, d, want[0].cpID).LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == inD }) {
-		t.Errorf("marker lacks its link fields: session_ids %v turn %q", marker.CrossRepo.SessionIDs, marker.TurnID)
+	if !slices.Contains(marker.CrossRepo.SessionIDs, state.EntireSessionID()) || marker.TurnID == "" || marker.CrossRepo.CommitSHA != inD {
+		t.Errorf("marker lacks its link fields: session_ids %v turn %q commit %q", marker.CrossRepo.SessionIDs, marker.TurnID, marker.CrossRepo.CommitSHA)
 	}
+	// The home commit carries the trailer: it is recorded as the commit the
+	// write was for, never as a trailer-less link.
 	homeMeta := readSessionMetadata(t, x.c, want[2].cpID)
-	if homeMeta.TurnID == "" || !slices.ContainsFunc(checkpointFor(t, x.c, want[2].cpID).LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == home }) {
-		t.Errorf("home checkpoint lacks its link fields: turn %q", homeMeta.TurnID)
+	if homeMeta.TurnID == "" || homeMeta.CommitSHAAtWrite != home ||
+		slices.ContainsFunc(checkpointFor(t, x.c, want[2].cpID).LinkedCommits, func(l checkpoint.LinkedCommit) bool { return l.SHA == home }) {
+		t.Errorf("home checkpoint link fields: turn %q written_for_commit %q, want %s and no linked_commits entry", homeMeta.TurnID, homeMeta.CommitSHAAtWrite, home)
 	}
 
 	out := x.c.RunCLI("status", "--json")
 	if !strings.Contains(out, `"entire_session_id":"`+state.EntireSessionID()+`"`) || !strings.Contains(out, want[3].cpID) {
 		t.Errorf("status --json lacks the session's identity or checkpoints:\n%s", out)
 	}
-	if out := x.c.RunCLI("checkpoint", "explain", want[2].cpID, "--json"); !strings.Contains(out, `"session_checkpoints"`) || !strings.Contains(out, want[0].cpID) {
-		t.Errorf("checkpoint explain --json lacks the session's checkpoints:\n%s", out)
+	// Checkpoint export describes checkpoint metadata only, the same on every
+	// clone: the session's local checkpoint list is not part of it.
+	if out := x.c.RunCLI("checkpoint", "explain", want[2].cpID, "--json"); strings.Contains(out, `"session_checkpoints"`) || !strings.Contains(out, `"written_for_commit": "`+home+`"`) {
+		t.Errorf("checkpoint explain --json: want written_for_commit and no session_checkpoints:\n%s", out)
 	}
 }

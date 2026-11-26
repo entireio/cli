@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -29,6 +30,21 @@ func foldCrossRepoLinks(ctx context.Context, state *SessionState) {
 			CommittedAt:   link.CommittedAt,
 		})
 	}
+}
+
+// CheckpointLinksWithPending returns state's CheckpointLinks with the links
+// other repositories journaled since the session last folded (a detached
+// link-session child or a subagent-end sweep can finish after the home's
+// last turn end), for display. It never changes state: only the session's
+// own hooks write it.
+func CheckpointLinksWithPending(ctx context.Context, state *SessionState) []session.CheckpointLink {
+	view := &SessionState{SessionID: state.SessionID, CheckpointLinks: make([]session.CheckpointLink, len(state.CheckpointLinks))}
+	for i, link := range state.CheckpointLinks {
+		link.LinkedCommits = slices.Clone(link.LinkedCommits)
+		view.CheckpointLinks[i] = link
+	}
+	foldCrossRepoLinks(ctx, view)
+	return view.CheckpointLinks
 }
 
 // recordHomeCheckpointLink folds pending cross-repository links, then adds

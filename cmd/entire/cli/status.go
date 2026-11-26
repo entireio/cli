@@ -1462,7 +1462,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 						Status:          sessionStatusLabel(st),
 						CaptureDegraded: st.CaptureDegradedAt != nil,
 						EntireSessionID: st.EntireSessionID(),
-						Checkpoints:     st.CheckpointLinks,
+						Checkpoints:     strategy.CheckpointLinksWithPending(ctx, st),
 					})
 				}
 				// Agent first so the listing stays grouped and readable;
