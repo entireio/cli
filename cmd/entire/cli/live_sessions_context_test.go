@@ -1243,3 +1243,33 @@ func TestLiveSessionsRefresh_RunsOneOnPath(t *testing.T) { //nolint:paralleltest
 	require.Equal(t, filepath.Join(dir, pluginBinaryPrefix+liveSessionsPluginName), bin)
 	require.True(t, refreshLiveSessionsWithin(context.Background(), liveTestBudget))
 }
+
+// A session starting while another session's SessionStart refresh is still
+// running waits for that refresh's cache (within its own budget) instead of
+// starting its first turn without one.
+func TestHandleLifecycleSessionStart_WaitsForARefreshInFlight(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	setupLiveSessionsRepo(t)
+	record := filepath.Join(t.TempDir(), "calls.txt")
+	// The live list takes 2 s; the overlap query answers at once.
+	installFakeStreamPlugin(t, "if [ \"$3\" != --touching ]; then sleep 2; fi\n"+liveFakeScript(record, liveFakeTouchingAnswer))
+	countLiveSessionsSpawns(t)
+	stubTrailRefreshSpawn(t)
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- handleLifecycleSessionStart(context.Background(), newMockContextInjectorAgent(),
+			&agent.Event{Type: agent.SessionStart, SessionID: "test-live-first", Timestamp: time.Now()})
+	}()
+	time.Sleep(time.Second)
+	runLiveSessionStart(t, newMockContextInjectorAgent(), "test-live-second")
+	_, ok := loadLiveSessionsCache(context.Background())
+	require.True(t, ok, "the second start returned before the first's refresh saved its cache")
+	require.NoError(t, <-firstErr)
+
+	for _, id := range []string{"test-live-first", "test-live-second"} {
+		ag := newMockContextInjectorAgent()
+		runContextInjectionTurn(t, ag, id)
+		require.Len(t, *ag.injected, 1)
+		require.Contains(t, (*ag.injected)[0], "`sleepercell`", "%s's first turn", id)
+	}
+}

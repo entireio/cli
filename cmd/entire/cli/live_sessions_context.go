@@ -282,7 +282,13 @@ func refreshLiveSessionsAtSessionStart(ctx context.Context, ag agent.Agent) {
 		return
 	}
 	commonDir, worktreeRoot, err := liveSessionsLocation(ctx)
-	if err != nil || !claimSpawnMarker(commonDir, liveSessionsSpawnMarker(worktreeRoot), liveSessionsSpawnThrottle, now) {
+	if err != nil {
+		return
+	}
+	if !claimSpawnMarker(commonDir, liveSessionsSpawnMarker(worktreeRoot), liveSessionsSpawnThrottle, now) {
+		// Another session's refresh has the window. While it is still
+		// running, wait for its cache, within this start's own budget.
+		awaitLiveSessionsRefresh(ctx, commonDir, worktreeRoot, now.Add(liveSessionsSessionStartBudget))
 		return
 	}
 	if !liveSessionsSyncRefresh(ctx, liveSessionsSessionStartBudget) {
@@ -290,6 +296,65 @@ func refreshLiveSessionsAtSessionStart(ctx context.Context, ag agent.Agent) {
 		// refresh has the full budget, rather than leave TurnStart unable to
 		// spawn one for the rest of the window.
 		liveSessionsRefreshSpawn(worktreeRoot)
+	}
+}
+
+// liveSessionsRefreshingPrefix names a worktree's in-flight marker under
+// spawnMarkerDirName: a refresh is running, until the time it holds.
+const liveSessionsRefreshingPrefix = "live-sessions-refreshing-"
+
+// markLiveSessionsRefreshing records that worktreeRoot's refresh runs until
+// at most deadline, and returns the function that clears the record.
+// Best-effort: without it a starting session just doesn't wait.
+func markLiveSessionsRefreshing(commonDir, worktreeRoot string, deadline time.Time) func() {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return func() {}
+	}
+	name := spawnMarkerDirName + "/" + liveSessionsRefreshingPrefix + liveSessionsWorktreeKey(worktreeRoot)
+	if osroot.MkdirAllNoSymlink(root, spawnMarkerDirName, 0o750) != nil ||
+		jsonutil.WriteFileAtomicIn(root, name, []byte(deadline.UTC().Format(time.RFC3339Nano)), 0o600) != nil {
+		return func() {}
+	}
+	return func() { _ = osroot.RemoveNoSymlinks(root, name) } //nolint:errcheck // best effort; it expires anyway
+}
+
+// liveSessionsRefreshRunning reports whether worktreeRoot's in-flight marker
+// says a refresh is running at now.
+func liveSessionsRefreshRunning(commonDir, worktreeRoot string, now time.Time) bool {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return false
+	}
+	data, err := osroot.ReadFileNoFollow(root, spawnMarkerDirName+"/"+liveSessionsRefreshingPrefix+liveSessionsWorktreeKey(worktreeRoot))
+	if err != nil {
+		return false
+	}
+	until, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	return err == nil && now.Before(until)
+}
+
+// liveSessionsAwaitPoll is how often a starting session looks for the cache
+// another session's refresh is writing.
+const liveSessionsAwaitPoll = 100 * time.Millisecond
+
+// awaitLiveSessionsRefresh waits, until deadline, for a refresh another
+// session is running to leave a cache fresh enough for a first turn: local
+// reads only, and only while that refresh runs.
+func awaitLiveSessionsRefresh(ctx context.Context, commonDir, worktreeRoot string, deadline time.Time) {
+	for {
+		now := time.Now()
+		if cache, _ := loadLiveSessionsCache(ctx); liveSessionsCacheFresh(cache, now, liveSessionsFirstTurnMaxAge) {
+			return
+		}
+		if !now.Before(deadline) || !liveSessionsRefreshRunning(commonDir, worktreeRoot, now) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(liveSessionsAwaitPoll):
+		}
 	}
 }
 
@@ -336,11 +401,12 @@ func refreshLiveSessionsWithin(ctx context.Context, budget time.Duration) bool {
 		logging.Debug(logCtx, "live sessions refresh skipped: stream plugin not installed")
 		return false
 	}
-	_, worktreeRoot, err := liveSessionsLocation(ctx)
+	commonDir, worktreeRoot, err := liveSessionsLocation(ctx)
 	if err != nil {
 		logging.Debug(logCtx, "live sessions refresh skipped", "error", err.Error())
 		return false
 	}
+	defer markLiveSessionsRefreshing(commonDir, worktreeRoot, time.Now().Add(budget))()
 	// The plugin is killed at the deadline, and its output pipes are given
 	// waitDelay more: both inside budget, which is what a caller waits.
 	waitDelay := budget / 10
@@ -731,6 +797,9 @@ func pruneLiveSessionsCaches(ctx context.Context) {
 	if entries, err := osroot.ReadDirNoSymlinks(root, spawnMarkerDirName); err == nil {
 		for _, e := range entries {
 			key, ok := strings.CutPrefix(e.Name(), liveSessionsSpawnMarkerPrefix)
+			if !ok {
+				key, ok = strings.CutPrefix(e.Name(), liveSessionsRefreshingPrefix)
+			}
 			if ok && !keep[strings.TrimSuffix(key, ".lock")] {
 				_ = osroot.RemoveNoSymlinks(root, spawnMarkerDirName+"/"+e.Name()) //nolint:errcheck // best effort
 			}
