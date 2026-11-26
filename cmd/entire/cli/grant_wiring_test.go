@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -180,6 +181,45 @@ func TestRepoGrant_TakesOnlyTheNativePath(t *testing.T) {
 		_, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, "add", wiringRepoPath, "github:alice", "--role", "reader", "--project", "acme")
 		require.ErrorContains(t, err, "unknown flag: --project")
 	})
+}
+
+// TestRepoGrantList_FoldsTableOnly pins that the table shows one row per
+// grantee while --json keeps one element per source row.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestRepoGrantList_FoldsTableOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var payload any
+		switch r.URL.Path {
+		case "/api/v1/repos/resolve":
+			payload = nativeResolution("acme/web", wiringRepoULID)
+		case "/api/v1/repos/" + wiringRepoULID + "/grants":
+			payload = &coreapi.ListRepoGrantsOutputBody{Grants: stagingGrantListing()}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if err := printJSON(w, payload); err != nil {
+			t.Errorf("encode %s: %v", r.URL.Path, err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	out, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", wiringRepoPath)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(out, "github:toothbrush"), out)
+	require.Equal(t, 1, strings.Count(out, "github:stiak"), out)
+	require.Contains(t, out, "project:dogfooding, direct (reader)")
+	require.Contains(t, out, "direct, project:dogfooding")
+
+	out, _, err = runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", wiringRepoPath, "--json")
+	require.NoError(t, err)
+	var got []coreapi.RepoGrant
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Len(t, got, 5)
+	require.Equal(t, "reader", got[0].Role)
+	require.Equal(t, "direct", got[0].Source)
 }
 
 // TestGrantAdd_EmptyRoleIsRefusedLocally pins that an explicit empty --role is

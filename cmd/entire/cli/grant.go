@@ -43,6 +43,8 @@ type grantTarget[Row any] struct {
 	addDocumentedAs string
 	columns         []string
 	row             func(Row) []string
+	// fold merges the `list` table to one row per grantee; nil prints rows as sent.
+	fold func([]Row) []Row
 
 	// resolve turns the user's target ref into its ULID. project and repo wrap
 	// theirs because those resolvers take an interface, not *coreapi.Client.
@@ -484,7 +486,11 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 			if t.listBranch != nil && t.listBranch.claims(tr.canon) {
 				return tr.wrapErr(t.listBranch.list(cmd, tr.canon))
 			}
-			return tr.wrapErr(runCoreList(cmd, "No grants found.", t.columns, t.row, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
+			view := listView[Row]{
+				table: func([]Row) ([]string, func(Row) []string) { return t.columns, t.row },
+				fold:  t.fold,
+			}
+			return tr.wrapErr(runCoreListShaped(cmd, "No grants found.", view, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
 				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return nil, err
@@ -753,6 +759,64 @@ func repoGrantRow(g coreapi.RepoGrant) []string {
 	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
+// grantRoleOrder ranks grant roles weakest first; an unknown role ranks below all.
+var grantRoleOrder = []string{leastAccessRole, "writer", roleAdmin, roleOwner}
+
+// effectiveGrants folds a listing to one row per grantee, in first-seen order.
+// The kept row is the grantee's strongest source, so ROLE is the effective role.
+// SOURCE names every source, strongest first and direct first among equals; a
+// source weaker than the effective role carries its own role, e.g.
+// "project:web, direct (reader)".
+func effectiveGrants[Row any](rows []Row, to func(Row) grantRow, setSource func(*Row, string)) []Row {
+	grants := mapRows(rows, to)
+	var order []string
+	byGrantee := make(map[string][]int)
+	for i, g := range grants {
+		key := g.granteeType + "/" + g.granteeID
+		if _, seen := byGrantee[key]; !seen {
+			order = append(order, key)
+		}
+		byGrantee[key] = append(byGrantee[key], i)
+	}
+	out := make([]Row, 0, len(order))
+	for _, key := range order {
+		idx := byGrantee[key]
+		slices.SortStableFunc(idx, func(a, b int) int { return compareGrantSources(grants[a], grants[b]) })
+		top := rows[idx[0]]
+		setSource(&top, joinGrantSources(grants, idx))
+		out = append(out, top)
+	}
+	return out
+}
+
+// compareGrantSources orders the stronger role first, then the direct source.
+func compareGrantSources(a, b grantRow) int {
+	if c := cmp.Compare(slices.Index(grantRoleOrder, b.role), slices.Index(grantRoleOrder, a.role)); c != 0 {
+		return c
+	}
+	aDirect, bDirect := a.source == grantSourceDirect, b.source == grantSourceDirect
+	switch {
+	case aDirect == bDirect:
+		return 0
+	case aDirect:
+		return -1
+	default:
+		return 1
+	}
+}
+
+func joinGrantSources(grants []grantRow, idx []int) string {
+	effective := grants[idx[0]].role
+	parts := make([]string, len(idx))
+	for i, j := range idx {
+		parts[i] = grants[j].source
+		if grants[j].role != effective {
+			parts[i] += " (" + grants[j].role + ")"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 // granteeName returns the friendly name when the server resolved one, in the
 // spelling users type (see displayGranteeName), falling back to the ULID for
 // grantees it couldn't label (e.g. teams).
@@ -866,6 +930,9 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 	outsider:   "neither a member of the owning org nor granted on the project",
 	columns:    grantColumns,
 	row:        projectGrantRow,
+	fold: func(gs []coreapi.ProjectGrant) []coreapi.ProjectGrant {
+		return effectiveGrants(gs, projectGrantRowOf, func(g *coreapi.ProjectGrant, s string) { g.Source = s })
+	},
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveProjectRef(ctx, c, ref)
 	},
@@ -922,6 +989,9 @@ var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	listBranch:    mirrorGrantListing,
 	unwritableRef: mirrorGrantsAreUpstream,
 	webURLRefs:    true,
+	fold: func(gs []coreapi.RepoGrant) []coreapi.RepoGrant {
+		return effectiveGrants(gs, repoGrantRowOf, func(g *coreapi.RepoGrant, s string) { g.Source = s })
+	},
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveRepoPath(ctx, c, ref)
 	},

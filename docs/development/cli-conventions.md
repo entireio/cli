@@ -757,6 +757,12 @@ always runnable in every build.
   read for this. `remove` also drops the `owner` row, the owning org itself,
   which holds the target through the authz schema rather than a grant.
 
+  **The `list` table shows one row per grantee; `--json` shows one per source.**
+  ROLE is the effective (strongest) role. SOURCE names every source, strongest
+  first and `direct` first among equals; a weaker source carries its own role,
+  e.g. `project:web, direct (reader)`. `effectiveGrants` does the fold; org
+  membership has one row per member already.
+
   Both earlier versions of the add pool were wrong in opposite directions, so do
   not "simplify" back to either. Subtracting every holder emptied the pool on any
   repo whose project already covered the org, and subtracting none meant every
