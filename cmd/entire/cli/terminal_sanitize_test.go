@@ -451,6 +451,57 @@ func TestResumePickerLabels_SanitizeMetadata(t *testing.T) {
 	}
 }
 
+// Load validates the session ID in a state file's name but returns the
+// session_id from its body unchecked, so doctor and session adopt must
+// sanitize the ID they print.
+func TestForgedStateBodySessionID_Sanitized(t *testing.T) {
+	t.Parallel()
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			stateDir := t.TempDir()
+			sourceWorktree := t.TempDir()
+			now := time.Now()
+			writeForgedState := func(fileID string, state session.State) {
+				t.Helper()
+				state.StartedAt = now
+				state.LastInteractionTime = &now
+				data, err := json.Marshal(state)
+				require.NoError(t, err)
+				testutil.WriteFile(t, stateDir, fileID+".json", string(data))
+			}
+			writeForgedState("forged-a", session.State{SessionID: hostileValue("session", tc.payload), WorktreePath: sourceWorktree})
+			writeForgedState("forged-b", session.State{SessionID: hostileValue("other", tc.payload), WorktreePath: sourceWorktree})
+			writeForgedState("forged-c", session.State{SessionID: "forged-c", WorktreePath: hostileValue("worktree", tc.payload)})
+			store := session.NewStateStoreWithDir(stateDir)
+
+			loaded, err := store.Load(ctx, "forged-a")
+			require.NoError(t, err)
+			require.NotNil(t, loaded)
+			require.Equal(t, hostileValue("session", tc.payload), loaded.SessionID, "load returns the body's session ID")
+
+			assertSanitizedField(t, stuckSessionPromptTitle(stuckSession{State: loaded}), "session")
+
+			// Payload first: the adopt line prints only the ID's first bytes.
+			var adopted bytes.Buffer
+			writeAdoptResult(&adopted, &session.State{SessionID: tc.payload + "sessionvisible"}, sourceWorktree,
+				adoptChanges{filesTouched: []string{hostileValue("file", tc.payload)}})
+			assertSanitizedField(t, adopted.String(), "file")
+			require.Contains(t, adopted.String(), "Adopted session ")
+
+			_, err = selectAdoptSourceSession(ctx, store, sourceWorktree, "")
+			require.Error(t, err)
+			assertSanitizedField(t, err.Error(), "session")
+			assertSanitizedField(t, err.Error(), "other")
+
+			_, err = selectAdoptSourceSession(ctx, store, sourceWorktree, "forged-c")
+			require.Error(t, err)
+			assertSanitizedField(t, err.Error(), "worktree")
+		})
+	}
+}
+
 // Session state is local, but agents write it, and session list, info,
 // doctor and clean print it.
 func TestSessionStateText_SanitizesStoredLabels(t *testing.T) {

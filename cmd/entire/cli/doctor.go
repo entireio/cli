@@ -466,7 +466,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title(fmt.Sprintf("Fix session %s?", ss.State.SessionID)).
+				Title(stuckSessionPromptTitle(ss)).
 				Options(options...).
 				Value(&action),
 		),
@@ -477,6 +477,13 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	}
 
 	return action, nil
+}
+
+// stuckSessionPromptTitle names the session in the fix prompt. The ID comes
+// from the state file's body, which load does not check against the file
+// name, so it is sanitized like the rest of the doctor report.
+func stuckSessionPromptTitle(ss stuckSession) string {
+	return fmt.Sprintf("Fix session %s?", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 }
 
 // discardSession removes session state.
