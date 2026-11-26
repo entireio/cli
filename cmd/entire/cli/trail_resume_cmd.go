@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -685,6 +686,12 @@ func buildTrailResumeCommands(ctx trailResumeContext) []string {
 		commands = append(commands, resumeCommand+" --checkpoint "+shellArg(ctx.DefaultResume.CheckpointID))
 	}
 	for _, session := range ctx.Sessions {
+		// Session IDs come from fetched checkpoint metadata, which nothing
+		// validates on the way in. Resume refuses an unsafe ID, so a command
+		// naming one could only fail.
+		if validation.ValidateSessionID(session.SessionID) != nil {
+			continue
+		}
 		commands = append(commands, resumeCommand+" --session "+shellArg(session.SessionID))
 	}
 	return commands
@@ -728,30 +735,30 @@ func printTrailResumeContext(w io.Writer, ctx trailResumeContext) {
 func printTrailResumeTrail(w io.Writer, trail trailResumeTrailContext) {
 	switch {
 	case trail.Number > 0:
-		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
+		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, tuiutil.SanitizeDisplayLine(trail.Title))
 	case trail.ID != "":
-		fmt.Fprintf(w, "  Trail %s  %s\n", trail.ID, trail.Title)
+		fmt.Fprintf(w, "  Trail %s  %s\n", tuiutil.SanitizeDisplayLine(trail.ID), tuiutil.SanitizeDisplayLine(trail.Title))
 	default:
-		fmt.Fprintf(w, "  Trail  %s\n", trail.Title)
+		fmt.Fprintf(w, "  Trail  %s\n", tuiutil.SanitizeDisplayLine(trail.Title))
 	}
 	parts := []string{}
 	if trail.Status != "" {
-		parts = append(parts, "Status: "+trail.Status)
+		parts = append(parts, "Status: "+tuiutil.SanitizeDisplayLine(trail.Status))
 	}
 	if trail.Phase != "" {
-		parts = append(parts, "Phase: "+trail.Phase)
+		parts = append(parts, "Phase: "+tuiutil.SanitizeDisplayLine(trail.Phase))
 	}
 	if trail.Branch != "" {
-		parts = append(parts, "Branch: "+trail.Branch)
+		parts = append(parts, "Branch: "+tuiutil.SanitizeDisplayLine(trail.Branch))
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))
 	}
 	if trail.Base != "" {
-		fmt.Fprintf(w, "  Base: %s\n", trail.Base)
+		fmt.Fprintf(w, "  Base: %s\n", tuiutil.SanitizeDisplayLine(trail.Base))
 	}
 	if trail.URL != "" {
-		fmt.Fprintf(w, "  URL: %s\n", trail.URL)
+		fmt.Fprintf(w, "  URL: %s\n", tuiutil.SanitizeDisplayLine(trail.URL))
 	}
 	fmt.Fprintln(w)
 }
@@ -850,8 +857,9 @@ func printTrailResumeCommands(w io.Writer, commands []string) {
 		return
 	}
 	fmt.Fprintln(w, "  Commands:")
+	// The commands name the server's branch and project; JSON keeps them raw.
 	for _, command := range commands {
-		fmt.Fprintf(w, "    %s\n", command)
+		fmt.Fprintf(w, "    %s\n", tuiutil.SanitizeDisplayLine(command))
 	}
 }
 

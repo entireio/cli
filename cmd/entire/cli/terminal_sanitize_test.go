@@ -544,6 +544,46 @@ func TestRenderUserFacingError_SanitizesMessage(t *testing.T) {
 	})
 }
 
+// trail resume prints the server's trail fields in its header and suggests
+// commands naming the branch, project and fetched session IDs.
+func TestTrailResumeText_SanitizesTrailAndCommands(t *testing.T) {
+	t.Parallel()
+	for _, tc := range hostileMetadataPayloads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			trail := trailResumeTrailContext{
+				Number:  42,
+				Title:   hostileValue("title", tc.payload),
+				Project: "gh/acme",
+				Branch:  hostileValue("branch", tc.payload),
+				Base:    hostileValue("base", tc.payload),
+				Status:  hostileValue("status", tc.payload),
+				Phase:   hostileValue("phase", tc.payload),
+				URL:     hostileValue("url", tc.payload),
+			}
+			var header bytes.Buffer
+			printTrailResumeTrail(&header, trail)
+			for _, field := range []string{"title", "status", "phase", "branch", "base", "url"} {
+				assertSanitizedField(t, header.String(), field)
+			}
+
+			hostileID := hostileValue("session", tc.payload)
+			commands := buildTrailResumeCommands(trailResumeContext{
+				Trail:    trail,
+				Sessions: []trailResumeSessionContext{{SessionID: hostileID}, {SessionID: "valid-session"}},
+			})
+			for _, command := range commands {
+				assert.NotContains(t, command, "session-left", "a command names a session ID resume would refuse")
+			}
+			assert.Contains(t, strings.Join(commands, "\n"), "--session valid-session")
+
+			var printed bytes.Buffer
+			printTrailResumeCommands(&printed, commands)
+			assertSanitizedField(t, printed.String(), "branch")
+		})
+	}
+}
+
 // Session state is local, but agents write it, and session list, info,
 // doctor and clean print it.
 func TestSessionStateText_SanitizesStoredLabels(t *testing.T) {
