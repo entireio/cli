@@ -65,6 +65,8 @@ type grantCandidate struct {
 	// and let a user reach the typed-id route by pasting one, which the CLI no
 	// longer accepts — a grantee is a provider-qualified handle and nothing else.
 	byID bool
+	// granteeType is the type the typed-id route revokes; "" means account.
+	granteeType string
 }
 
 // handleCandidate is a candidate addressed by its handle and shown in the
@@ -200,6 +202,15 @@ func owningOrgOf(ctx context.Context, c *coreapi.Client, projectID string) (stri
 		return "", &ownerNotOrgError{project: p.Name}
 	}
 	return p.OwnerId, nil
+}
+
+// repoOwningOrg returns the ULID of the org owning the repo's project.
+func repoOwningOrg(ctx context.Context, c *coreapi.Client, repoID string) (string, error) {
+	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+	if err != nil {
+		return "", err
+	}
+	return owningOrgOf(ctx, c, repo.Response.OwningProjectId)
 }
 
 // memberPool is the add picker's candidate set plus the counts needed to say
@@ -381,11 +392,7 @@ func mapRows[Row any](rows []Row, to func(Row) grantRow) []grantRow {
 // granting on the repo itself is a real action for someone who only holds it
 // through the project.
 func repoGrantCandidates(ctx context.Context, c *coreapi.Client, repoID string) (memberPool, error) {
-	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
-	if err != nil {
-		return memberPool{}, err
-	}
-	orgID, err := owningOrgOf(ctx, c, repo.Response.OwningProjectId)
+	orgID, err := repoOwningOrg(ctx, c, repoID)
 	if err != nil {
 		return memberPool{}, err
 	}
@@ -628,10 +635,9 @@ func revokeUnavailable(t grantPickerTarget, reason string) error {
 // A row is offered only when revoking it would actually do something. Two
 // filters, each for a condition observed on a real listing:
 //
-//   - granteeType must be an account. The `owner` row is the owning org itself
-//     and holds the target through the authz schema's owner relation rather
-//     than a grant, so there is nothing to revoke; the typed revoke route sends
-//     granteeType=account and could not address it anyway.
+//   - granteeType must be an account or a team. The `owner` row is the owning
+//     org itself and holds the target through the authz schema's owner
+//     relation rather than a grant, so there is nothing to revoke.
 //   - source must be direct. A repo listing also carries the project's grants
 //     as `project:<name>` rows, and those are held through the project, not the
 //     repo: revoking one at the repo level answers "no such grant; nothing to
@@ -650,14 +656,16 @@ func revokeUnavailable(t grantPickerTarget, reason string) error {
 func grantHolders(rows []grantRow) []grantCandidate {
 	holders := make([]grantCandidate, 0, len(rows))
 	for _, r := range rows {
-		if r.granteeType != granteeTypeAccount || r.source != grantSourceDirect || r.granteeID == "" {
+		revocable := r.granteeType == granteeTypeAccount || r.granteeType == granteeTypeTeam
+		if !revocable || r.source != grantSourceDirect || r.granteeID == "" {
 			continue
 		}
 		holders = append(holders, grantCandidate{
-			ref:   r.granteeID,
-			label: labelWithName(granteeNameOr(r.name, r.granteeID), r.displayName),
-			role:  r.role,
-			byID:  true,
+			ref:         r.granteeID,
+			label:       labelWithName(grantRowName(r.granteeType, r.name, r.granteeID), r.displayName),
+			role:        r.role,
+			byID:        true,
+			granteeType: r.granteeType,
 		})
 	}
 	return holders
