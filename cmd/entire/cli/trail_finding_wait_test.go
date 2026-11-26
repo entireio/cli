@@ -351,6 +351,7 @@ func serveWaitTestTrail(t *testing.T, finishAfter int, agentsJSON func(status st
 			item.Mergeability = json.RawMessage(`{"head_sha":"` + waitTestHead + `"}`)
 			payload = item
 		case "GET /api/v1/repos/repo-id/changes/7/reviews/comments":
+			assert.Equal(t, "any", r.URL.Query().Get("stale"), "the report lists open findings on older commits too")
 			payload = map[string]any{"comments": []map[string]any{{"id": "finding-one", "review_id": "review-one", "status": "open", "body": "Check the nil case"}}}
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)

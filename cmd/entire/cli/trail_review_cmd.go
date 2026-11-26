@@ -199,7 +199,11 @@ func newTrailFindingWaitCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 }
 
 func runTrailFindingWait(cmd *cobra.Command, mode *trailMode, selector string, opts trailFindingWaitOptions, start time.Time) error {
-	list, err := normalizeTrailReviewListOptions(defaultTrailReviewListOptions())
+	// Every open finding, including ones left on older commits a reviewer
+	// did not re-run on; the FRESHNESS column tells them apart.
+	listOpts := defaultTrailReviewListOptions()
+	listOpts.Freshness = trailReviewFreshnessAny
+	list, err := normalizeTrailReviewListOptions(listOpts)
 	if err != nil {
 		return err
 	}
