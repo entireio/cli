@@ -139,12 +139,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail finding":   {agentHelpAudienceTaskDriven, false},
 	"trail merge":     {agentHelpAudienceUserOwned, false},
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
-	// The push workflow links a branch to the trail the user named, and
-	// trail create prints a link retry when its own linking fails.
-	"trail link":     {agentHelpAudienceTaskDriven, false},
-	"trail unlink":   {agentHelpAudienceUserOwned, false},
-	"trail ready":    {agentHelpAudienceUserOwned, false},
-	"trail retarget": {agentHelpAudienceUserOwned, false},
+	"trail link":      {agentHelpAudienceUserOwned, false},
+	"trail unlink":    {agentHelpAudienceUserOwned, false},
+	"trail ready":     {agentHelpAudienceUserOwned, false},
+	"trail retarget":  {agentHelpAudienceUserOwned, false},
 	// Each acts on shared state or spends the repository's agent budget.
 	"trail update-branch": {agentHelpAudienceUserOwned, false},
 	"trail ci-pr":         {agentHelpAudienceUserOwned, false},
@@ -319,17 +317,6 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"a selector first; if this branch's change or pull request is N, act\n" +
 		"without a selector. If trail N is not this branch's trail, do not\n" +
 		"change it: ask the user which trail they meant.",
-	// Pushing a branch with no trail opens one, so work is tracked as trails
-	// rather than pull requests (guidance evals, November 2026).
-	"trail create": "Use this when asked to push a feature branch that `entire trail show`\n" +
-		"reports has no trail: it pushes the branch (git push -u), so do not also\n" +
-		"`git push` or open a pull request. --title is required; give --body a\n" +
-		"short description. On the default branch it would create and push a new\n" +
-		"branch instead: ask the user first. Do not pass --checkout, --repo or\n" +
-		"--branch-action create on your own. Give the change url it prints. If it\n" +
-		"fails, do not rerun it: when the error prints an `entire trail link`\n" +
-		"retry, run that once; otherwise report the error. If the user named an\n" +
-		"existing trail, `git push` and then `entire trail link <P>` instead.",
 	// Updates through a change write the shared parent trail, and agents
 	// otherwise edit only the pull request (guidance evals, November 2026).
 	"trail update": "Without a selector this updates the checked-out branch's trail. Its fields\n" +

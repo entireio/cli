@@ -974,17 +974,15 @@ truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
 When trails are enabled, the first-turn injection introduces a trail as
-project-level intent across repositories and branches. It asks agents to check
-the current branch's trail first and treat the trail, not the pull request, as
-the record of the work. Asked to push a branch with no
-trail, agents publish it with `entire trail create` instead of a pull request
-(asking first on the default branch); status reports carry the change's full
-URL; and pull request details are given only when the user asks for the pull
-request. They edit the trail's shared description keeping others' text. This
+project-level intent across repositories and branches. It asks agents to treat
+the trail, not the pull request, as the record of the work. Status reports carry the change's full URL, and pull
+request details are given only when the user asks for the pull request.
+Agents push and open pull requests as usual; that is how a branch gets its
+trail. They edit the trail's shared description keeping others' text. This
 workflow is stated up front because agents otherwise default to pull requests
 and rarely open agent-help at that moment; the per-command detail (shadow-PR
-marker, create failures, open findings, merge readiness) lives in
-`agent-help` for `trail show`, `trail create`, `trail update`, `trail finding`,
+marker, open findings, merge readiness) lives in
+`agent-help` for `trail show`, `trail update`, `trail finding`,
 and `trail merge`, which agents do open before acting. Command details come from `entire agent-help trail`; the
 injection retains auto-detected repository context without listing unrelated
 checkpoint or setup workflows.

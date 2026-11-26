@@ -128,14 +128,19 @@ func TestEntireContextInjection_TrailsParagraphOnlyWhenEnabled(t *testing.T) {
 	for _, want := range []string{
 		"`entire trail update`", "`--project <forge>/<owner>`", "include its full URL",
 		"findings (`entire trail finding`), never as trail comments",
-		"the trail, not the pull request, is the record of the work", "existing trail or a new one, ask the user", "keep others' text", "`entire trail create --title",
-		"ask the user before creating a trail", "the change's full URL", "answer with the pull request only, without trail links",
-		"otherwise open one as usual with `gh pr create`, not `entire trail create`",
+		"the trail, not the pull request, is the record of the work", "existing trail or a new one, ask the user", "keep others' text",
+		"the change's full URL", "answer with the pull request only, without trail links",
+		"otherwise open one as usual with `gh pr create`.",
 		"name the trail, not only the pull request",
 	} {
 		if !strings.Contains(with, want) {
 			t.Errorf("trails paragraph missing %q:\n%s", want, with)
 		}
+	}
+	// Pushing and opening a pull request is how a branch gets its trail, so
+	// the paragraph does not steer agents to `entire trail create` instead.
+	if strings.Contains(with, "trail create") {
+		t.Errorf("trails paragraph should not route pushes through trail create:\n%s", with)
 	}
 }
 

@@ -830,10 +830,9 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 		}
 	}
 
-	// The push workflow has agents link a branch to a named trail, so trail
-	// link must stay task-driven; merge stays user-owned.
+	// Linking a branch to another trail and merging are the user's calls.
 	drill = drillJSON(t, projectTrailsHelpTestRoot(), "trail")
-	want = map[string]string{"link": "task-driven", "create": "task-driven", "merge": agentHelpUserOwnedSlug}
+	want = map[string]string{"link": agentHelpUserOwnedSlug, "create": "task-driven", "merge": agentHelpUserOwnedSlug}
 	found := 0
 	for _, sub := range drill.Subcommands {
 		if w, ok := want[sub.Name]; ok {
@@ -1115,8 +1114,6 @@ func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
 		{"finding", []string{"default filters hide: while any are open, the change is not ready", "ask the user whether to address it",
 			"Dismiss with -m only when\nthe finding is wrong", "Reply to a finding with `entire trail finding reply`"}},
 		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
-		{"create", []string{"so do not also\n`git push` or open a pull request", "ask the user first",
-			"If it\nfails, do not rerun it", "`git push` and then `entire trail link <P>` instead"}},
 		{"show", []string{"For questions about status, review, CI, or readiness, start here",
 			"with the change's full url", "Give pull request details only\nwhen the user asks for the pull request",
 			"find it with\n`gh pr view` rather than creating another"}},
