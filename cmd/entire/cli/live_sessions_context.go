@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -206,11 +207,11 @@ func saveLiveSessionsCache(ctx context.Context, c *liveSessionsCache) error {
 	return nil
 }
 
-// liveSessionsPluginInstalled reports whether the stream plugin is installed
-// in the managed tree. It reads the install manifest only: no plugin runs.
+// liveSessionsPluginInstalled reports whether there is an entire-stream the
+// dispatcher would run (liveSessionsPluginBinary). It runs nothing.
 func liveSessionsPluginInstalled() bool {
-	m, err := LoadPluginManifest(liveSessionsPluginName)
-	return err == nil && m != nil
+	_, ok := liveSessionsPluginBinary()
+	return ok
 }
 
 // liveSessionsRefreshSpawn is the process-spawn seam of
@@ -266,7 +267,12 @@ var liveSessionsSyncRefresh = refreshLiveSessionsWithin
 // The hook fails open either way, and a failed refresh is retried in the
 // background. A younger cache due a refresh gets one in the background.
 func refreshLiveSessionsAtSessionStart(ctx context.Context, ag agent.Agent) {
-	if _, ok := agent.AsContextInjector(ag); !ok || !liveSessionsPluginInstalled() {
+	if _, ok := agent.AsContextInjector(ag); !ok {
+		return
+	}
+	if !liveSessionsPluginInstalled() {
+		// Once per session, so a missing block is diagnosable.
+		logging.Debug(logging.WithComponent(ctx, "live-sessions"), "live sessions skipped: no entire-stream the dispatcher would run")
 		return
 	}
 	cache, _ := loadLiveSessionsCache(ctx)
@@ -360,22 +366,32 @@ func refreshLiveSessionsWithin(ctx context.Context, budget time.Duration) bool {
 	return true
 }
 
-// liveSessionsPluginBinary is the managed bin entry `entire stream` runs,
-// when the stream plugin is installed and that entry can be run.
+// liveSessionsPluginBinary is the entire-stream `entire stream` would run:
+// the managed bin entry (a release install or a local one, which records no
+// manifest), else one on PATH, as the dispatcher finds it (the managed bin
+// dir is first on PATH). Found means a regular, executable file. Stat calls
+// only: nothing runs.
 func liveSessionsPluginBinary() (string, bool) {
-	if !liveSessionsPluginInstalled() {
-		return "", false
+	name := pluginBinaryPrefix + liveSessionsPluginName
+	if dir, err := PluginBinDir(); err == nil {
+		if bin, err := exec.LookPath(filepath.Join(dir, name)); err == nil && agentHelpPluginRunnable(bin) {
+			return bin, true
+		}
 	}
-	dir, err := PluginBinDir()
+	bin, err := liveSessionsPathLookup(name)
 	if err != nil {
 		return "", false
 	}
-	bin, err := exec.LookPath(filepath.Join(dir, pluginBinaryPrefix+liveSessionsPluginName))
-	if err != nil || !agentHelpPluginRunnable(bin) {
+	info, err := os.Stat(bin)
+	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != windowsGOOS && info.Mode().Perm()&0o111 == 0) {
 		return "", false
 	}
 	return bin, true
 }
+
+// liveSessionsPathLookup finds entire-stream on PATH, a seam so unit tests
+// never find the developer's own install.
+var liveSessionsPathLookup = exec.LookPath
 
 // queryLiveSessions runs `entire-stream list --live [--touching] --json` in
 // worktreeRoot, with the environment a dispatched plugin gets, and parses

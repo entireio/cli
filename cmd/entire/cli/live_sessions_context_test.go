@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1199,3 +1200,46 @@ func (f liveRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { 
 // liveTestServiceAccountSecret is a well-formed service account secret (the
 // auth package's test secret), so resolving it reaches the exchange.
 const liveTestServiceAccountSecret = "ent_svc_us_01JABCDEFGHJKMNPQRSTVWXYZ0_01JZYXWVTSRQPNMKJHGFEDCBA9_aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dypq3MriFT"
+
+// installLocalFakeStreamPlugin links entire-stream into the managed bin dir
+// as a local install does (no manifest), the binary a script with body.
+func installLocalFakeStreamPlugin(t *testing.T, body string) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), pluginBinaryPrefix+liveSessionsPluginName)
+	writeExecutableScript(t, src, "#!/bin/sh\n"+body)
+	binDir, err := EnsurePluginBinDir()
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(src, filepath.Join(binDir, pluginBinaryPrefix+liveSessionsPluginName)))
+	m, err := LoadPluginManifest(liveSessionsPluginName)
+	require.NoError(t, err)
+	require.Nil(t, m, "a local install records no manifest")
+}
+
+// What the dispatcher would run counts, manifest or not: a local or
+// developer install of stream gets the block too.
+func TestLiveSessionsRefresh_RunsALocalInstallWithoutAManifest(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	setupLiveSessionsRepo(t)
+	record := filepath.Join(t.TempDir(), "calls.txt")
+	installLocalFakeStreamPlugin(t, liveFakeScript(record, liveFakeTouchingAnswer))
+
+	require.True(t, refreshLiveSessionsWithin(context.Background(), liveTestBudget))
+	_, ok := loadLiveSessionsCache(context.Background())
+	require.True(t, ok)
+}
+
+// The dispatcher also runs an entire-stream found on PATH.
+func TestLiveSessionsRefresh_RunsOneOnPath(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	setupLiveSessionsRepo(t)
+	dir := t.TempDir()
+	record := filepath.Join(t.TempDir(), "calls.txt")
+	writeExecutableScript(t, filepath.Join(dir, pluginBinaryPrefix+liveSessionsPluginName), "#!/bin/sh\n"+liveFakeScript(record, liveFakeTouchingAnswer))
+	withPathDir(t, dir)
+	prev := liveSessionsPathLookup
+	liveSessionsPathLookup = exec.LookPath
+	t.Cleanup(func() { liveSessionsPathLookup = prev })
+
+	bin, ok := liveSessionsPluginBinary()
+	require.True(t, ok)
+	require.Equal(t, filepath.Join(dir, pluginBinaryPrefix+liveSessionsPluginName), bin)
+	require.True(t, refreshLiveSessionsWithin(context.Background(), liveTestBudget))
+}
