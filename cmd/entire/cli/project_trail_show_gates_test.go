@@ -303,9 +303,12 @@ func TestProjectTrailShowServedNullGates(t *testing.T) {
 	assert.Contains(t, out, "  Gates for widget/7:\n    Mergeable: unknown\n")
 }
 
-// Not parallel: swaps the package-level webOpenURL seam and client constructors.
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
+// webOpenURL seam and client constructors.
 func TestProjectTrailShow_Web(t *testing.T) {
 	const page = "https://entire.io/gh/acme/-/trails/42"
+	// openInWeb only opens pages on the web origin; match the fixture's URLs.
+	t.Setenv(api.WebBaseURLEnvVar, "https://entire.io")
 
 	t.Run("a trail selected directly opens the trail page", func(t *testing.T) {
 		opens, reads := setupProjectTrailGatesTest(t)
