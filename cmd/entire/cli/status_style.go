@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"golang.org/x/term"
 )
@@ -215,7 +216,20 @@ func (s statusStyles) renderSuccess(label string, rows []explainRow) string {
 
 // renderFailure returns failureBullet + metadataRows. Used when a command
 // prints a styled error block to errW before returning *SilentError.
+//
+// The label and row values are filtered before styling: they carry stored
+// session IDs and agent or server messages, and the block is printed in place
+// of an error main.go would otherwise have sanitized. Only the escapes the
+// styles add themselves reach the terminal.
 func (s statusStyles) renderFailure(label string, rows []explainRow) string {
+	label = tuiutil.SanitizeTerminalText(label)
+	if len(rows) > 0 {
+		clean := make([]explainRow, len(rows))
+		for i, r := range rows {
+			clean[i] = explainRow{Label: tuiutil.SanitizeTerminalText(r.Label), Value: tuiutil.SanitizeTerminalText(r.Value)}
+		}
+		rows = clean
+	}
 	if len(rows) == 0 {
 		return s.failureBullet(label)
 	}

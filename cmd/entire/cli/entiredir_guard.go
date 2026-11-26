@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/spf13/cobra"
 )
@@ -84,7 +85,7 @@ func checkEntireDirBeforeRun(cmd *cobra.Command) (safe bool, err error) {
 // tells the user to check safe.directory right after a line that already said
 // "permission denied" — so an error matching none of them gets no remedy at all.
 func writeEntireDirRemedy(w io.Writer, err error) {
-	fmt.Fprintf(w, "%v\n", err)
+	tuiutil.FprintfTerminalText(w, "%v\n", err)
 	fmt.Fprintf(w, "\n")
 
 	switch {
@@ -170,7 +171,7 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 	switch {
 	case errors.Is(err, paths.ErrEntireDirNotDirectory):
 		fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
-		fmt.Fprintf(w, "  %v\n", err)
+		tuiutil.FprintfTerminalText(w, "  %v\n", err)
 		fmt.Fprintf(w, "  Entire has refused to read or write through it, so every other command\n")
 		fmt.Fprintf(w, "  in this repository is stopped and no session data is being captured.\n")
 		fmt.Fprintf(w, "  Fix: inspect the path, then either replace it with a real directory or\n")
@@ -180,7 +181,7 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 
 	case errors.Is(err, paths.ErrEntireDirUnsupportedEntry):
 		fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
-		fmt.Fprintf(w, "  %v\n", err)
+		tuiutil.FprintfTerminalText(w, "  %v\n", err)
 		fmt.Fprintf(w, "  Everything directly under %s belongs to Entire, and Entire only ever\n", paths.EntireDir)
 		fmt.Fprintf(w, "  puts real files and directories there. Entire has refused to read or\n")
 		fmt.Fprintf(w, "  write through it, so every other command in this repository is stopped\n")
@@ -193,7 +194,7 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 
 	case errors.Is(err, paths.ErrEntireDirUnreadable):
 		fmt.Fprintf(w, "%s: UNREADABLE\n", paths.EntireDir)
-		fmt.Fprintf(w, "  %v\n", err)
+		tuiutil.FprintfTerminalText(w, "  %v\n", err)
 		fmt.Fprintf(w, "  The check itself failed, so nothing is known about what is at that path\n")
 		fmt.Fprintf(w, "  and every other command here is stopped.\n")
 		fmt.Fprintf(w, "  Fix: this is a filesystem error, not a git or Entire one. Check ownership\n")
@@ -202,7 +203,7 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 
 	case errors.Is(err, paths.ErrRepositoryUnresolved):
 		fmt.Fprintf(w, "%s: UNVERIFIED\n", paths.EntireDir)
-		fmt.Fprintf(w, "  %v\n", err)
+		tuiutil.FprintfTerminalText(w, "  %v\n", err)
 		fmt.Fprintf(w, "  Entire cannot tell which repository this directory belongs to, so it\n")
 		fmt.Fprintf(w, "  cannot verify %s and every other command here is stopped.\n", paths.EntireDir)
 		fmt.Fprintf(w, "  Fix: resolve the git error above. Common causes are git missing from\n")
@@ -211,7 +212,7 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 
 	default:
 		fmt.Fprintf(w, "%s: UNVERIFIED\n", paths.EntireDir)
-		fmt.Fprintf(w, "  %v\n", err)
+		tuiutil.FprintfTerminalText(w, "  %v\n", err)
 		fmt.Fprintf(w, "  Entire could not verify %s, so every other command here is stopped.\n", paths.EntireDir)
 	}
 }

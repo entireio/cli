@@ -1,6 +1,7 @@
 package tuiutil
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,17 @@ func TestSanitizeTerminalText_StripsEscapeSequencesKeepsStructure(t *testing.T) 
 	// tabs and newlines survive because this filter serves multi-line output.
 	in := "a\x1b[31mred\x1b[0m\x1b]0;title\x07 b\tc\nd"
 	assert.Equal(t, "ared b\tc\nd", SanitizeTerminalText(in))
+}
+
+func TestFprintfTerminalText_FiltersFormattedValues(t *testing.T) {
+	t.Parallel()
+
+	// The arguments are filtered after formatting, so a value cannot smuggle
+	// an escape sequence, a C1 control or a bidi control past it; the
+	// message's own line breaks and tabs survive.
+	var b bytes.Buffer
+	FprintfTerminalText(&b, "session %s:\n\t%v\n", "id\x1b]8;;http://example.invalid\x07x\u009b2J", "path\u202egnp.exe")
+	assert.Equal(t, "session idx2J:\n\tpathgnp.exe\n", b.String())
 }
 
 func TestSanitizeTerminalText_DropsControlAndFormatRunes(t *testing.T) {

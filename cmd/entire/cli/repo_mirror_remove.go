@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -402,7 +403,7 @@ func reportMirrorRemoveResults(outW, errW io.Writer, results []mirrorResult) err
 	for _, r := range results {
 		if r.err != nil {
 			failures++
-			fmt.Fprintf(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
+			tuiutil.FprintfTerminalText(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
 		}
 	}
 	if failures > 0 {

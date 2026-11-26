@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 const reviewCommandBinary = "entire review"
@@ -35,7 +36,7 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, s
 		manifest, findErr := findReviewManifestByHandle(manifests, handle)
 		if findErr != nil {
 			cmd.SilenceUsage = true
-			fmt.Fprintln(cmd.ErrOrStderr(), findErr.Error())
+			tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "%s\n", findErr.Error())
 			printReviewFindingsHandles(cmd.ErrOrStderr(), manifests)
 			return wrapReviewSilentError(silentErr, findErr)
 		}
@@ -73,6 +74,16 @@ func findReviewManifestByHandle(manifests []LocalReviewManifest, handle string) 
 	default:
 		return LocalReviewManifest{}, fmt.Errorf("local review findings handle %q is ambiguous", handle)
 	}
+}
+
+// printReviewSilentError writes err's message on its own line to w and
+// returns err wrapped by silentErr. A self-printed error never reaches the
+// filter main.go applies to the errors it prints, and review errors name
+// profiles, agents and paths from settings files a repository can commit, so
+// the message gets the same terminal filter here.
+func printReviewSilentError(w io.Writer, silentErr func(error) error, err error) error {
+	tuiutil.FprintfTerminalText(w, "%s\n", err.Error())
+	return wrapReviewSilentError(silentErr, err)
 }
 
 func wrapReviewSilentError(silentErr func(error) error, err error) error {

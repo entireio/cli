@@ -204,7 +204,7 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 	if result.Failed() {
 		for _, t := range result.Targets {
 			if t.Failed() {
-				fmt.Fprintf(errOut, "Failed to delete checkpoint %s from %s: %s\n  Retry: %s\n", cid, t.Target.Name(), t.Error, checkpointDeleteRetryCommand(cid, t.Target))
+				tuiutil.FprintfTerminalText(errOut, "Failed to delete checkpoint %s from %s: %s\n  Retry: %s\n", cid, t.Target.Name(), t.Error, checkpointDeleteRetryCommand(cid, t.Target))
 			}
 		}
 		return NewSilentError(fmt.Errorf("checkpoint %s was not deleted from every remote", cid))

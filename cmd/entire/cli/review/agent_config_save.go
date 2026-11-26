@@ -218,8 +218,7 @@ func (o reviewConfigureOptions) withoutConfigs() reviewConfigureOptions {
 func configureAgentConfigs(ctx context.Context, cmd *cobra.Command, profileName string, values []string, silentErr func(error) error) error {
 	fail := func(err error) error {
 		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 	}
 	s, err := settings.Load(reviewSettingsContext(ctx))
 	if err != nil {

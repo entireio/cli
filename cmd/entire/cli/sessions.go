@@ -557,16 +557,13 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
-		msg := fmt.Sprintf("session %s has no transcript path recorded", state.SessionID)
-		fmt.Fprintln(cmd.ErrOrStderr(), msg)
-		return NewSilentError(errors.New(msg))
+		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("session %s has no transcript path recorded", state.SessionID))
 	}
 
 	path, err := strategy.ResolveTranscriptPath(state)
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "transcript unavailable: %v\n", err)
-		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
+		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("transcript unavailable: %w", err))
 	}
 
 	// Errors from streaming are runtime issues (Stat failure, mid-write JSON,

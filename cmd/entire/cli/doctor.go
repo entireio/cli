@@ -158,7 +158,7 @@ func checkUserConfig(cmd *cobra.Command) error {
 	}
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(w, "Per-user config: INVALID")
-	fmt.Fprintf(w, "  %v\n", err)
+	tuiutil.FprintfTerminalText(w, "  %v\n", err)
 	fmt.Fprintln(w, "  Most entire commands refuse to run until it is fixed.")
 	fmt.Fprintln(w)
 	return err //nolint:wrapcheck // already names the file
@@ -175,8 +175,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Check 2: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)
 	if metadataErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
-		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("metadata check failed: %w", metadataErr), "Error: metadata check failed: %v\n", metadataErr)
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout())
@@ -191,8 +190,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// the more fundamental one: if git hooks are broken, commits are not captured
 	// at all and agent-config drift is noise by comparison.
 	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
-		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("git hook check failed: %w", hooksErr), "Error: git hook check failed: %v\n", hooksErr)
 	}
 
 	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
@@ -246,8 +244,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Shadow branches older versions left behind: storage only, never read.
 	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
-		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("legacy shadow branch check failed: %w", legacyErr), "Error: legacy shadow branch check failed: %v\n", legacyErr)
 	}
 
 	// Ahead of stuck sessions: a session refused on one of these can show as

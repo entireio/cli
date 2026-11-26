@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
 )
 
@@ -608,7 +609,7 @@ func writeCheckpointJSONEnvelope(w, errW io.Writer, cpID id.CheckpointID, envelo
 		problems = append(problems, fmt.Sprintf("%d session(s) unreadable", len(failedSessions)))
 	}
 	if envelope.TasksError != "" {
-		fmt.Fprintf(errW, "checkpoint %s: failed to list subagent task records: %s\n", cpID, envelope.TasksError)
+		tuiutil.FprintfTerminalText(errW, "checkpoint %s: failed to list subagent task records: %s\n", cpID, envelope.TasksError)
 		problems = append(problems, "task records unreadable")
 	}
 	var failedTasks []string
@@ -618,7 +619,7 @@ func writeCheckpointJSONEnvelope(w, errW io.Writer, cpID id.CheckpointID, envelo
 		}
 	}
 	if len(failedTasks) > 0 {
-		fmt.Fprintf(errW, "checkpoint %s: failed to read %d subagent task record(s) (%s)\n",
+		tuiutil.FprintfTerminalText(errW, "checkpoint %s: failed to read %d subagent task record(s) (%s)\n",
 			cpID, len(failedTasks), strings.Join(failedTasks, ", "))
 		problems = append(problems, fmt.Sprintf("%d task record(s) unreadable", len(failedTasks)))
 	}
