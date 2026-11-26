@@ -330,11 +330,8 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 	if err != nil {
 		return fmt.Errorf("resolve this worktree: %w", err)
 	}
-	repoKey, _ := settings.RepoKey(ctx, worktree)                //nolint:errcheck // empty when unknown
-	homeKey, _ := settings.RepoKey(ctx, home.state.WorktreePath) //nolint:errcheck // empty when unknown
-	if homeKey == "" {
-		homeKey = filepath.ToSlash(filepath.Dir(home.commonDir))
-	}
+	repoKey := publicRepoKey(ctx, worktree)
+	homeKey := publicRepoKey(ctx, home.state.WorktreePath)
 	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
 		return err
@@ -352,8 +349,7 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)
 	}
-	here, _ := gitdir.CommonDir(ctx) //nolint:errcheck // a hint only
-	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, CommonDir: here, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, At: time.Now().UTC()}
+	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, At: time.Now().UTC()}
 	if err := appendCrossRepoLink(home, link); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "cross-repo"), "could not record the link in the session's home repository",
 			slog.String("session_id", home.state.SessionID), slog.String("error", err.Error()))
@@ -363,6 +359,24 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 		slog.String("session_id", home.state.SessionID), slog.String("checkpoint_id", cpID.String()),
 		slog.String("home_repo", homeKey))
 	return nil
+}
+
+// publicRepoKey names the repository whose worktree is worktree in
+// checkpoint metadata, which is pushed: its normalized origin, else the name
+// of its directory. settings.RepoKey falls back to the local path, which
+// would publish the user's directory layout.
+func publicRepoKey(ctx context.Context, worktree string) string {
+	if worktree == "" {
+		return ""
+	}
+	key, err := settings.RepoKey(ctx, worktree)
+	if err != nil || key == "" {
+		key = worktree
+	}
+	if native := filepath.FromSlash(key); filepath.IsAbs(native) || filepath.VolumeName(native) != "" {
+		return filepath.Base(filepath.Clean(native))
+	}
+	return key
 }
 
 // crossRepoLinksName is a session's link journal in its home git common dir:

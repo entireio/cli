@@ -703,17 +703,19 @@ type CodeLearning struct {
 type CrossRepoMarker struct {
 	// CommitSHA is the commit in this repository.
 	CommitSHA string `json:"commit_sha"`
-	// Repo names this repository: its normalized origin, else its path.
+	// Repo names this repository: its normalized origin, else its directory
+	// name. Never a local path: the marker is pushed.
 	Repo string `json:"repo,omitempty"`
 	// HomeRepo names the session's home repository the same way.
 	HomeRepo string `json:"home_repo"`
 }
 
 // LinkedRepoCommit is one commit a session's agent made in another
-// repository, recorded on the home side.
+// repository, recorded on the home side. RepoKey names that repository as
+// CrossRepoMarker.Repo does; no local path is recorded, since the home's
+// checkpoints carry these and are pushed.
 type LinkedRepoCommit struct {
 	RepoKey      string    `json:"repo_key"`
-	CommonDir    string    `json:"common_dir,omitempty"`
 	SHA          string    `json:"sha"`
 	CheckpointID string    `json:"checkpoint_id,omitempty"`
 	LinkedBy     string    `json:"linked_by"`

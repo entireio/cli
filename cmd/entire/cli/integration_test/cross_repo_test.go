@@ -161,6 +161,9 @@ func assertMarker(t *testing.T, d *TestEnv, cpID, sessionID, sha string) {
 	if meta.CrossRepo == nil || meta.CrossRepo.CommitSHA != sha || meta.CrossRepo.HomeRepo == "" {
 		t.Errorf("checkpoint %s is not a marker for %s: %+v", cpID, sha, meta.CrossRepo)
 	}
+	if meta.CrossRepo != nil && (filepath.IsAbs(meta.CrossRepo.HomeRepo) || filepath.IsAbs(meta.CrossRepo.Repo)) {
+		t.Errorf("marker %s names a repository by local path: %+v", cpID, meta.CrossRepo)
+	}
 	if meta.TokenUsage != nil {
 		t.Errorf("marker %s carries token usage", cpID)
 	}
@@ -187,6 +190,11 @@ func (x *crossRepo) assertHomeCheckpointLists(t *testing.T, shas ...string) {
 	}
 	if out := x.c.RunCLI("checkpoint", "explain", cpID); !strings.Contains(out, shas[0]) {
 		t.Errorf("checkpoint explain does not list %s:\n%s", shas[0], out)
+	}
+	for _, l := range meta.SessionLinkedRepos {
+		if l.RepoKey == "" || filepath.IsAbs(l.RepoKey) {
+			t.Errorf("home checkpoint %s names a repository by local path: %+v", cpID, l)
+		}
 	}
 	if len(meta.SessionLinkedRepos) < len(shas) {
 		t.Errorf("session-level list %+v shorter than %d", meta.SessionLinkedRepos, len(shas))
