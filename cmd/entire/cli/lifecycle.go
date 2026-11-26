@@ -213,8 +213,8 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	refreshCancel()
 
-	// Detached; feeds the context injection of the session's first turns.
-	maybeSpawnLiveSessionsRefreshFor(ctx, ag)
+	// Readies the live sessions cache for the first turn: bounded, fails open.
+	refreshLiveSessionsAtSessionStart(ctx, ag)
 
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
@@ -571,10 +571,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 	// Read before taking the session lock: a small local file, no network.
-	var live liveSessionsBlock
-	if cache, ok := loadLiveSessionsCache(ctx); ok {
-		live = liveSessionsBlockFor(cache, liveSessionOwnIDs(ag, event), time.Now())
-	}
+	liveCache, live, liveFirstTurnOK := liveSessionsForTurn(ctx, ag, event)
 	var injectBase, injectTrails, injectLive, normalSession bool
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		// Review/investigate sessions are task-specific and don't need the
@@ -594,12 +591,8 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 				injectTrails = decision == trailEnablementCacheEnabled
 			}
 		}
-		// An unknown live cache changes nothing; a known one whose set
-		// differs is recorded, and injected when it names anyone. When the
-		// sessions end the record clears without a word, so the same set
-		// coming back is news again.
-		liveChanged := live.Known && live.Fingerprint != state.LiveSessionsFingerprint
-		injectLive = liveChanged && live.Text != ""
+		var liveChanged bool
+		liveChanged, injectLive = live.decide(state.LiveSessionsFingerprint, injectBase, liveFirstTurnOK)
 		if !injectBase && trailsDecided == state.ContextInjectionDecided && !liveChanged {
 			return strategy.ErrMutationSkip
 		}
@@ -612,7 +605,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	})
 	// The refresh is detached and throttled; it feeds a later turn.
 	if normalSession {
-		maybeSpawnLiveSessionsRefresh(ctx)
+		maybeSpawnLiveSessionsRefresh(ctx, liveCache)
 	}
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",

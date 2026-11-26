@@ -453,32 +453,52 @@ func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
 // trail-enablement refresh and the zombie-session sweep, each with its own
 // marker name and ttl.
 func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
+	recent, _ := spawnMarker(commonDir, marker, ttl, now)
+	return recent
+}
+
+// claimSpawnMarker is recentlySpawnedMarker failing closed: it reports
+// whether the caller may spawn, which needs the marker not recent AND now
+// recorded. For a spawn that runs on every turn (the live sessions refresh):
+// when the marker can't be written (a read-only git common dir), the child
+// couldn't write its cache either, and failing open would spawn one on every
+// turn forever.
+func claimSpawnMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
+	recent, recorded := spawnMarker(commonDir, marker, ttl, now)
+	return !recent && recorded
+}
+
+// spawnMarker is the shared read-and-record behind recentlySpawnedMarker and
+// claimSpawnMarker: whether the marker was refreshed within ttl and, when it
+// wasn't, whether now was recorded in it.
+func spawnMarker(commonDir, marker string, ttl time.Duration, now time.Time) (recent, recorded bool) {
 	root, err := gitdir.OpenAt(commonDir)
 	if err != nil {
-		return false
+		return false, false
 	}
 	// Create the directory before acquiring the lock: flock opens the lock file,
 	// which fails if its parent doesn't exist yet (mirrors
 	// ModifyClonePreferences, which creates before locking).
 	if err := osroot.MkdirAllNoSymlink(root, spawnMarkerDirName, 0o750); err != nil {
-		return false
+		return false, false
 	}
 	markerName := spawnMarkerDirName + "/" + marker
 	release, err := flock.AcquireIn(root, markerName+".lock")
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer release()
 
 	if data, readErr := osroot.ReadFileNoFollow(root, markerName); readErr == nil {
 		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
 			now.After(last) && now.Sub(last) < ttl {
-			return true
+			return true, false
 		}
 	}
-	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
-	_ = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
-	return false
+	// Best-effort for recentlySpawnedMarker: a failed write just means the
+	// next hook re-spawns. claimSpawnMarker refuses the spawn instead.
+	err = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	return false, err == nil
 }
 
 // spawnMarkerDirName is the marker directory inside the git common dir. It is
