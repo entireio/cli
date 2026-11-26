@@ -924,28 +924,29 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		for _, st := range g.sessions {
 			totalSessions++
 
-			agentLabel := string(st.AgentType)
+			agentLabel := tuiutil.SanitizeDisplayLine(string(st.AgentType))
 			if agentLabel == "" {
 				agentLabel = unknownPlaceholder
 			}
+			sessionID := tuiutil.SanitizeDisplayLine(st.SessionID)
 
 			// Line 1: Agent (model) · sessionID
 			if st.ModelName != "" {
 				fmt.Fprintf(w, "%s %s %s %s\n",
 					sty.render(sty.agent, agentLabel),
-					sty.render(sty.dim, "("+st.ModelName+")"),
+					sty.render(sty.dim, "("+tuiutil.SanitizeDisplayLine(st.ModelName)+")"),
 					sty.render(sty.dim, "·"),
-					st.SessionID)
+					sessionID)
 			} else {
 				fmt.Fprintf(w, "%s %s %s\n",
 					sty.render(sty.agent, agentLabel),
 					sty.render(sty.dim, "·"),
-					st.SessionID)
+					sessionID)
 			}
 
 			// Line 2: > "first prompt" (chevron + quoted, truncated)
 			if st.LastPrompt != "" {
-				prompt := stringutil.TruncateRunes(st.LastPrompt, 60, "...")
+				prompt := stringutil.TruncateRunes(tuiutil.SanitizeDisplayLine(st.LastPrompt), 60, "...")
 				fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
 			}
 

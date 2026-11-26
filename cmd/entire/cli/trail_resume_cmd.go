@@ -22,6 +22,8 @@ import (
 	sessionpkg "github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -351,7 +353,7 @@ func printTrailRestoredSessionSummary(w io.Writer, sessions []strategy.RestoredS
 	case len(sessions) > 1:
 		fmt.Fprintf(w, "\n✓ Restored %d checkpoint sessions.\n", len(sessions))
 	case len(sessions) == 1:
-		fmt.Fprintf(w, "✓ Restored checkpoint session %s.\n", sessions[0].SessionID)
+		fmt.Fprintf(w, "✓ Restored checkpoint session %s.\n", tuiutil.SanitizeDisplayLine(sessions[0].SessionID))
 	}
 	if len(sessions) > 0 && trailRestoredSessionsAreAllReviewOrInvestigation(sessions) {
 		fmt.Fprintln(w, "  Only review/investigation checkpoint sessions were found; these are transcript logs and may not appear as trail UI sessions.")
@@ -684,6 +686,12 @@ func buildTrailResumeCommands(ctx trailResumeContext) []string {
 		commands = append(commands, resumeCommand+" --checkpoint "+shellArg(ctx.DefaultResume.CheckpointID))
 	}
 	for _, session := range ctx.Sessions {
+		// Session IDs come from fetched checkpoint metadata, which nothing
+		// validates on the way in. Resume refuses an unsafe ID, so a command
+		// naming one could only fail.
+		if validation.ValidateSessionID(session.SessionID) != nil {
+			continue
+		}
 		commands = append(commands, resumeCommand+" --session "+shellArg(session.SessionID))
 	}
 	return commands
@@ -727,30 +735,30 @@ func printTrailResumeContext(w io.Writer, ctx trailResumeContext) {
 func printTrailResumeTrail(w io.Writer, trail trailResumeTrailContext) {
 	switch {
 	case trail.Number > 0:
-		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
+		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, tuiutil.SanitizeDisplayLine(trail.Title))
 	case trail.ID != "":
-		fmt.Fprintf(w, "  Trail %s  %s\n", trail.ID, trail.Title)
+		fmt.Fprintf(w, "  Trail %s  %s\n", tuiutil.SanitizeDisplayLine(trail.ID), tuiutil.SanitizeDisplayLine(trail.Title))
 	default:
-		fmt.Fprintf(w, "  Trail  %s\n", trail.Title)
+		fmt.Fprintf(w, "  Trail  %s\n", tuiutil.SanitizeDisplayLine(trail.Title))
 	}
 	parts := []string{}
 	if trail.Status != "" {
-		parts = append(parts, "Status: "+trail.Status)
+		parts = append(parts, "Status: "+tuiutil.SanitizeDisplayLine(trail.Status))
 	}
 	if trail.Phase != "" {
-		parts = append(parts, "Phase: "+trail.Phase)
+		parts = append(parts, "Phase: "+tuiutil.SanitizeDisplayLine(trail.Phase))
 	}
 	if trail.Branch != "" {
-		parts = append(parts, "Branch: "+trail.Branch)
+		parts = append(parts, "Branch: "+tuiutil.SanitizeDisplayLine(trail.Branch))
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))
 	}
 	if trail.Base != "" {
-		fmt.Fprintf(w, "  Base: %s\n", trail.Base)
+		fmt.Fprintf(w, "  Base: %s\n", tuiutil.SanitizeDisplayLine(trail.Base))
 	}
 	if trail.URL != "" {
-		fmt.Fprintf(w, "  URL: %s\n", trail.URL)
+		fmt.Fprintf(w, "  URL: %s\n", tuiutil.SanitizeDisplayLine(trail.URL))
 	}
 	fmt.Fprintln(w)
 }
@@ -776,7 +784,7 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 		if prompt == "" {
 			prompt = trailResumeNoPrompt
 		} else {
-			prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 72, "...")
+			prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 72, "...")
 		}
 		agent := session.Agent
 		if agent == "" {
@@ -787,9 +795,9 @@ func printTrailResumeSessions(w io.Writer, sessions []trailResumeSessionContext,
 			when = timeAgo(session.LastActive)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			abbreviate12(session.SessionID),
-			agent,
-			session.CheckpointID,
+			tuiutil.SanitizeDisplayLine(abbreviate12(session.SessionID)),
+			tuiutil.SanitizeDisplayLine(agent),
+			tuiutil.SanitizeDisplayLine(session.CheckpointID),
 			when,
 			prompt,
 		)
@@ -849,8 +857,9 @@ func printTrailResumeCommands(w io.Writer, commands []string) {
 		return
 	}
 	fmt.Fprintln(w, "  Commands:")
+	// The commands name the server's branch and project; JSON keeps them raw.
 	for _, command := range commands {
-		fmt.Fprintf(w, "    %s\n", command)
+		fmt.Fprintf(w, "    %s\n", tuiutil.SanitizeDisplayLine(command))
 	}
 }
 
@@ -948,9 +957,9 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	if prompt == "" {
 		prompt = trailResumeNoPrompt
 	} else {
-		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 50, "...")
+		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 50, "...")
 	}
-	agentName := strings.TrimSpace(string(session.Agent))
+	agentName := strings.TrimSpace(tuiutil.SanitizeDisplayLine(string(session.Agent)))
 	if agentName == "" {
 		agentName = unknownAgentLabel
 	}
@@ -958,7 +967,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 	if !session.CreatedAt.IsZero() {
 		when = timeAgo(session.CreatedAt)
 	}
-	parts := []string{session.SessionID, prompt, agentName, "last active " + when}
+	parts := []string{tuiutil.SanitizeDisplayLine(session.SessionID), prompt, agentName, "last active " + when}
 	if kindLabel := trailRestoredSessionKindLabel(session.Kind); kindLabel != "" {
 		parts = append(parts, kindLabel)
 	} else if trailRestoredSessionLooksReviewLike(session) {
@@ -1068,12 +1077,12 @@ func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strate
 		return nil
 	}
 	if err != nil {
-		fmt.Fprintf(w, "\nCould not launch %s: %v\n", resumeCmd, err)
+		fmt.Fprintf(w, "\nCould not launch %s: %v\n", tuiutil.SanitizeDisplayLine(resumeCmd), err)
 		fmt.Fprintf(w, "\nTo continue this session:\n")
 		printSessionCommand(w, resumeCmd, session.Prompt, false, true)
 		return nil
 	}
-	fmt.Fprintf(w, "\nLaunching: %s\n", resumeCmd)
+	fmt.Fprintf(w, "\nLaunching: %s\n", tuiutil.SanitizeDisplayLine(resumeCmd))
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -1145,9 +1154,9 @@ func trailResumeSessionOptionLabel(session trailResumeSessionContext) string {
 	if prompt == "" {
 		prompt = trailResumeNoPrompt
 	} else {
-		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), 50, "...")
+		prompt = stringutil.TruncateRunes(stringutil.CollapseWhitespace(tuiutil.SanitizeDisplayLine(prompt)), 50, "...")
 	}
-	agent := session.Agent
+	agent := tuiutil.SanitizeDisplayLine(session.Agent)
 	if agent == "" {
 		agent = unknownAgentLabel
 	}
@@ -1155,5 +1164,5 @@ func trailResumeSessionOptionLabel(session trailResumeSessionContext) string {
 	if !session.LastActive.IsZero() {
 		when = timeAgo(session.LastActive)
 	}
-	return fmt.Sprintf("%s · %s · %s · last active %s", session.SessionID, prompt, agent, when)
+	return fmt.Sprintf("%s · %s · %s · last active %s", tuiutil.SanitizeDisplayLine(session.SessionID), prompt, agent, when)
 }
