@@ -348,16 +348,16 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"trail values with the change's full url, not only the trail's. Give pull\n" +
 		"request details only when the user asks for the pull request. On a\n" +
 		"GitHub repository Entire already opened a draft pull request for the\n" +
-		"trail: find it with `gh pr view` rather than creating another. Entire-native repositories\n" +
-		"have none; say so and give the change's url.\n" +
+		"trail: find it with `gh pr view` rather than creating another.\n" +
+		"Entire-native repositories have none; say so and give the change's url.\n" +
 		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
 		"<repository>/<number> with its own url and base (the branch it merges\n" +
 		"into). When show reaches the trail through a change (the current\n" +
 		"branch, --branch, or <repo>/<n>), that entry has current: true; link\n" +
 		"its url, the change's page, in preference to the top-level url, the\n" +
-		"whole trail's page. When asked to act on\n" +
-		"(e.g. review) a whole project trail, cover every change. Checkout and\n" +
+		"whole trail's page. When asked to act on (e.g. review) a whole project\n" +
+		"trail, cover every change. Checkout and\n" +
 		"review need a clone of that repository: do the ones in this clone and\n" +
 		"tell the user which changes need another clone instead of skipping\n" +
 		"them silently. A change's merge state is changes[].mergeability: its\n" +
