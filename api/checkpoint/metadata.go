@@ -727,6 +727,8 @@ type LinkedRepoCommit struct {
 	// TurnID is the home session's turn when the commit was made.
 	TurnID string    `json:"turn_id,omitempty"`
 	At     time.Time `json:"at"`
+	// CommittedAt is the commit's git committer time.
+	CommittedAt time.Time `json:"committed_at,omitzero"`
 }
 
 // LinkedCommit is one trailer-less link from a checkpoint to a commit; see

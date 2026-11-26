@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // Cross-repository linking (global enable only). A session lives in the
@@ -330,7 +331,8 @@ const (
 // The link is then appended to the home's journal, the handoff the home's
 // own hooks fold into the session's CheckpointLinks (foldCrossRepoLinks):
 // this repository never writes the home's session state.
-func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *git.Repository, cpID id.CheckpointID, home *crossRepoHome, sha string, committed map[string]struct{}, linkedBy string) error {
+func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *git.Repository, cpID id.CheckpointID, home *crossRepoHome, commit *object.Commit, committed map[string]struct{}, linkedBy string) error {
+	sha := commit.Hash.String()
 	worktree, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve this worktree: %w", err)
@@ -352,7 +354,7 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)
 	}
-	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, TurnID: home.state.TurnID, At: time.Now().UTC()}
+	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, TurnID: home.state.TurnID, At: time.Now().UTC(), CommittedAt: commit.Committer.When.UTC()}
 	if err := appendCrossRepoLink(home, link); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "cross-repo"), "could not record the link in the session's home repository",
 			slog.String("session_id", home.state.SessionID), slog.String("error", err.Error()))

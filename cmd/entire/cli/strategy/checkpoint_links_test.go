@@ -33,7 +33,10 @@ func TestRecordHomeCheckpointLink_FoldsJournalFirstAndIsIdempotent(t *testing.T)
 		}))
 	}
 
-	recordHomeCheckpointLink(ctx, state, "000000000002", "c2sha")
+	repo, err := OpenRepository(ctx)
+	require.NoError(t, err)
+	defer repo.Close()
+	recordHomeCheckpointLink(ctx, repo, state, "000000000002", "c2sha")
 	foldCrossRepoLinks(ctx, state)
 
 	got := make([]id.CheckpointID, 0, len(state.CheckpointLinks))

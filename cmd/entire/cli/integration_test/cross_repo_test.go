@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -656,6 +657,56 @@ func TestCrossRepo_SweepLinksLinkedWorktreeCommit(t *testing.T) {
 // with their commits, across D, a worktree of D and C itself, and keeps them
 // across turn end and a new prompt: a home commit in the same turn as D's
 // folds D's links first, and a turn with no home commit folds them at its end.
+// waitNextSecond sleeps into the next wall-clock second, so the next commit's
+// committer time (whole seconds) is later than the previous one's.
+func waitNextSecond() {
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
+}
+
+// In the first turn that commits in D, D's hooks are not installed yet, so its
+// commits carry no trailer: the turn-end sweep links them after C's same-turn
+// commit condensed. The session's list still follows commit order, and the
+// sweep links D's commits oldest first.
+func TestCrossRepo_SessionStateListsSweptCommitsInCommitOrder(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	sess := x.c.NewSession()
+	// A non-empty transcript at turn start: from offset 0 the turn end would
+	// read edits from C's condensation point and miss D's.
+	sess.CreateTranscript("an earlier exchange", nil)
+	x.startTurn(t, sess, "commit in d, then in c")
+
+	edit(t, sess, d, "d1.txt")
+	d1 := commitUnhooked(d, "d1.txt")
+	waitNextSecond()
+	edit(t, sess, d, "w1.txt")
+	w1 := commitUnhooked(d, "w1.txt")
+	waitNextSecond()
+	x.c.WriteFile("home.txt", "home work")
+	x.c.GitCommitWithHooksAsAgent("home commit", "home.txt")
+	c2 := x.c.GetHeadHash()
+	x.endTurn(t, sess)
+
+	state, err := x.c.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("load C's session state: %v", err)
+	}
+	var got []string
+	for _, l := range state.CheckpointLinks {
+		got = append(got, strings.Join(l.LinkedCommits, ","))
+	}
+	if want := []string{d1, w1, c2}; !slices.Equal(got, want) {
+		t.Fatalf("C's list links commits %v, want commit order %v", got, want)
+	}
+	if state.CheckpointLinks[0].At.After(state.CheckpointLinks[1].At) {
+		t.Errorf("the sweep linked w1 (at %s) before d1 (at %s)", state.CheckpointLinks[1].At, state.CheckpointLinks[0].At)
+	}
+	if prev := state.PreviousCheckpoint(state.CheckpointLinks[2].CheckpointID); prev != state.CheckpointLinks[1].CheckpointID {
+		t.Errorf("home checkpoint's predecessor = %s, want w1's %s", prev, state.CheckpointLinks[1].CheckpointID)
+	}
+}
+
 func TestCrossRepo_SessionStateListsEveryCheckpoint(t *testing.T) {
 	t.Parallel()
 	x := newCrossRepo(t, 1)

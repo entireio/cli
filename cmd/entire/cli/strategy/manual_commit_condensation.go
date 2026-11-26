@@ -890,7 +890,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
-	recordHomeCheckpointLink(ctx, state, checkpointID, o.commitSHA)
+	recordHomeCheckpointLink(ctx, repo, state, checkpointID, o.commitSHA)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base
 	// must be re-anchored — but not now. We defer until the next counted turn (in

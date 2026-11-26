@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -24,6 +27,7 @@ func foldCrossRepoLinks(ctx context.Context, state *SessionState) {
 			TurnID:        link.TurnID,
 			Kind:          session.CheckpointLinkCrossRepo,
 			At:            link.At,
+			CommittedAt:   link.CommittedAt,
 		})
 	}
 }
@@ -31,11 +35,15 @@ func foldCrossRepoLinks(ctx context.Context, state *SessionState) {
 // recordHomeCheckpointLink folds pending cross-repository links, then adds
 // the home checkpoint just written, so the list stays in recorded order.
 // commitSHA is empty when no commit carries the checkpoint.
-func recordHomeCheckpointLink(ctx context.Context, state *SessionState, cpID id.CheckpointID, commitSHA string) {
+func recordHomeCheckpointLink(ctx context.Context, repo *git.Repository, state *SessionState, cpID id.CheckpointID, commitSHA string) {
 	foldCrossRepoLinks(ctx, state)
-	link := session.CheckpointLink{CheckpointID: cpID, TurnID: state.TurnID, Kind: session.CheckpointLinkHome, At: time.Now().UTC()}
+	now := time.Now().UTC()
+	link := session.CheckpointLink{CheckpointID: cpID, TurnID: state.TurnID, Kind: session.CheckpointLinkHome, At: now, CommittedAt: now}
 	if commitSHA != "" {
 		link.LinkedCommits = []string{commitSHA}
+		if commit, err := repo.CommitObject(plumbing.NewHash(commitSHA)); err == nil {
+			link.CommittedAt = commit.Committer.When.UTC()
+		}
 	}
 	if root, err := paths.WorktreeRoot(ctx); err == nil {
 		link.RepoKey, _ = settings.RepoKey(ctx, root) //nolint:errcheck // empty when unknown
