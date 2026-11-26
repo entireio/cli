@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +65,12 @@ func TestTrackCommands_NonInteractive(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Contains(t, out, `"tracked":false`)
 	assert.Contains(t, out, `"track_reason":"denied by track.deny"`)
+	assert.Contains(t, out, `"enabled":false`, "hooks treat an untracked repository as not enabled")
+
+	out, err = runRootCmd(t, "status")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Not tracked (denied by track.deny")
+	assert.NotContains(t, out, "Enabled")
 
 	out, err = runRootCmd(t, "track", "org", "add", "https://github.com/EntireIO")
 	require.NoError(t, err, out)
@@ -72,6 +80,35 @@ func TestTrackCommands_NonInteractive(t *testing.T) {
 
 	_, err = runRootCmd(t, "track", "org", "add", "nonsense")
 	require.Error(t, err)
+}
+
+// A repository the developer enabled itself is tracked outside the org rule,
+// and status says Enabled; track.deny still excludes it.
+func TestStatus_ExplicitEnableOverridesOrgRule(t *testing.T) {
+	_, _, repo, out, err := runGlobalCmd(t, false, `{"global_enable": true, "track": {"orgs": ["github.com/entireio"]}}`, "version")
+	require.NoError(t, err, out)
+	t.Cleanup(settings.ClearTrackCache)
+
+	out, err = runRootCmd(t, "status", "--json")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, `"enabled":false`, "on only through global enable and outside the org")
+	assert.Contains(t, out, `"tracked":false`)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, settings.EntireSettingsLocalFile), []byte(`{"enabled": true}`), 0o600))
+	out, err = runRootCmd(t, "status", "--json")
+	require.NoError(t, err, out)
+	var got statusJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.True(t, got.Enabled)
+	assert.Empty(t, got.EnabledBy)
+	require.NotNil(t, got.Tracked)
+	assert.True(t, *got.Tracked)
+
+	out, err = runRootCmd(t, "status")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "Enabled")
+	assert.NotContains(t, out, "Not tracked")
 }
 
 // `enable --global --track-org` sets the org rule without a prompt; --yes

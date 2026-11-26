@@ -615,8 +615,8 @@ With global enable on, every repository is tracked unless you exclude it. The
   e.g. `github.com/owner/repo`, or by path when it has no remote);
   `entire track allow` undoes it.
 - `entire track org add github.com/entireio` tracks only repositories whose
-  origin is in an allowed org, plus those allowed by name (`entire track allow`,
-  or a `repos` entry with `"enabled": true`). `entire enable --global` offers
+  origin is in an allowed org, plus those allowed by name (`entire track allow`)
+  and those you enabled yourself. `entire enable --global` offers
   this for the current repository's org; `--track-org <host/org>` sets it
   without a prompt, and `--yes` or no terminal keeps every repository.
 - `entire track select` lists known repositories (this one, those Entire
@@ -624,10 +624,17 @@ With global enable on, every repository is tracked unless you exclude it. The
   denied. `entire track list [--json]` and `entire status` show the rule that
   applies here; `entire track reset` tracks everything again.
 
-First match wins: a committed `"enabled": false`; a `repos` entry with
-`"enabled": false`; a deny; an org rule the repository is outside and not
-allowed by name; otherwise tracked. An excluded repository behaves as not
-enabled: its agent hooks record nothing and no git hooks are installed there.
+First match wins: a `repos` entry or an untracked
+`.entire/settings.local.json` with `"enabled": false`; a committed
+`"enabled": false` that neither of those overrides; a deny; a
+repository you enabled yourself (`entire enable` here, a `repos` entry or an
+untracked local settings file with `"enabled": true`) is tracked, since a
+project install overrides global enable; an org rule the repository is
+outside and not allowed by name; otherwise tracked. So the org rule narrows
+only repositories that are on solely through global enable, while a deny
+applies to every repository. An excluded repository behaves as not enabled:
+its agent hooks record nothing, no git hooks are installed there, and
+`entire status` reports it as not tracked (`"enabled": false` in `--json`).
 The rule is read only from the user settings file, so nothing a repository
 commits can widen or narrow it, and an invalid `track` block tracks nothing.
 

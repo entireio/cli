@@ -139,12 +139,17 @@ func ClearTrackCache() {
 // RepoTrackable reports whether global enable may record sessions and link
 // commits in the repository at repoRoot, and why. First match wins:
 //
-//  1. its committed .entire/settings.json sets enabled:false;
-//  2. a `repos` entry for it sets enabled:false;
+//  1. a `repos` entry for it, or an honored settings.local.json, sets
+//     enabled:false;
+//  2. neither sets enabled:true and its committed .entire/settings.json sets
+//     enabled:false;
 //  3. track.deny names it;
-//  4. track.orgs is set and neither its origin lies in one nor track.repos
-//     (or a `repos` entry with enabled:true) names it;
-//  5. otherwise it is trackable.
+//  4. the developer enabled it explicitly (a `repos` entry or an honored
+//     settings.local.json with enabled:true): trackable, since a project
+//     install overrides global enable and only track.deny excludes it;
+//  5. track.orgs is set and neither its origin lies in one nor track.repos
+//     names it;
+//  6. otherwise it is trackable.
 //
 // Answers are cached per root for the process: a hook is short-lived, and the
 // rule changes only through ModifyTrackRule, which clears the cache.
@@ -164,18 +169,9 @@ func RepoTrackable(ctx context.Context, repoRoot string) (bool, string) {
 }
 
 func resolveTrackable(ctx context.Context, root string) trackResult {
-	if committed, err := loadFromFile(filepath.Join(root, EntireSettingsFile)); err == nil && !committed.Enabled {
-		return trackResult{reason: "disabled by this repository's " + EntireSettingsFile}
-	}
-	overlay := loadUserOverlay(ctx)
-	explicitlyEnabled := false
-	for _, prefs := range overlay.repoPreferences(ctx, root) {
-		if prefs.Enabled != nil {
-			if !*prefs.Enabled {
-				return trackResult{reason: "disabled for this repository in your user settings (repos)"}
-			}
-			explicitlyEnabled = true
-		}
+	explicitlyEnabled, disabledReason := explicitEnablement(ctx, root)
+	if disabledReason != "" {
+		return trackResult{reason: disabledReason}
 	}
 	rule, err := LoadTrackRule(ctx)
 	if err != nil {
@@ -188,16 +184,66 @@ func resolveTrackable(ctx context.Context, root string) trackResult {
 	if matchesAnyRepoKey(ctx, rule.Deny, originKeys, root) {
 		return trackResult{reason: "denied by track.deny"}
 	}
+	if explicitlyEnabled {
+		return trackResult{ok: true, reason: "enabled in this repository"}
+	}
 	if len(rule.Orgs) == 0 {
 		return trackResult{ok: true, reason: "every repository is tracked"}
 	}
-	if explicitlyEnabled || matchesAnyRepoKey(ctx, rule.Repos, originKeys, root) {
+	if matchesAnyRepoKey(ctx, rule.Repos, originKeys, root) {
 		return trackResult{ok: true, reason: "allowed by name"}
 	}
 	if org := matchingOrg(rule.Orgs, originKeys); org != "" {
 		return trackResult{ok: true, reason: "in tracked org " + org}
 	}
 	return trackResult{reason: "not in a tracked org (" + strings.Join(rule.Orgs, ", ") + ")"}
+}
+
+// explicitEnablement reports whether the developer enabled the repository at
+// root themselves, or why it is disabled. The developer's own `enabled`
+// (a `repos` entry, then an honored settings.local.json) overrides the
+// committed settings.json, as it does in the settings merge.
+func explicitEnablement(ctx context.Context, root string) (enabled bool, disabledReason string) {
+	overlay := loadUserOverlay(ctx)
+	for _, prefs := range overlay.repoPreferences(ctx, root) {
+		if prefs.Enabled != nil {
+			if !*prefs.Enabled {
+				return false, "disabled for this repository in your user settings (repos)"
+			}
+			enabled = true
+		}
+	}
+	if local := localEnabledAt(ctx, root); local != nil {
+		if !*local {
+			return false, "disabled by this worktree's " + EntireSettingsLocalFile
+		}
+		enabled = true
+	}
+	if enabled {
+		return true, ""
+	}
+	if committed, err := loadFromFile(filepath.Join(root, EntireSettingsFile)); err == nil && !committed.Enabled {
+		return false, "disabled by this repository's " + EntireSettingsFile
+	}
+	return false, ""
+}
+
+// localEnabledAt is the `enabled` value of the settings.local.json in the
+// worktree at root, or nil when the file is absent, unreadable, tracked by git
+// (so not the developer's own), or carries no `enabled` key.
+func localEnabledAt(ctx context.Context, root string) *bool {
+	path := filepath.Join(root, EntireSettingsLocalFile)
+	data, err := readConfined(path)
+	if err != nil || classifyLocalSettings(ctx, path) == localTracked {
+		return nil
+	}
+	var raw struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return nil
+	}
+	return raw.Enabled
 }
 
 func matchesAnyRepoKey(ctx context.Context, keys, originKeys []string, root string) bool {

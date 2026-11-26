@@ -62,9 +62,9 @@ func trackable(t *testing.T, root string) (bool, string) {
 // The precedence table, first match wins, across origin shapes.
 func TestRepoTrackable_Precedence(t *testing.T) {
 	for name, tc := range map[string]struct {
-		origin, user, committed string
-		want                    bool
-		reason                  string
+		origin, user, committed, local string
+		want                           bool
+		reason                         string
 	}{
 		"no rule tracks everything": {
 			origin: "git@github.com:other/x.git", user: `{"global_enable": true}`, want: true, reason: "every repository",
@@ -101,7 +101,31 @@ func TestRepoTrackable_Precedence(t *testing.T) {
 		},
 		"repos enabled true counts as an explicit allow": {
 			origin: "git@github.com:other/cli.git",
-			user:   `{"repos": {"gh/other/cli": {"enabled": true}}, "track": {"orgs": ["github.com/entireio"]}}`, want: true, reason: "by name",
+			user:   `{"repos": {"gh/other/cli": {"enabled": true}}, "track": {"orgs": ["github.com/entireio"]}}`, want: true, reason: "enabled in this repository",
+		},
+		"local enabled true outside the org is tracked": {
+			origin: "git@github.com:other/cli.git", local: `{"enabled": true}`,
+			user: `{"global_enable": true, "track": {"orgs": ["github.com/entireio"]}}`, want: true, reason: "enabled in this repository",
+		},
+		"deny still excludes a locally enabled repository": {
+			origin: "git@github.com:other/cli.git", local: `{"enabled": true}`,
+			user: `{"global_enable": true, "track": {"deny": ["gh/other/cli"]}}`, reason: "track.deny",
+		},
+		"deny still excludes a repos-enabled repository": {
+			origin: "git@github.com:other/cli.git",
+			user:   `{"repos": {"gh/other/cli": {"enabled": true}}, "track": {"deny": ["gh/other/cli"]}}`, reason: "track.deny",
+		},
+		"an explicit enable overrides a committed enabled false": {
+			origin: "git@github.com:other/cli.git", committed: `{"enabled": false}`, local: `{"enabled": true}`,
+			user: `{"track": {"orgs": ["github.com/entireio"]}}`, want: true, reason: "enabled in this repository",
+		},
+		"local enabled false is not tracked": {
+			origin: "git@github.com:entireio/cli.git", local: `{"enabled": false}`,
+			user: `{"track": {"orgs": ["github.com/entireio"]}}`, reason: "settings.local.json",
+		},
+		"local file without enabled is not an explicit enable": {
+			origin: "git@github.com:other/cli.git", local: `{"commit_linking": "always"}`,
+			user: `{"track": {"orgs": ["github.com/entireio"]}}`, reason: "not in a tracked org",
 		},
 		"no remote under an org rule": {
 			user: `{"track": {"orgs": ["github.com/entireio"]}}`, reason: "not in a tracked org",
@@ -122,6 +146,10 @@ func TestRepoTrackable_Precedence(t *testing.T) {
 			if tc.committed != "" {
 				require.NoError(t, os.MkdirAll(filepath.Join(root, ".entire"), 0o755))
 				require.NoError(t, os.WriteFile(filepath.Join(root, EntireSettingsFile), []byte(tc.committed), 0o600))
+			}
+			if tc.local != "" {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, ".entire"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(root, EntireSettingsLocalFile), []byte(tc.local), 0o600))
 			}
 			ok, reason := trackable(t, root)
 			assert.Equal(t, tc.want, ok, reason)
@@ -166,6 +194,20 @@ func TestHookRepoTrackable_OnlyNarrowsGlobalEnable(t *testing.T) {
 	ClearTrackCache()
 	assert.True(t, HookRepoTrackable(t.Context(), root), "global enable off: the rule does not apply")
 	writeUserSettings(t, `{"global_enable": true, "track": {"deny": ["gh/other/cli"]}}`)
+	ClearTrackCache()
+	assert.False(t, HookRepoTrackable(t.Context(), root))
+}
+
+// A repository the developer enabled itself is on whatever the org rule says;
+// only track.deny excludes it.
+func TestHookRepoTrackable_ExplicitEnableOverridesOrgRule(t *testing.T) {
+	root := newTrackRepo(t, "git@github.com:other/cli.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, EntireSettingsLocalFile), []byte(`{"enabled": true}`), 0o600))
+	writeUserSettings(t, `{"global_enable": true, "track": {"orgs": ["github.com/entireio"]}}`)
+	ClearTrackCache()
+	assert.True(t, HookRepoTrackable(t.Context(), root))
+	writeUserSettings(t, `{"global_enable": true, "track": {"orgs": ["github.com/entireio"], "deny": ["gh/other/cli"]}}`)
 	ClearTrackCache()
 	assert.False(t, HookRepoTrackable(t.Context(), root))
 }

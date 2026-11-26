@@ -84,3 +84,58 @@ func TestTrack_RepoInTheOrgLinks(t *testing.T) {
 	sess := x.installByTurn(t)
 	assertAgentCommitLinked(t, x.others[0], x.others[0], "second.txt", sess.ID)
 }
+
+// newExplicitlyEnabledOutsideOrg is a repository outside the org rule that
+// the developer enabled itself (an untracked settings.local.json with
+// enabled:true), under global enable with userSettings.
+func newExplicitlyEnabledOutsideOrg(t *testing.T, userSettings func(repoDir string) string) *TestEnv {
+	t.Helper()
+	env := newNeverEnabledRepo(t)
+	testutil.RunGit(t, env.RepoDir, "remote", "add", "origin", "https://github.com/someone-else/e.git")
+	config, err := os.ReadFile(filepath.Join(env.RepoDir, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.AcceptGitConfigChanges(string(config))
+	env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
+	extra, _ := userTierEnv(t, userSettings(env.RepoDir))
+	env.ExtraEnv = extra
+	return env
+}
+
+// A project install overrides global enable: a repository the developer
+// enabled itself records even though the org rule leaves it out.
+func TestTrack_ExplicitlyEnabledRepoOutsideTheOrgRecords(t *testing.T) {
+	t.Parallel()
+	env := newExplicitlyEnabledOutsideOrg(t, func(string) string {
+		return `{"global_enable": true, "track": {"orgs": ["github.com/entireio"]}}`
+	})
+	runClaudeTurn(t, env, "feature.go", "package feature\n")
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID == "" {
+		t.Errorf("commit in an explicitly enabled repository outside the org rule not linked:\n%s", env.GetCommitMessage(env.GetHeadHash()))
+	}
+}
+
+// track.deny is an explicit exclusion and still applies to a repository the
+// developer enabled itself.
+func TestTrack_DeniedExplicitlyEnabledRepoRecordsNothing(t *testing.T) {
+	t.Parallel()
+	env := newExplicitlyEnabledOutsideOrg(t, func(repoDir string) string {
+		return `{"global_enable": true, "track": {"deny": ["` + filepath.ToSlash(repoDir) + `"]}}`
+	})
+	runClaudeTurn(t, env, "feature.go", "package feature\n")
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+		t.Errorf("commit in a denied repository linked to checkpoint %s", cpID)
+	}
+}
+
+// Cross-repository linking follows the same rule: D, enabled explicitly but
+// outside the org, links the agent's commit.
+func TestTrack_ExplicitlyEnabledOtherRepoOutsideTheOrgLinks(t *testing.T) {
+	t.Parallel()
+	x := newOrgCrossRepo(t, "https://github.com/someone-else/d.git")
+	d := x.others[0]
+	d.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
+	sess := x.installByTurn(t)
+	assertAgentCommitLinked(t, d, d, "second.txt", sess.ID)
+}
