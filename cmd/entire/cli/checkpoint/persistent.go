@@ -1126,70 +1126,14 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 	return true, compactStart, redaction, nil
 }
 
-// compactFields resolves the agent slug used in compact transcript lines
-// (e.g. "claude-code") and the native format the agent declares, if any.
-// Falls back to the raw agent type string, and format detection, when the
+// compactAgentName resolves the agent slug used in compact transcript lines
+// (e.g. "claude-code"). Falls back to the raw agent type string when the
 // agent type is not registered.
-func compactFields(agentType types.AgentType, startLine int) transcriptcompact.MetadataFields {
-	fields := transcriptcompact.MetadataFields{
-		Agent:      string(agentType),
-		CLIVersion: versioninfo.Version,
-		StartLine:  startLine,
+func compactAgentName(agentType types.AgentType) string {
+	if ag, err := agent.GetByAgentType(agentType); err == nil {
+		return string(ag.Name())
 	}
-	ag, err := agent.GetByAgentType(agentType)
-	if err != nil {
-		return fields
-	}
-	fields.Agent = string(ag.Name())
-	if fp, ok := agent.AsTranscriptFormatProvider(ag); ok {
-		fields.Format = fp.TranscriptFormat()
-	}
-	return fields
-}
-
-// compactTranscript picks the compactor for transcript.jsonl. An agent that
-// declares a transcript format gets the built-in converter for it, and its own
-// compactor only if that conversion fails or comes out empty, so an agent can
-// keep its compactor for CLIs that predate the declaration. Otherwise the
-// agent's own compactor runs first and the built-in one is the fallback.
-func compactTranscript(ctx context.Context, agentType types.AgentType, startLine int, transcriptBytes []byte) ([]byte, int, error) {
-	fields := compactFields(agentType, startLine)
-	if fields.Format == "" {
-		if compacted, boundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
-			return compacted, boundary, nil
-		}
-		return compactBuiltin(transcriptBytes, fields)
-	}
-
-	compacted, boundary, err := compactBuiltin(transcriptBytes, fields)
-	switch {
-	case err != nil:
-		logging.Warn(ctx, "declared transcript format conversion failed, trying the agent's compactor",
-			slog.String("agent", string(agentType)),
-			slog.String("format", fields.Format),
-			slog.String("error", err.Error()),
-		)
-	case len(bytes.TrimSpace(compacted)) == 0:
-		logging.Debug(ctx, "declared transcript format converted to nothing, trying the agent's compactor",
-			slog.String("agent", string(agentType)),
-			slog.String("format", fields.Format),
-		)
-	default:
-		return compacted, boundary, nil
-	}
-	if agentCompacted, agentBoundary, ok := compactWithAgent(ctx, agentType, startLine, transcriptBytes); ok {
-		return agentCompacted, agentBoundary, nil
-	}
-	return compacted, boundary, err
-}
-
-// compactBuiltin runs the built-in compactor on already-redacted bytes.
-func compactBuiltin(transcriptBytes []byte, fields transcriptcompact.MetadataFields) ([]byte, int, error) {
-	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), fields)
-	if err != nil {
-		return nil, 0, fmt.Errorf("built-in compactor: %w", err)
-	}
-	return compacted, boundary, nil
+	return string(agentType)
 }
 
 // writeCompactTranscript converts the pre-redacted full transcript into the
@@ -1209,7 +1153,15 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 	compactCtx, compactSpan := perf.Start(ctx, "write_compact_transcript")
 	defer compactSpan.End()
 
-	compacted, boundary, err := compactTranscript(compactCtx, agentType, startLine, transcriptBytes)
+	compacted, boundary, usedAgent := compactWithAgent(compactCtx, agentType, startLine, transcriptBytes)
+	var err error
+	if !usedAgent {
+		compacted, boundary, err = transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
+			Agent:      compactAgentName(agentType),
+			CLIVersion: versioninfo.Version,
+			StartLine:  startLine,
+		})
+	}
 	if err != nil {
 		compactSpan.RecordError(err)
 		logging.Warn(compactCtx, "compact transcript generation failed, skipping transcript.jsonl",

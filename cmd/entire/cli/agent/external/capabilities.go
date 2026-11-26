@@ -54,7 +54,6 @@ func (w *wrappedAgent) DetectPresence(ctx context.Context) (bool, error) {
 	return w.ea.DetectPresence(ctx)
 }
 func (w *wrappedAgent) ProtectedDirs() []string                   { return w.ea.ProtectedDirs() }
-func (w *wrappedAgent) TranscriptFormat() string                  { return w.ea.TranscriptFormat() }
 func (w *wrappedAgent) ReadTranscript(ref string) ([]byte, error) { return w.ea.ReadTranscript(ref) }
 func (w *wrappedAgent) ChunkTranscript(ctx context.Context, c []byte, m int) ([][]byte, error) {
 	return w.ea.ChunkTranscript(ctx, c, m)

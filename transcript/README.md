@@ -202,8 +202,10 @@ detection does for that format, with three differences:
   detected. It converts as the export the lines came from, with `StartLine`
   counting messages.
 
-External agents whose transcript is a built-in agent's format declare it this
-way, for example a Codex fork:
+An external agent whose transcript is a built-in agent's format, such as a
+Codex fork, can import this package and call it from its own
+`compact-transcript` with the format named, pinning the CLI version it was
+tested against:
 
 ```go
 lines, err := transcript.Parse(native, transcript.Options{Agent: "sarvam", CLIVersion: "0.5.1", Format: transcript.FormatCodex})

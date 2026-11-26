@@ -78,8 +78,6 @@ The `capabilities` object determines which optional subcommands the CLI will cal
 
 Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
 
-Optional: `"transcript_format": "codex"` declares that the agent's native transcript is written in a format the CLI already converts, so the CLI's built-in compactor builds its `transcript.jsonl` (see [`compact_transcript`](#capability-compact_transcript)). Use it when the agent is a fork of, or writes the same transcript as, a built-in agent. Values: `claude-code`, `cursor`, `codex`, `copilot-cli`, `factoryai-droid`, `opencode-messages` (one OpenCode `{"info","parts"}` message per line), `pi`. A value this CLI does not know is ignored, and the format is detected from the transcript. `opencode` (an export) and `gemini` are not accepted yet and are ignored the same way: their checkpoint start is a message index, which the CLI does not yet track for external agents.
-
 #### `detect`
 
 Checks whether the agent is present/usable in the current environment.
@@ -340,8 +338,6 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 ### Capability: `compact_transcript`
 
 Required when `capabilities.compact_transcript` is `true`.
-
-When the agent's transcript is in a format the CLI converts, declare `transcript_format` in `info`. The built-in compactor then converts it, writes the agent's `name` on every line, and computes per-call model and usage where that format records them. A declared format takes precedence over this capability: the CLI runs `compact-transcript` only when the built-in conversion fails or comes out empty. An agent can therefore keep this capability for CLIs that predate `transcript_format`, which ignore the field. Declare a format only when the built-in converter covers everything the agent's transcript records: it skips record and block types it does not know without reporting them, and the agent's compactor does not run to fill the gap. An agent whose transcript adds its own record types should keep this capability and not declare a format. Without this capability or `transcript_format`, the CLI detects the format from the transcript's content, and converts unrecognized JSONL as Claude-style lines without per-call usage.
 
 #### `compact-transcript --session-ref <path>`
 

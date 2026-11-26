@@ -30,11 +30,6 @@ type InfoResponse struct {
 	// it runs, so Entire can tell when the agent (not a person) is the caller.
 	// Optional.
 	CallerEnvVars []string `json:"caller_env_vars,omitempty"`
-	// TranscriptFormat names a native transcript format the CLI already
-	// converts (e.g. "codex" for a Codex fork), so the CLI's own converter
-	// builds the agent's compact transcript. Optional; an unknown value is
-	// ignored.
-	TranscriptFormat string `json:"transcript_format,omitempty"`
 }
 
 // DetectResponse is the JSON returned by the "detect" subcommand.

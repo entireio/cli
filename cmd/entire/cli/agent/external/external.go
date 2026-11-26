@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
-	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // defaultRunTimeout is the maximum time an external binary call may take when
@@ -95,28 +94,6 @@ func (e *Agent) ProtectedDirs() []string {
 
 func (e *Agent) ProtectedFiles() []string {
 	return e.info.ProtectedFiles
-}
-
-// TranscriptFormat returns the declared native transcript format, or "" when
-// none is declared, this CLI does not know it (a binary built for a newer
-// CLI), or it is not declarable, in which case the format is detected from
-// the transcript.
-func (e *Agent) TranscriptFormat() string {
-	format := e.info.TranscriptFormat
-	if !transcriptlib.KnownFormat(format) || !declarableFormat(format) {
-		return ""
-	}
-	return format
-}
-
-// declarableFormat reports whether an external agent may declare format.
-// OpenCode exports and Gemini sessions are single JSON documents whose
-// checkpoint start is a message index, but condensation counts an external
-// agent's transcript by line, so a declared one would get the wrong slice
-// from its second checkpoint on. They stay detected, as before, until the
-// count follows the declared format.
-func declarableFormat(format string) bool {
-	return format != transcriptlib.FormatOpenCode && format != transcriptlib.FormatGemini
 }
 
 // --- Agent interface: Transcript Storage ---
