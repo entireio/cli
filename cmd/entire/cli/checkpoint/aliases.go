@@ -31,6 +31,8 @@ type (
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning
 	LinkedCommit     = apicheckpoint.LinkedCommit
+	CrossRepoMarker  = apicheckpoint.CrossRepoMarker
+	LinkedRepoCommit = apicheckpoint.LinkedRepoCommit
 
 	// Operation option types.
 	WriteOptions               = apicheckpoint.WriteOptions

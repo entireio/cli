@@ -511,6 +511,10 @@ type State struct {
 	// firing for the same prompt, such as a user-level hook beside a project
 	// one, is skipped while the turn it repeats is still running. Only the
 	// last key is kept.
+	// CrossRepoLinksCondensed counts the entries of the session's
+	// cross-repository link journal its checkpoints already listed.
+	CrossRepoLinksCondensed int `json:"cross_repo_links_condensed,omitempty"`
+
 	LastTurnStartKey string     `json:"last_turn_start_key,omitempty"`
 	LastTurnStartAt  *time.Time `json:"last_turn_start_at,omitempty"`
 
@@ -1464,6 +1468,12 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
 	return s.load(ctx, sessionID, true)
+}
+
+// LoadReadOnly is Load for a store this process does not own (another
+// repository's): a stale record is returned as-is, never deleted.
+func (s *StateStore) LoadReadOnly(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, false)
 }
 
 // load reads one session. When deleteStale is false the record is returned

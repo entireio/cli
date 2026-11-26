@@ -426,6 +426,9 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
+		CrossRepo:                   opts.CrossRepo,
+		LinkedRepos:                 opts.LinkedRepos,
+		SessionLinkedRepos:          opts.SessionLinkedRepos,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
