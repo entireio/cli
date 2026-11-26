@@ -304,16 +304,20 @@ func (s *shellScan) commandLine(line, workdir string) {
 	if workdir != "" {
 		dir = s.resolve(s.cwd, workdir)
 	}
+	vars := shellVars{}
 	for _, simple := range shellSeparators.Split(line, -1) {
 		fields := strings.Fields(simple)
-		if len(fields) == 0 {
+		if len(fields) == 0 || vars.assign(fields) {
 			continue
 		}
+		fields = vars.expand(fields)
 		cmd := filepath.Base(unquote(fields[0]))
 		args := fields[1:]
 		if cmd == "cd" {
 			if len(args) > 0 {
-				dir = s.resolve(dir, unquote(args[0]))
+				if dir = s.resolve(dir, unquote(args[0])); dir == "" {
+					dir = unresolvedDir
+				}
 			}
 			continue
 		}
@@ -403,14 +407,91 @@ func pathArgs(args []string) []string {
 	return out
 }
 
+// unresolvedDir is the working directory after a `cd` whose target did not
+// resolve; paths relative to it resolve to nothing.
+const unresolvedDir = "$"
+
+// shellVars are the literal values a command line assigned to shell
+// variables (`B=/abs`, `export B="/abs"`). A name assigned a value that is not
+// a plain literal, or reassigned a different value, maps to "" (unresolved).
+type shellVars map[string]string
+
+// shellAssignment matches one `NAME=value` word.
+var shellAssignment = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+
+// shellVarRef matches `$NAME` and `${NAME}`.
+var shellVarRef = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))`)
+
+// assign records a simple command made only of assignments (optionally after
+// `export`), and reports whether it was one.
+func (v shellVars) assign(fields []string) bool {
+	words := fields
+	if words[0] == "export" {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return false
+	}
+	for _, w := range words {
+		if !shellAssignment.MatchString(w) {
+			return false
+		}
+	}
+	for _, w := range words {
+		m := shellAssignment.FindStringSubmatch(w)
+		name, raw := m[1], m[2]
+		val := unquote(raw)
+		literal := !strings.ContainsAny(val, "$`\"'")
+		if prev, seen := v[name]; !literal || (seen && prev != val) {
+			v[name] = ""
+			continue
+		}
+		v[name] = val
+	}
+	return true
+}
+
+// expand substitutes resolved variables in fields. A word that still holds
+// an unresolved `$` is left as it is, and resolves to nothing.
+func (v shellVars) expand(fields []string) []string {
+	out := make([]string, len(fields))
+	for i, f := range fields {
+		if !strings.Contains(f, "$") {
+			out[i] = f
+			continue
+		}
+		resolved := true
+		sub := shellVarRef.ReplaceAllStringFunc(f, func(ref string) string {
+			m := shellVarRef.FindStringSubmatch(ref)
+			if val := v[m[1]+m[2]]; val != "" {
+				return val
+			}
+			resolved = false
+			return ref
+		})
+		if resolved && !strings.Contains(unquote(sub), "$") {
+			out[i] = sub
+		} else {
+			out[i] = f
+		}
+	}
+	return out
+}
+
 func unquote(tok string) string {
 	return strings.Trim(tok, `"'`)
 }
 
 // resolve resolves path against dir, when path is relative and dir is set.
 func (s *shellScan) resolve(dir, path string) string {
+	if strings.Contains(path, "$") {
+		return "" // an unresolved expansion
+	}
 	if path == "" || filepath.IsAbs(path) || strings.HasPrefix(path, "~/") || dir == "" {
 		return path
+	}
+	if strings.Contains(dir, "$") {
+		return "" // relative to a directory that did not resolve
 	}
 	return filepath.Join(expandHome(dir), path)
 }
