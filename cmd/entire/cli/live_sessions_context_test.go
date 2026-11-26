@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -306,12 +307,12 @@ func TestLiveSessionsRefresh_CachesLiveSessionsAndOverlaps(t *testing.T) { //nol
 	require.WithinDuration(t, cache.FetchedAt, cache.OverlapFetchedAt, time.Second)
 	require.Equal(t, []liveSessionEntry{
 		{
-			SessionID: "s-1", Agent: "Claude Code", Login: "sleepercell",
+			SessionID: "s-1", Agent: "Claude Code", Login: "sleepercell", OwnerAccount: "acc-1",
 			Overlap: []string{"src/route.ts"}, OverlapTotal: 1,
 			LastEventAt: time.Date(2026, 11, 26, 11, 59, 0, 0, time.UTC),
 		},
 		{
-			SessionID: "s-2", Agent: "Codex", Login: "me", You: true,
+			SessionID: "s-2", Agent: "Codex", Login: "me", You: true, OwnerAccount: "acc-me",
 			LastEventAt: time.Date(2026, 11, 26, 11, 58, 0, 0, time.UTC),
 		},
 	}, cache.Sessions)
@@ -609,9 +610,24 @@ func TestHandleLifecycleSessionStart_SpawnsWhenWarm(t *testing.T) { //nolint:par
 	require.Equal(t, int32(1), atomic.LoadInt32(spawns))
 }
 
+func TestHandleLifecycleSessionStart_AFailedRefreshGoesToTheBackground(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	setupLiveSessionsRepo(t)
+	installFakeStreamPlugin(t, "exit 1\n")
+	spawns := countLiveSessionsSpawns(t)
+	stubTrailRefreshSpawn(t)
+
+	saveLiveTestCache(t, time.Now().Add(-time.Hour))
+	runLiveSessionStart(t, newMockContextInjectorAgent(), "test-live-failed")
+	require.Equal(t, int32(1), atomic.LoadInt32(spawns), "the failed refresh is retried in the background")
+
+	runLiveSessionStart(t, newMockContextInjectorAgent(), "test-live-failed-2")
+	require.Equal(t, int32(1), atomic.LoadInt32(spawns), "one per window")
+}
+
 // A hung network costs one SessionStart its refresh budget, not every one:
 // SessionStart's refresh is claimed through the spawn marker, so starts in
-// the same window (concurrent ones included) neither wait nor spawn.
+// the same window (concurrent ones included) neither wait nor spawn. The
+// first hands its failed refresh to the background.
 func TestHandleLifecycleSessionStart_AHungRefreshDelaysOnlyTheFirstStart(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
 	setupLiveSessionsRepo(t)
 	installFakeStreamPlugin(t, "exec sleep 30\n")
@@ -628,7 +644,7 @@ func TestHandleLifecycleSessionStart_AHungRefreshDelaysOnlyTheFirstStart(t *test
 			require.Less(t, took, time.Second, "start %d waited on a refresh", i)
 		}
 	}
-	require.Equal(t, int32(0), atomic.LoadInt32(spawns))
+	require.Equal(t, int32(1), atomic.LoadInt32(spawns))
 	_, ok := loadLiveSessionsCache(context.Background())
 	require.False(t, ok)
 }
@@ -750,7 +766,7 @@ func TestMergeLiveSessions_CountsTheTotal(t *testing.T) {
 		live = append(live, liveListSession{SessionID: fmt.Sprintf("s-%d", i)})
 	}
 
-	c := mergeLiveSessions(live, nil, true, nil, time.Now())
+	c := mergeLiveSessions(live, nil, true, nil, time.Now(), "")
 
 	require.Len(t, c.Sessions, liveSessionsCacheSessionsMax)
 	require.Equal(t, 30, c.Total)
@@ -868,6 +884,7 @@ func TestLiveSessionRunsProgram(t *testing.T) {
 		{[]string{"/bin/zsh", "/x/claude/run.sh"}, "claude", false},
 		{[]string{"/x/claude/tool"}, "claude", false},
 		{[]string{"node", "/x/claude/server.js"}, "claude", false},
+		{[]string{"/Users/u/Library/Application Support/Claude/claude-code/2.1.3/abc123/claude.app/Contents/MacOS/claude"}, "claude", true},
 		{nil, "claude", false},
 	}
 	for _, c := range cases {
@@ -1004,12 +1021,12 @@ func TestMergeLiveSessions_CarriedOverlapsExpire(t *testing.T) {
 		Sessions:         []liveSessionEntry{{SessionID: "s-1", Overlap: []string{"a.go"}, OverlapTotal: 1}},
 		OverlapFetchedAt: now.Add(-48 * time.Hour),
 	}
-	c := mergeLiveSessions(live, nil, false, prev, now)
+	c := mergeLiveSessions(live, nil, false, prev, now, "")
 	require.Empty(t, c.Sessions[0].Overlap)
 	require.True(t, c.OverlapFetchedAt.IsZero())
 
 	prev.OverlapFetchedAt = now.Add(-time.Minute)
-	c = mergeLiveSessions(live, nil, false, prev, now)
+	c = mergeLiveSessions(live, nil, false, prev, now, "")
 	require.Equal(t, []string{"a.go"}, c.Sessions[0].Overlap)
 	require.Equal(t, prev.OverlapFetchedAt, c.OverlapFetchedAt, "carried with the time they were fetched")
 }
@@ -1025,8 +1042,8 @@ func TestMergeLiveSessions_KeepsTheSameSessionsWhateverTheOrder(t *testing.T) {
 	slices.Reverse(reversed)
 	overlaps := []liveListSession{{SessionID: "s-29", Touching: []string{"a.go"}}}
 
-	a := mergeLiveSessions(live, overlaps, true, nil, time.Now())
-	b := mergeLiveSessions(reversed, overlaps, true, nil, time.Now())
+	a := mergeLiveSessions(live, overlaps, true, nil, time.Now(), "")
+	b := mergeLiveSessions(reversed, overlaps, true, nil, time.Now(), "")
 
 	require.Equal(t, a.Sessions, b.Sessions)
 	require.Equal(t, "s-29", a.Sessions[0].SessionID, "overlapping ones first")
@@ -1043,4 +1060,95 @@ func TestLiveSessionProcFS_ReadsThisProcess(t *testing.T) {
 	exe, err := os.Executable()
 	require.NoError(t, err)
 	require.Equal(t, filepath.Base(exe), filepath.Base(p.argv[0]))
+}
+
+// The caller's own subagents (overlapping, so they'd sort first) must not
+// fill the cache and push teammates out.
+func TestMergeLiveSessions_TeammatesBeforeOwnSessions(t *testing.T) {
+	t.Parallel()
+	var live, overlaps []liveListSession
+	for i := range 21 {
+		id := fmt.Sprintf("mine:agent:%02d", i)
+		live = append(live, liveListSession{SessionID: id, You: true})
+		overlaps = append(overlaps, liveListSession{SessionID: id, You: true, Touching: []string{"a.go"}})
+	}
+	live = append(live, liveListSession{SessionID: "s-bob"})
+
+	c := mergeLiveSessions(live, overlaps, true, nil, time.Now(), "")
+
+	require.Len(t, c.Sessions, liveSessionsCacheSessionsMax)
+	require.Equal(t, "s-bob", c.Sessions[0].SessionID)
+	require.Equal(t, 22, c.Total)
+}
+
+// When every kept session is the caller's but some weren't kept, the block
+// still says there are more.
+func TestLiveSessionsBlock_MoreWhenEveryKeptSessionIsOwn(t *testing.T) {
+	t.Parallel()
+	cache := liveTestCache(liveSessionEntry{SessionID: "mine:agent:1", You: true, Login: "me"})
+	cache.Total = 5
+
+	block := liveSessionsBlockFor(cache, liveSelf("mine"), liveTestNow)
+
+	require.Contains(t, block.Text, "4 more live sessions, which may include yours.")
+	require.NotContains(t, block.Text, "`me`")
+	require.NotEmpty(t, block.Fingerprint)
+}
+
+// The CLI knows the caller's account (its token's subject), so a teammate
+// live under an ID the caller resumed locally stays listed even when the
+// caller has no live session to mark "you".
+func TestLiveSessionsBlock_ResumedTeammateIDWithNoOwnLiveSession(t *testing.T) {
+	t.Parallel()
+	cache := liveTestCache(liveSessionEntry{SessionID: "shared-id", Login: "bob", OwnerAccount: "acc-bob"})
+	cache.Account = "acc-me"
+	require.Contains(t, liveSessionsBlockFor(cache, liveSelf("shared-id"), liveTestNow).Text, "`bob`")
+
+	cache.Sessions[0].OwnerAccount = "acc-me"
+	require.Empty(t, liveSessionsBlockFor(cache, liveSelf("shared-id"), liveTestNow).Text, "the caller's own")
+}
+
+func TestLiveSessionsRefresh_RecordsTheCallersAccountAndOwners(t *testing.T) { //nolint:paralleltest // t.Chdir, t.Setenv
+	setupLiveSessionsRepo(t)
+	record := filepath.Join(t.TempDir(), "calls.txt")
+	installFakeStreamPlugin(t, liveFakeScript(record, liveFakeTouchingAnswer))
+	prev := liveSessionsCallerAccount
+	liveSessionsCallerAccount = func(context.Context) string { return "acc-me" }
+	t.Cleanup(func() { liveSessionsCallerAccount = prev })
+
+	require.True(t, refreshLiveSessionsWithin(context.Background(), liveTestBudget))
+
+	cache, ok := loadLiveSessionsCache(context.Background())
+	require.True(t, ok)
+	require.Equal(t, "acc-me", cache.Account)
+	require.Equal(t, "acc-1", cache.Sessions[0].OwnerAccount)
+	require.Equal(t, "acc-me", cache.Sessions[1].OwnerAccount)
+}
+
+func TestLiveSessionsCallerAccountFrom(t *testing.T) {
+	t.Parallel()
+	jwt := func(claims string) string {
+		return "e30." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".sig"
+	}
+	require.Equal(t, "acc-1", liveSessionsAccountFromToken(jwt(`{"sub":"acc-1"}`)))
+	require.Equal(t, "aut_1", liveSessionsAccountFromToken(jwt(`{"sub":"automation:aut_1"}`)))
+	require.Empty(t, liveSessionsAccountFromToken(jwt(`{"sub":"a b"}`)))
+	require.Empty(t, liveSessionsAccountFromToken("ent_svc_secret"))
+	require.Empty(t, liveSessionsAccountFromToken(""))
+}
+
+// macOS ps: the executable path (comm) may hold spaces, as Claude's desktop
+// app's does; args are split only past it.
+func TestLiveSessionPSTable_KeepsTheExecutablePathWhole(t *testing.T) {
+	t.Parallel()
+	desktop := "/Users/u/Library/Application Support/Claude/claude-code/2.1.3/abc123/claude.app/Contents/MacOS/claude"
+	comm := "  101     1 " + desktop + "\n  202   101 /usr/local/bin/node\n"
+	args := "  101     1 " + desktop + " --print hi\n  202   101 node /usr/local/lib/node_modules/@openai/codex/bin/codex.js exec\n"
+
+	table := parseLiveSessionPSTable(comm, args)
+
+	require.Equal(t, []string{desktop, "--print", "hi"}, table[101].argv)
+	require.True(t, liveSessionRunsProgram(table[101].argv, "claude"))
+	require.Equal(t, 1, table[101].ppid)
+	require.True(t, liveSessionRunsProgram(table[202].argv, "codex"))
 }

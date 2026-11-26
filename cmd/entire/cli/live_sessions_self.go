@@ -28,15 +28,16 @@ type liveSessionsSelf struct {
 	Parents []string
 }
 
-// owns reports whether e is one of the caller's own sessions. When the cache
-// knows the caller's account (accountKnown), an own ID counts only for that
-// account's sessions: a teammate live under an ID the caller resumed locally
-// is theirs. When it doesn't, the ID alone decides.
-func (s liveSessionsSelf) owns(e liveSessionEntry, accountKnown bool) bool {
-	if liveSessionInFamily(e.SessionID, s.Own) && (e.You || !accountKnown) {
+// owns reports whether e is one of the caller's own sessions; mine is
+// whether it is the caller's account's (liveSessionsCache.callers). When the
+// account is known (accountKnown), an own ID counts only for that account's
+// sessions: a teammate live under an ID the caller resumed locally is
+// theirs. When it isn't, the ID alone decides.
+func (s liveSessionsSelf) owns(e liveSessionEntry, mine, accountKnown bool) bool {
+	if liveSessionInFamily(e.SessionID, s.Own) && (mine || !accountKnown) {
 		return true
 	}
-	return e.You && liveSessionInFamily(e.SessionID, s.Parents)
+	return mine && liveSessionInFamily(e.SessionID, s.Parents)
 }
 
 // liveSessionInFamily reports whether id is one of ids or a subagent of one:
@@ -145,8 +146,9 @@ func liveSessionParentIDs(ctx context.Context, ag agent.Agent, event *agent.Even
 // liveSessionCacheHasOwn reports whether cache holds a session of the
 // caller's account in id's family.
 func liveSessionCacheHasOwn(cache *liveSessionsCache, id string) bool {
+	mine, _ := cache.callers()
 	for _, e := range cache.Sessions {
-		if e.You && liveSessionInFamily(e.SessionID, []string{id}) {
+		if mine(e) && liveSessionInFamily(e.SessionID, []string{id}) {
 			return true
 		}
 	}
@@ -237,28 +239,69 @@ func liveSessionProcFS(pid int) (liveSessionProcess, bool) {
 	return liveSessionProcess{ppid: ppid, argv: argv}, true
 }
 
-// liveSessionPSTable lists every process with one `ps`. Its command line is
-// split on spaces, so a program path with a space in it isn't recognised.
+// liveSessionPSTable lists every process with `ps`: once for the executable
+// path (comm, the full path on macOS, spaces and all, as in Claude's desktop
+// app's …/Library/Application Support/Claude/…/claude), once for the
+// arguments, which only a script runtime's need (parseLiveSessionPSTable).
 func liveSessionPSTable(ctx context.Context) (map[int]liveSessionProcess, bool) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,command=").Output()
+	comm, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,comm=").Output()
 	if err != nil {
 		return nil, false
 	}
-	procs := map[int]liveSessionProcess{}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 3 {
-			continue
-		}
-		pid, err1 := strconv.Atoi(f[0])
-		ppid, err2 := strconv.Atoi(f[1])
-		if err1 == nil && err2 == nil {
-			procs[pid] = liveSessionProcess{ppid: ppid, argv: f[2:]}
+	args, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,args=").Output()
+	if err != nil {
+		args = nil
+	}
+	procs := parseLiveSessionPSTable(string(comm), string(args))
+	return procs, len(procs) > 0
+}
+
+// parseLiveSessionPSTable builds the process table from ps's
+// "pid ppid comm" and "pid ppid args" listings: argv[0] is the whole
+// executable path from comm; the rest is args past that path, split on
+// spaces (so a script runtime's script path with a space isn't recognised).
+func parseLiveSessionPSTable(comm, args string) map[int]liveSessionProcess {
+	rest := map[int]string{}
+	for _, line := range strings.Split(args, "\n") {
+		if pid, _, tail, ok := splitPSLine(line); ok {
+			rest[pid] = tail
 		}
 	}
-	return procs, len(procs) > 0
+	procs := map[int]liveSessionProcess{}
+	for _, line := range strings.Split(comm, "\n") {
+		pid, ppid, exe, ok := splitPSLine(line)
+		if !ok || exe == "" {
+			continue
+		}
+		argv := []string{exe}
+		tail := rest[pid]
+		if after, found := strings.CutPrefix(tail, exe); found {
+			argv = append(argv, strings.Fields(after)...)
+		} else if f := strings.Fields(tail); len(f) > 1 {
+			argv = append(argv, f[1:]...)
+		}
+		procs[pid] = liveSessionProcess{ppid: ppid, argv: argv}
+	}
+	return procs
+}
+
+// splitPSLine splits "  pid  ppid rest" into its parts, rest trimmed.
+func splitPSLine(line string) (pid, ppid int, rest string, ok bool) {
+	f := strings.Fields(line)
+	if len(f) < 2 {
+		return 0, 0, "", false
+	}
+	pid, err1 := strconv.Atoi(f[0])
+	ppid, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, "", false
+	}
+	line = strings.TrimSpace(line)
+	line = strings.TrimSpace(strings.TrimPrefix(line, f[0]))
+	line = strings.TrimSpace(strings.TrimPrefix(line, f[1]))
+	return pid, ppid, line, true
 }
 
 // liveSessionRunsProgram reports whether a process with argv runs program,
