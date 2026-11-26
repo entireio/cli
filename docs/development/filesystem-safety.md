@@ -657,6 +657,14 @@ comments at each site say which case applies:
   symlinked directory. This covers those files only,
   not worktree agent configs, which keep the rules above; the project copies
   are never written by global enable.
+- **Cross-repository link files (global enable)** — owner pointers live in
+  `session-owners/` under the `userdirs` config root (opened with
+  `osroot.OpenChild`, written with `jsonutil.WriteFileAtomicIn`), and the
+  install list in `cross-repo-installs.json` beside it. The home repository is
+  selected by the pointer's worktree path, but its common directory comes from
+  git (`gitdir.CommonDirForWorktree`) and the journal is opened through
+  `gitdir.OpenAt` with `osroot.OpenFileNoFollow(O_APPEND)`; the home's session
+  state is only read (`LoadReadOnly`).
 - **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a
   repo path, so neither can build its own store, and the path they receive was
   already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).
