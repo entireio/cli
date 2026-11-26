@@ -44,3 +44,40 @@ func TestExecScriptShellCalls_SkipsConcatenation(t *testing.T) {
 		t.Fatalf("calls %v", got)
 	}
 }
+
+const batchedScript = "const p=\"/abs/work\";\nconst commands=[\n`git -C ${p}/D add d1.txt && git -C ${p}/D commit -m d1`,\n`echo x > ${p}/E/f && git -C ${p}/E add -A && git -C ${p}/E commit -m e1`,\n];\nfor (const c of commands) text(await tools.exec_command({cmd:c}));"
+
+func TestExecScriptShellCalls_BatchedTemplates(t *testing.T) {
+	t.Parallel()
+	got, _ := ExecScriptShellCalls(execCall(batchedScript))
+	if len(got) != 2 || got[0]["cmd"] != "git -C /abs/work/D add d1.txt && git -C /abs/work/D commit -m d1" ||
+		got[1]["cmd"] != "echo x > /abs/work/E/f && git -C /abs/work/E add -A && git -C /abs/work/E commit -m e1" {
+		t.Fatalf("calls %v", got)
+	}
+}
+
+// Without an exec_command call the script runs no shell command.
+func TestExecScriptShellCalls_BatchedNeedsExecCommand(t *testing.T) {
+	t.Parallel()
+	if got, _ := ExecScriptShellCalls(execCall(`const c = ["git -C /d commit -m m"]; text(c)`)); len(got) != 0 {
+		t.Fatalf("calls %v", got)
+	}
+}
+
+func TestExecScriptShellCalls_BatchedUnresolved(t *testing.T) {
+	t.Parallel()
+	for _, script := range []string{
+		"const cs=[`git -C ${x}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"let p=\"/a\"; p=\"/b\"; const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"let p=\"/a\"; p += \"/b\"; const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"const p=\"/a\"; const p=\"/b\"; const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"const p=dir(); const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"const p=\"/a\" + d; const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"const p=`/a/${d}`; const cs=[`git -C ${p}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+		"const p=\"/a\"; const cs=[`git -C ${p + q}/E commit -m e`]; for (const c of cs) tools.exec_command({cmd:c})",
+	} {
+		if got, _ := ExecScriptShellCalls(execCall(script)); len(got) != 0 {
+			t.Errorf("%s: calls %v", script, got)
+		}
+	}
+}
