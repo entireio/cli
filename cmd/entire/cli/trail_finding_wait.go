@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 	"time"
 
@@ -109,8 +108,9 @@ func (p trailReviewProgress) settled() bool {
 // finished on the head: wantHead, or the server's head when it is empty.
 //
 // An agent with no run on the change that waits for the change to become (or
-// stop being) ready for review will not run on this head, so it is left out,
-// as is one waiting for the next push once other agents have runs on the head.
+// stop being) ready for review will not run on this head, so it is left out.
+// One waiting for the next push may still get a run queued late, so it counts
+// until the grace.
 // An agent whose latest run is on an older head counts as pending, unless
 // ignoreStale says enough time has passed since runs on this head appeared to
 // take it as one this push does not run. The same goes for an agent with no
@@ -125,20 +125,10 @@ func trailReviewProgressFor(agents []api.TrailAgent, serverHead, wantHead string
 		p.NoHead = true
 		return p
 	}
-	// Runs one push starts are queued together, so once any agent has a run
-	// on the head, an agent still waiting for "the next push" was not started
-	// by this one.
-	runsOnHead := slices.ContainsFunc(agents, func(a api.TrailAgent) bool {
-		return a.LatestRun != nil && sameCommit(stringPtrValue(a.LatestRun.HeadSHA), p.Head)
-	})
 	for _, a := range agents {
 		if a.LatestRun == nil {
-			waitingFor := ""
-			if a.WaitingFor != nil {
-				waitingFor = *a.WaitingFor
-			}
-			notThisPush := waitingFor == "ready" || waitingFor == "not_ready" || (waitingFor == "push" && runsOnHead)
-			if notThisPush || ignoreStale {
+			waitsForReadiness := a.WaitingFor != nil && (*a.WaitingFor == "ready" || *a.WaitingFor == "not_ready")
+			if waitsForReadiness || ignoreStale {
 				continue
 			}
 			p.Total++

@@ -86,11 +86,8 @@ func TestTrailReviewProgressFor(t *testing.T) {
 		{name: "agent waiting for push is pending", serverHead: waitTestHead, done: 0, total: 1, agents: []api.TrailAgent{
 			waitTestAgent("risk", "", "", "push"),
 		}},
-		{name: "agent waiting for push is left out once others run on the head", serverHead: waitTestHead, done: 1, total: 1, settled: true, agents: []api.TrailAgent{
-			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("code review", "", "", "push"),
-		}},
-		{name: "agent waiting for push stays pending while runs are only on an older head", serverHead: waitTestHead, done: 0, total: 2, agents: []api.TrailAgent{
-			waitTestAgent("risk", "succeeded", waitTestOld, ""), waitTestAgent("code review", "", "", "push"),
+		{name: "agent waiting for push stays pending until the grace, even with runs on the head", serverHead: waitTestHead, done: 1, total: 2, agents: []api.TrailAgent{
+			waitTestAgent("risk", "succeeded", waitTestHead, ""), waitTestAgent("late", "", "", "push"),
 		}},
 		{name: "server behind the requested head", serverHead: waitTestOld, want: waitTestHead[:10], done: 0, total: 1, headPending: true, agents: []api.TrailAgent{
 			waitTestAgent("risk", "succeeded", waitTestOld, ""),
@@ -207,9 +204,6 @@ func TestWaitForTrailReviewStopsAtDeadline(t *testing.T) {
 	require.Contains(t, trailReviewWaitResultLine(p, false), "still running (0 of 1 agents done)")
 }
 
-// TestWaitForTrailReviewIgnoresStaleAfterGrace: an agent this push does not
-// run keeps its finished run on the older head; once runs on the head have
-// been seen for the grace period, the wait stops counting it.
 // TestWaitForTrailReviewSettlesWhenPushStartsNoRun: the server is at the
 // pushed head but no agent ever runs on it (their runs stay on the older
 // head). The grace starts from the server reaching the head, so the wait
@@ -229,6 +223,9 @@ func TestWaitForTrailReviewSettlesWhenPushStartsNoRun(t *testing.T) {
 	require.Equal(t, "No review agent runs on this commit; showing the trail's findings.", trailReviewWaitResultLine(p, false))
 }
 
+// TestWaitForTrailReviewIgnoresStaleAfterGrace: an agent this push does not
+// run keeps its finished run on the older head; once runs on the head have
+// been seen for the grace period, the wait stops counting it.
 func TestWaitForTrailReviewIgnoresStaleAfterGrace(t *testing.T) {
 	t.Parallel()
 	clock := &fakeWaitClock{now: time.Unix(0, 0)}
