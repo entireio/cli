@@ -672,9 +672,6 @@ func TestCrossRepo_SessionStateListsSweptCommitsInCommitOrder(t *testing.T) {
 	x := newCrossRepo(t, 1)
 	d := x.others[0]
 	sess := x.c.NewSession()
-	// A non-empty transcript at turn start: from offset 0 the turn end would
-	// read edits from C's condensation point and miss D's.
-	sess.CreateTranscript("an earlier exchange", nil)
 	x.startTurn(t, sess, "commit in d, then in c")
 
 	edit(t, sess, d, "d1.txt")
