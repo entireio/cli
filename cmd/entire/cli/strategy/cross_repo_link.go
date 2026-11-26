@@ -195,15 +195,35 @@ func reportedCommit(sha string, reported []string) bool {
 	return false
 }
 
-// commitsSince lists HEAD's commits committed at or after since, newest first.
+// commitsSince lists the commits committed at or after since on the branch
+// checked out in any worktree of the repository (each worktree's HEAD: an
+// agent may commit in a linked worktree while its edits were recorded in the
+// main checkout), newest first.
 func commitsSince(ctx context.Context, worktreePath string, since time.Time) []string {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-list",
-		fmt.Sprintf("--max-count=%d", maxCrossRepoSweep), fmt.Sprintf("--since=%d", since.Unix()), "HEAD")
+	args := []string{"-C", worktreePath, "rev-list",
+		fmt.Sprintf("--max-count=%d", maxCrossRepoSweep), fmt.Sprintf("--since=%d", since.Unix()), "HEAD"}
+	cmd := exec.CommandContext(ctx, "git", append(args, worktreeHeads(ctx, worktreePath)...)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
 	return strings.Fields(string(out))
+}
+
+// worktreeHeads lists the commit each worktree of the repository has checked
+// out, from `git worktree list --porcelain`; none when git cannot say.
+func worktreeHeads(ctx context.Context, worktreePath string) []string {
+	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil
+	}
+	var heads []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if sha, ok := strings.CutPrefix(line, "HEAD "); ok && plumbing.IsHash(sha) && !slices.Contains(heads, sha) {
+			heads = append(heads, sha)
+		}
+	}
+	return heads
 }
 
 func readCrossRepoLinked(root *os.Root) []string {

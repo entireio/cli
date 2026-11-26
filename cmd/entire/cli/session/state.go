@@ -1406,6 +1406,20 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	return newStateStoreAt(commonDir), nil
 }
 
+// NewStateStoreForCommonDir creates a state store for the repository whose
+// git common directory is commonDir, already resolved by the caller (for
+// instance with gitdir.CommonDirForPath, which ignores a hook's inherited
+// GIT_DIR where NewStateStoreForWorktree honors it).
+func NewStateStoreForCommonDir(commonDir string) (*StateStore, error) {
+	if !filepath.IsAbs(commonDir) {
+		return nil, fmt.Errorf("git common dir %q is not absolute", commonDir)
+	}
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
+	return newStateStoreAt(commonDir), nil
+}
+
 // ensureTestIsolatedStateDir fails loud when `go test` code reaches a
 // session state directory outside the temp root: the test is missing repo
 // isolation (testutil.InitRepo + t.Chdir, or NewStateStoreForWorktree /

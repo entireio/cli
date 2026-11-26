@@ -196,6 +196,15 @@ func (x *crossRepo) assertHomeCheckpointLists(t *testing.T, shas ...string) {
 			t.Errorf("home checkpoint %s names a repository by local path: %+v", cpID, l)
 		}
 	}
+	var order []string
+	for _, l := range meta.SessionLinkedRepos {
+		if slices.Contains(shas, l.SHA) {
+			order = append(order, l.SHA)
+		}
+	}
+	if !slices.Equal(order, shas) {
+		t.Errorf("session-level list orders %v, want commit order %v", order, shas)
+	}
 	if len(meta.SessionLinkedRepos) < len(shas) {
 		t.Errorf("session-level list %+v shorter than %d", meta.SessionLinkedRepos, len(shas))
 	}
@@ -597,4 +606,47 @@ func TestCrossRepo_FirstTurnSweepLinksAfterHomeCommit(t *testing.T) {
 	x.endTurn(t, sess)
 
 	assertRecordedLink(t, d, sess.ID, d1)
+}
+
+// linkedWorktree adds a linked worktree of d at a sibling directory named
+// name, with the environment git gives commit hooks there: GIT_DIR names the
+// worktree's own git directory (git exports it only in linked worktrees), and
+// the agent's session ID, which Claude Code publishes to its commands.
+func (x *crossRepo) linkedWorktree(t *testing.T, d *TestEnv, name, sessionID string) *TestEnv {
+	t.Helper()
+	wt := filepath.Join(filepath.Dir(d.RepoDir), name)
+	testutil.RunGit(t, d.RepoDir, "worktree", "add", "-q", "-b", name, wt)
+	gitDir := strings.TrimSpace(testutil.RunGit(t, wt, "rev-parse", "--absolute-git-dir"))
+	return envAt(t, wt, append(slices.Clone(x.extra), "GIT_DIR="+gitDir, "CLAUDE_CODE_SESSION_ID="+sessionID))
+}
+
+// In a linked worktree of an already hooked D, the agent's commits link as
+// in D's main checkout, and C lists them in commit order.
+func TestCrossRepo_LinkedWorktreeOfHookedRepoLinks(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	sess := x.installByTurn(t)
+	dwt := x.linkedWorktree(t, d, "dwt", sess.ID)
+
+	first := assertAgentCommitLinked(t, dwt, d, "wt1.txt", sess.ID)
+	second := assertAgentCommitLinked(t, dwt, d, "wt2.txt", sess.ID)
+	x.assertHomeCheckpointLists(t, first, second)
+}
+
+// A commit in a linked worktree of D, made without hooks, changing a path the
+// agent edited in D's main checkout, is linked by the turn-end sweep there:
+// it scans every worktree's HEAD, not only the main checkout's.
+func TestCrossRepo_SweepLinksLinkedWorktreeCommit(t *testing.T) {
+	t.Parallel()
+	x := newCrossRepo(t, 1)
+	d := x.others[0]
+	sess := x.c.NewSession()
+	dwt := x.linkedWorktree(t, d, "dwt", sess.ID)
+	x.startTurn(t, sess, "edit d, commit in its worktree")
+	edit(t, sess, d, "shared.txt")
+	sha := commitUnhooked(dwt, "shared.txt")
+	x.endTurn(t, sess)
+
+	assertRecordedLink(t, d, sess.ID, sha)
 }

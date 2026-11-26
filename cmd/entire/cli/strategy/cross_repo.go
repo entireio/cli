@@ -260,14 +260,17 @@ func loadCrossRepoHome(ctx context.Context, sessionID, homeWorktree string) (*cr
 	if err != nil {
 		return nil, fmt.Errorf("resolve this repository: %w", err)
 	}
-	home, err := gitdir.CommonDirForWorktree(ctx, homeWorktree)
+	// CommonDirForPath, not CommonDirForWorktree: in a linked worktree git
+	// exports GIT_DIR to the commit hooks, and an inherited GIT_DIR would
+	// answer with this repository, so the home would look like here.
+	home, err := gitdir.CommonDirForPath(ctx, homeWorktree)
 	if err != nil {
 		return nil, fmt.Errorf("resolve the home repository: %w", err)
 	}
 	if sameDir(here, home) {
 		return nil, errNotCrossRepo
 	}
-	store, err := session.NewStateStoreForWorktree(ctx, homeWorktree)
+	store, err := session.NewStateStoreForCommonDir(home)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // names the worktree
 	}
