@@ -3751,3 +3751,44 @@ func mustWalkRoot(t *testing.T, metadataDir string) *os.Root {
 	t.Cleanup(func() { _ = root.Close() })
 	return root
 }
+
+// The commit a condensation was written for is informational, never a
+// trailer-less link: it lands in written_for_commit, a rewrite (an amend
+// re-condensing) replaces it, and linked_commits stays empty.
+func TestWriteCommitted_CommitSHAAtWriteIsNotALink(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "README.md", "# Test")
+	testutil.GitAdd(t, tempDir, "README.md")
+	testutil.GitCommit(t, tempDir, "init")
+	repo, err := git.PlainOpen(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewGitStore(repo, DefaultV1Refs())
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("c1d2e3f4a5b7")
+	for _, sha := range []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} {
+		if err := store.Write(ctx, Session{
+			CheckpointID: cpID, SessionID: "s1", Strategy: "manual-commit", Agent: agent.AgentTypeClaudeCode,
+			Transcript: redact.AlreadyRedacted([]byte("t")), AuthorName: "T", AuthorEmail: "t@e", CommitSHAAtWrite: sha,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meta, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.CommitSHAAtWrite != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Errorf("written_for_commit = %q, want the rewrite's commit", meta.CommitSHAAtWrite)
+	}
+	summary, err := store.Read(ctx, cpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.LinkedCommits) != 0 {
+		t.Errorf("linked_commits = %v, want none", summary.LinkedCommits)
+	}
+}

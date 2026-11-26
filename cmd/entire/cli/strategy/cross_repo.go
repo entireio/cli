@@ -336,8 +336,10 @@ const (
 
 // writeCrossRepoMarker stores, on this repository's checkpoint ref, a marker
 // checkpoint saying the home session made commit sha here: no transcript,
-// prompts or tokens, which stay with the session's home. It names the commit
-// in LinkedCommits and the home session's turn, as a home checkpoint does.
+// prompts or tokens, which stay with the session's home. It names the home
+// session's turn, as a home checkpoint does; CrossRepo.CommitSHA names the
+// commit. A recorded link (the sweep, whose commit has no trailer) also names
+// it in LinkedCommits, as attach does.
 // The link is then appended to the home's journal, the handoff the home's
 // own hooks fold into the session's CheckpointLinks (foldCrossRepoLinks):
 // this repository never writes the home's session state.
@@ -358,8 +360,11 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 		CheckpointID: cpID, SessionID: home.state.SessionID, Strategy: StrategyNameManualCommit,
 		Branch: GetCurrentBranchName(repo), FilesTouched: committedFilesExcludingMetadata(committed),
 		Agent: home.state.AgentType, AuthorName: authorName, AuthorEmail: authorEmail,
-		TurnID: home.state.TurnID, LinkedCommits: []cpkg.LinkedCommit{{SHA: sha}},
+		TurnID:    home.state.TurnID,
 		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey, SessionIDs: []string{home.state.EntireSessionID()}},
+	}
+	if linkedBy == linkedBySweep {
+		opts.LinkedCommits = []cpkg.LinkedCommit{{SHA: sha}}
 	}
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)
@@ -443,17 +448,18 @@ func CrossRepoLinks(ctx context.Context, sessionID string) []cpkg.LinkedRepoComm
 }
 
 // withLinkedRepos adds a session's cross-repository commits to its next
-// checkpoint: those since the previous one, and all of them, and advances the
-// state's cursor.
-func withLinkedRepos(ctx context.Context, opts *cpkg.WriteOptions, state *SessionState) {
+// checkpoint: those since the previous one, and all of them. It returns the
+// state's next cursor, which the caller applies only once the checkpoint is
+// written, so a failed write leaves those links for the next checkpoint.
+func withLinkedRepos(ctx context.Context, opts *cpkg.WriteOptions, state *SessionState) (condensed int) {
 	all := CrossRepoLinks(ctx, state.SessionID)
 	if len(all) == 0 {
-		return
+		return state.CrossRepoLinksCondensed
 	}
 	start := min(state.CrossRepoLinksCondensed, len(all))
 	opts.LinkedRepos = all[start:]
 	opts.SessionLinkedRepos = all
-	state.CrossRepoLinksCondensed = len(all)
+	return len(all)
 }
 
 // crossRepoLastLinkFile, in a repository's git common dir, names the sessions

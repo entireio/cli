@@ -68,7 +68,8 @@ type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
 	// commitSHA is the commit this condensation was written for, recorded in
-	// the checkpoint's LinkedCommits and the session's CheckpointLinks. Empty
+	// the session metadata's CommitSHAAtWrite (written_for_commit, not an
+	// attributing link) and the session's CheckpointLinks. Empty
 	// when no commit carries the checkpoint (session end, snapshot).
 	commitSHA string
 
@@ -875,10 +876,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	if commitSHA, ok := recordedCommitLink(ctx); ok {
 		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: commitSHA}}
-	} else if o.commitSHA != "" {
-		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: o.commitSHA}}
 	}
-	withLinkedRepos(ctx, &writeOpts, state)
+	writeOpts.CommitSHAAtWrite = o.commitSHA
+	linksCondensed := withLinkedRepos(ctx, &writeOpts, state)
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
@@ -890,6 +890,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+	state.CrossRepoLinksCondensed = linksCondensed
 	recordHomeCheckpointLink(ctx, repo, state, checkpointID, o.commitSHA)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base

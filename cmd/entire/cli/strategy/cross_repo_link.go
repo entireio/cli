@@ -152,6 +152,9 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 	linked := readCrossRepoLinked(gitRoot)
 	count := 0
 	for _, sha := range commitsSince(ctx, worktreePath, since) {
+		if err := ctx.Err(); err != nil {
+			return count, fmt.Errorf("link commits: %w", err)
+		}
 		commit, err := repo.CommitObject(plumbing.NewHash(sha))
 		if err != nil || slices.Contains(linked, sha) || commit.Committer.When.Before(since) {
 			continue
@@ -170,16 +173,23 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 		if err := s.writeCrossRepoMarker(ctx, repo, cpID, home, commit, committed, linkedBySweep); err != nil {
 			return count, err
 		}
+		// Saved per marker: a run killed partway (the foreground budget) must
+		// not let its retry write a second marker for a linked commit.
 		linked = append(linked, sha)
 		count++
-	}
-	if count > 0 {
 		if err := writeCrossRepoLinked(gitRoot, linked); err != nil {
 			return count, err
+		}
+		if crossRepoMarkerWritten != nil {
+			crossRepoMarkerWritten()
 		}
 	}
 	return count, nil
 }
+
+// crossRepoMarkerWritten, when set by a test, runs after each marker is
+// written and recorded.
+var crossRepoMarkerWritten func()
 
 // minReportedSHA is the shortest abbreviation a reported SHA may match by:
 // git's own default.
@@ -213,7 +223,9 @@ func commitsSince(ctx context.Context, worktreePath string, since time.Time) []s
 }
 
 // worktreeHeads lists the commit each worktree of the repository has checked
-// out, from `git worktree list --porcelain`; none when git cannot say.
+// out, from `git worktree list --porcelain`; none when git cannot say. An
+// orphan worktree (unborn branch) reports the zero hash, which rev-list
+// rejects, so it is skipped.
 func worktreeHeads(ctx context.Context, worktreePath string) []string {
 	out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "worktree", "list", "--porcelain").Output()
 	if err != nil {
@@ -221,7 +233,7 @@ func worktreeHeads(ctx context.Context, worktreePath string) []string {
 	}
 	var heads []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if sha, ok := strings.CutPrefix(line, "HEAD "); ok && plumbing.IsHash(sha) && !slices.Contains(heads, sha) {
+		if sha, ok := strings.CutPrefix(line, "HEAD "); ok && plumbing.IsHash(sha) && sha != plumbing.ZeroHash.String() && !slices.Contains(heads, sha) {
 			heads = append(heads, sha)
 		}
 	}
