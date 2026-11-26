@@ -1965,6 +1965,7 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 	scopedPrompts := extractPromptsFromTranscript(scopedTranscript, meta.Agent)
 
 	sb.WriteString(formatCheckpointHeader(summary, meta, checkpointID, associatedCommits, author, styles))
+	sb.WriteString(formatCrossRepoLines(meta))
 	sb.WriteString(styles.horizontalRule(styles.width))
 	sb.WriteString("\n")
 
@@ -2021,6 +2022,23 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		appendTranscriptSection(&sb, verbose, full, displayFull, displayScoped, content.Prompts, meta.Agent)
 	}
 
+	return sb.String()
+}
+
+// formatCrossRepoLines describes cross-repository links (global enable): a
+// marker names the session's home, and a home checkpoint lists the commits its
+// session made in other repositories since the previous checkpoint.
+func formatCrossRepoLines(meta checkpoint.Metadata) string {
+	var sb strings.Builder
+	if m := meta.CrossRepo; m != nil {
+		fmt.Fprintf(&sb, "Linked commit %s; the session's log is in %s\n", m.CommitSHA, tuiutil.SanitizeDisplayText(m.HomeRepo))
+	}
+	if len(meta.LinkedRepos) > 0 {
+		sb.WriteString("Commits in other repositories:\n")
+		for _, l := range meta.LinkedRepos {
+			fmt.Fprintf(&sb, "  %s %s\n", tuiutil.SanitizeDisplayText(l.RepoKey), l.SHA)
+		}
+	}
 	return sb.String()
 }
 

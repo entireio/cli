@@ -32,6 +32,8 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 		"plugin_index.go:SyncPluginIndex":           "plugin index sync checks whether Entire's cache directory contains its clone",
 	}
 	allowedMetadataQueries := map[guardMetadataQuery]string{
+		{source: "cross_repo_link.go:repoOf", flag: "--show-toplevel"}:                                  "cross-repository linking resolves the repository holding an edited path, an arbitrary candidate",
+		{source: "cross_repo_link.go:repoOf", flag: "--git-common-dir"}:                                 "cross-repository linking compares an edited path's repository with the session's",
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",

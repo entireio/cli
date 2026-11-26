@@ -334,8 +334,26 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// spawn one detached sweep to fix it. Detached, so the hook's timeout
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
+	sweepOtherReposOnResume(ctx, ag, event)
 
 	return nil
+}
+
+// sweepOtherReposOnResume runs the cross-repository sweep for a resumed
+// session whose last turn never ended (the agent crashed): its turn end would
+// have linked the commits that turn made in other repositories.
+func sweepOtherReposOnResume(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	if event.SessionRef == "" || !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
+	if pre, err := LoadPrePromptState(ctx, event.SessionID); err != nil || pre == nil {
+		return
+	}
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	linkSessionInOtherRepos(ctx, event.SessionID, hookRoot, turnEditedPaths(ctx, ag, event.SessionRef, event.SessionID), true)
 }
 
 // codexSessionStartNotice is the Codex SessionStart warning: a project hook
@@ -552,6 +570,9 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
+	linkSessionInOtherRepos(ctx, event.SessionID, repoRoot,
+		absoluteToolUsePaths(event.CWD, event.ModifiedFiles, event.NewFiles), false)
+
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
@@ -575,6 +596,23 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		)
 	}
 	return nil
+}
+
+// absoluteToolUsePaths returns the hook payload's file lists as absolute
+// paths, joining relative ones to eventCWD.
+func absoluteToolUsePaths(eventCWD string, lists ...[]string) []string {
+	var out []string
+	for _, files := range lists {
+		for _, f := range files {
+			switch {
+			case filepath.IsAbs(f):
+				out = append(out, f)
+			case f != "" && filepath.IsAbs(eventCWD):
+				out = append(out, filepath.Join(eventCWD, f))
+			}
+		}
+	}
+	return out
 }
 
 // normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
@@ -793,6 +831,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		initSpan.End()
 		return nil
 	}
+	// Commits this agent makes in other repositories find the session
+	// through this pointer (global enable only).
+	strategy.RecordCrossRepoOwner(ctx, sessionID)
 
 	// Append prompt to prompt.txt on filesystem so it's available for
 	// mid-turn commits and condensation. After InitializeSessionForPrompt, so
@@ -954,7 +995,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	var elsewhere map[string][]string
 	if sessionID != unknownSessionID {
-		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, turnEditedPaths(logCtx, ag, transcriptRef, sessionID)))
+		edited := turnEditedPaths(logCtx, ag, transcriptRef, sessionID)
+		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, edited))
+		linkSessionInOtherRepos(ctx, sessionID, hookRoot, edited, true)
 	}
 
 	// Create session metadata directory

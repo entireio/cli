@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
@@ -179,6 +180,7 @@ func runDisableGlobal(cmd *cobra.Command) error {
 			fmt.Fprintf(w, "Removed Entire's hooks from %s's user-level config: %s\n", installer.Type(), hooksPath)
 		}
 	}
+	reportCrossRepoInstalls(cmd)
 	if !wasOn {
 		return nil
 	}
@@ -188,6 +190,25 @@ func runDisableGlobal(cmd *cobra.Command) error {
 		fmt.Fprintln(w, "A repository you ran `entire enable` in while global enable was on has no agent hooks of its own; run `entire enable --agent <name>` there to keep recording sessions.")
 	}
 	return nil
+}
+
+// reportCrossRepoInstalls names the repositories Entire installed its git
+// hooks in for sessions started elsewhere, and removes the pointers commits
+// there found those sessions by.
+func reportCrossRepoInstalls(cmd *cobra.Command) {
+	if err := strategy.ClearCrossRepoPointers(); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Could not remove the session pointers: %v\n", err)
+	}
+	repos := strategy.CrossRepoInstalls()
+	if len(repos) == 0 {
+		return
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Entire installed its git hooks in these repositories for agent sessions started in another one:")
+	for _, repo := range repos {
+		fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayText(repo))
+	}
+	fmt.Fprintln(w, "Their commits no longer link to sessions; run `entire disable --uninstall` in one to remove its hooks.")
 }
 
 // userSettingsWritable refuses a user settings file that cannot be read,

@@ -28,7 +28,7 @@ import (
 
 func newHooksCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "hooks",
+		Use:    hooksCmdName,
 		Short:  "Hook handlers",
 		Long:   "Commands called by hooks. These are internal and not for direct user use.",
 		Hidden: true, // Internal command, not for direct user use
@@ -109,3 +109,6 @@ func newHooksCmd() *cobra.Command {
 
 	return cmd
 }
+
+// hooksCmdName is the `entire hooks` command group.
+const hooksCmdName = "hooks"

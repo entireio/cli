@@ -128,6 +128,7 @@ func newHooksGitCmd() *cobra.Command {
 	cmd.AddCommand(newHooksGitPostCommitCmd())
 	cmd.AddCommand(newHooksGitPostRewriteCmd())
 	cmd.AddCommand(newHooksGitPrePushCmd())
+	cmd.AddCommand(newHooksGitLinkSessionCmd())
 
 	return cmd
 }
