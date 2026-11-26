@@ -56,6 +56,13 @@ type PrePromptState struct {
 	// Zero means not set or session just started.
 	TranscriptOffset int `json:"transcript_offset,omitempty"`
 
+	// TranscriptOffsetCaptured records that TranscriptOffset was read at turn
+	// start and can be trusted, so a zero is the turn's real start (an empty or
+	// missing transcript on a session's first turn) rather than "unknown". A
+	// zero read on a later turn, or from a LateTranscriptWriter, is not
+	// trusted. Absent in state written by older versions.
+	TranscriptOffsetCaptured bool `json:"transcript_offset_captured,omitempty"`
+
 	// LastTranscriptIdentifier is the agent-specific identifier at the transcript position.
 	// UUID for Claude Code, message ID for Gemini CLI. Optional metadata.
 	LastTranscriptIdentifier string `json:"last_transcript_identifier,omitempty"`
@@ -220,6 +227,23 @@ func (s *PrePromptState) normalizePrePromptState() {
 // unknownSessionID is the fallback session ID used when no session ID is provided.
 const unknownSessionID = "unknown"
 
+// trustsZeroTurnStartOffset reports whether a transcript position of zero read
+// at turn start is the turn's real start. That holds only on a session's first
+// turn: a later turn's zero means the agent has not flushed its transcript yet
+// (Antigravity reports 0 for an unflushed file), and reading from zero would
+// count earlier turns' edits as this turn's. A LateTranscriptWriter always
+// flushes after the turn, so its zero is never trusted.
+func trustsZeroTurnStartOffset(ctx context.Context, ag agent.Agent, sessionID string) bool {
+	if _, late := agent.AsLateTranscriptWriter(ag); late {
+		return false
+	}
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	return state == nil || state.SessionTurnCount == 0
+}
+
 // CapturePrePromptState captures current untracked files and transcript position before a prompt
 // and saves them to a state file.
 //
@@ -251,6 +275,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
+	var offsetCaptured bool
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
@@ -258,6 +283,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 				slog.String("error", posErr.Error()))
 		} else {
 			transcriptOffset = pos
+			offsetCaptured = pos > 0 || trustsZeroTurnStartOffset(ctx, ag, sessionID)
 		}
 	}
 
@@ -269,6 +295,8 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+
+		TranscriptOffsetCaptured: offsetCaptured,
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the

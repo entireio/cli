@@ -28,6 +28,9 @@ type gitHookContext struct {
 	strategy *strategy.ManualCommitStrategy
 }
 
+// hooksGitCmdName is the name of the `entire hooks git` subcommand.
+const hooksGitCmdName = "git"
+
 // newGitHookContext creates a new git hook context with logging and a root perf span.
 // The perf span ensures all perf.Start calls in strategy methods become child spans,
 // producing a single perf log line per hook with a full timing breakdown.
@@ -96,7 +99,7 @@ func withHookSession(ctx context.Context) context.Context {
 
 func newHooksGitCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "git",
+		Use:    hooksGitCmdName,
 		Short:  "Git hook handlers",
 		Long:   "Commands called by git hooks. These delegate to the current strategy.",
 		Hidden: true, // Internal command, not for direct user use
@@ -128,6 +131,7 @@ func newHooksGitCmd() *cobra.Command {
 	cmd.AddCommand(newHooksGitPostCommitCmd())
 	cmd.AddCommand(newHooksGitPostRewriteCmd())
 	cmd.AddCommand(newHooksGitPrePushCmd())
+	cmd.AddCommand(newHooksGitLinkSessionCmd())
 
 	return cmd
 }

@@ -606,6 +606,55 @@ and pointing at `entire disable`; it does not hold or prompt.
   other's user-level copies, each to its own version; the copy matches
   whichever ran last.
 
+### Commits in other repositories
+
+With global enable on, a session started in one repository (its home) also
+links the commits its agent and subagents make in any other repository. The
+session's log stays in its home: the other repository gets only a marker.
+
+- **Finding the session.** At each turn start the home writes a pointer to
+  `session-owners/<hash>.json` in Entire's user config directory, keyed by the
+  agent process's identity (host, boot, PID, start time). A commit hook in
+  another repository looks up its own process ancestors there; the nearest
+  match is the committer. A human's commit has no agent ancestor and stays
+  unlinked. Pointers of exited agents are removed at the next turn start.
+- **Hooks installed on demand.** When the agent or a subagent works in another
+  repository (an edit seen at turn end, at subagent end, or on tool events for
+  agents that send them; or a shell command that writes there: a commit-making
+  `git` command run there or with `-C`, a redirection, or a file-writing
+  command such as `touch`, `cp` or `sed -i`. Reads such as `cat` or `git log`
+  do not count, nor does text in tool results), Entire installs its git hooks there, including pre-push, and prints one line
+  on stderr. It skips repositories outside your home directory, Go's module
+  cache, Homebrew, Entire's own directories, submodules or nested checkouts of
+  the home, repositories whose hooks directory is outside their git directory
+  (`core.hooksPath` naming a shared one), repositories with git hooks Entire did
+  not write, and any repository that is disabled (`enabled: false` committed,
+  or `entire disable` there).
+- **What the other repository stores.** Its checkpoint ref gets a marker
+  checkpoint: the commit SHA, the repository, the session ID, the agent and the
+  home repository (each its normalized origin, else its directory name; never
+  a local path). No transcript, prompts or token counts. It is pushed with that repository's pushes.
+- **What the home records.** Each link appends one JSON line to
+  `entire-cross-repo-links-<session>.jsonl` in the home's git directory
+  (append-only; the home's session state is never written from elsewhere). The
+  home's next checkpoint lists the links since the previous one
+  (`linked_repos`) and all of them (`session_linked_repos`), each naming the
+  other repository the same way and never by local path; `entire checkpoint
+  explain` shows them. If the home never commits again, the file still holds
+  them.
+- **Commits made without the hooks.** At turn end, at subagent end, and at the
+  start of a resumed session whose last turn never ended, Entire records a link
+  (never an amend) for commits made during the turn that carry no trailer and
+  either appear by SHA in the agent's tool output (`git commit`'s
+  `[branch sha]` line) or change a file the session edited there. This also
+  runs where installing the hooks was skipped. Shell commands are read from
+  the transcript only to find directories and SHAs; they are not stored.
+- `entire status` in the other repository names the sessions its commits most
+  recently linked to, from that repository's own records, after the agent has
+  exited too; in the home it counts the other repositories. `entire disable
+  --global` lists the repositories (their main worktree) whose hooks were
+  installed this way and removes the pointers.
+
 ## Reporting a vulnerability
 
 For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root: email `security@entire.io`, expect acknowledgment within 48 hours and resolution of criticals within 90 days.

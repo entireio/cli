@@ -112,6 +112,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		writeCrossRepoStatus(ctx, w)
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -130,6 +131,23 @@ const enabledByGlobal = "global"
 func userTierConfiguresWorktree(ctx context.Context) bool {
 	root, err := paths.WorktreeRoot(ctx)
 	return err == nil && settings.UserTierConfiguresRepo(ctx, root)
+}
+
+// writeCrossRepoStatus says when commits here link to a session started in
+// another repository, and in how many other repositories this one's sessions
+// committed (global enable).
+func writeCrossRepoStatus(ctx context.Context, w io.Writer) {
+	inbound, outbound := strategy.CrossRepoStatus(ctx)
+	for _, link := range inbound {
+		verb := "Commits here were linked to"
+		if link.Live {
+			verb = "Agent commits here link to"
+		}
+		fmt.Fprintf(w, "  %s session %s in %s\n", verb, tuiutil.SanitizeDisplayText(link.SessionID), tuiutil.SanitizeDisplayText(link.HomeRepo))
+	}
+	if outbound > 0 {
+		fmt.Fprintf(w, "  Sessions here committed in %d other repositories\n", outbound)
+	}
 }
 
 // writeUserSettingsRejections names each part of the user settings file that

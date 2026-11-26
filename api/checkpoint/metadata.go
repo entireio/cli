@@ -124,6 +124,11 @@ type WriteOptions struct {
 	// SessionID is the session identifier
 	SessionID string
 
+	// CrossRepo, LinkedRepos and SessionLinkedRepos: see Metadata.
+	CrossRepo          *CrossRepoMarker
+	LinkedRepos        []LinkedRepoCommit
+	SessionLinkedRepos []LinkedRepoCommit
+
 	// CreatedAt is when the checkpoint was originally created.
 	// When zero, writers use the current time.
 	CreatedAt time.Time
@@ -462,6 +467,14 @@ type Metadata struct {
 	// but they share the same TurnID for future aggregation/deduplication.
 	TurnID string `json:"turn_id,omitempty"`
 
+	// CrossRepo is set on a marker checkpoint (see CrossRepoMarker).
+	CrossRepo *CrossRepoMarker `json:"cross_repo,omitempty"`
+	// LinkedRepos are the commits this session's agent made in other
+	// repositories since the previous checkpoint; SessionLinkedRepos all of
+	// them so far.
+	LinkedRepos        []LinkedRepoCommit `json:"linked_repos,omitempty"`
+	SessionLinkedRepos []LinkedRepoCommit `json:"session_linked_repos,omitempty"`
+
 	// Task checkpoint fields (only populated for task checkpoints)
 	IsTask    bool   `json:"is_task,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
@@ -682,6 +695,31 @@ type CodeLearning struct {
 	Line    int    `json:"line,omitempty"`     // Start line number
 	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
 	Finding string `json:"finding"`            // What was learned
+}
+
+// CrossRepoMarker marks a checkpoint that records only that an agent session
+// homed in another repository made a commit here. The session's transcript,
+// prompts and tokens stay in its home repository's checkpoints.
+type CrossRepoMarker struct {
+	// CommitSHA is the commit in this repository.
+	CommitSHA string `json:"commit_sha"`
+	// Repo names this repository: its normalized origin, else its directory
+	// name. Never a local path: the marker is pushed.
+	Repo string `json:"repo,omitempty"`
+	// HomeRepo names the session's home repository the same way.
+	HomeRepo string `json:"home_repo"`
+}
+
+// LinkedRepoCommit is one commit a session's agent made in another
+// repository, recorded on the home side. RepoKey names that repository as
+// CrossRepoMarker.Repo does; no local path is recorded, since the home's
+// checkpoints carry these and are pushed.
+type LinkedRepoCommit struct {
+	RepoKey      string    `json:"repo_key"`
+	SHA          string    `json:"sha"`
+	CheckpointID string    `json:"checkpoint_id,omitempty"`
+	LinkedBy     string    `json:"linked_by"`
+	At           time.Time `json:"at"`
 }
 
 // LinkedCommit is one trailer-less link from a checkpoint to a commit; see

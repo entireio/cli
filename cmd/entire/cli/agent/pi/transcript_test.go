@@ -450,3 +450,28 @@ func TestDetectPresence_WithPiDir(t *testing.T) {
 		t.Error("DetectPresence should be true when .pi/ exists in repo")
 	}
 }
+
+// Pi resolves a tool's path itself (path-utils resolveToCwd): an "@" prefix
+// is dropped, "~/" is the home directory, and an absolute path stays as it
+// is, inside the session's directory or not.
+func TestExtractModifiedFiles_PathsOutsideTheSessionDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	session := `{"type":"session","version":3,"id":"abs","cwd":"/work/c"}
+{"type":"message","id":"m1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"edit d"}]}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","content":[` +
+		`{"type":"toolCall","id":"t1","name":"write","arguments":{"path":"/work/d/a.txt","content":"x"}},` +
+		`{"type":"toolCall","id":"t2","name":"edit","arguments":{"path":"@/work/d/b.txt","edits":[]}},` +
+		`{"type":"toolCall","id":"t3","name":"write","arguments":{"path":"~/e/c.txt","content":"x"}},` +
+		`{"type":"toolCall","id":"t4","name":"write","arguments":{"file_path":"/work/d/d.txt","content":"x"}}]}}
+`
+	path := writeJSONL(t, "2026-03-27T21-00-00-000Z_abs.jsonl", session)
+	files, _, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/work/d/a.txt", "/work/d/b.txt", filepath.Join(home, "e", "c.txt"), "/work/d/d.txt"}
+	if strings.Join(files, ",") != strings.Join(want, ",") {
+		t.Fatalf("files = %v, want %v", files, want)
+	}
+}

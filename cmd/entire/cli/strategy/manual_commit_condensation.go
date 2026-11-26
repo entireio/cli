@@ -871,6 +871,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if commitSHA, ok := recordedCommitLink(ctx); ok {
 		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: commitSHA}}
 	}
+	linksCondensed := withLinkedRepos(ctx, &writeOpts, state)
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
@@ -882,6 +883,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+	state.CrossRepoLinksCondensed = linksCondensed
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base
 	// must be re-anchored — but not now. We defer until the next counted turn (in

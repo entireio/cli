@@ -21,6 +21,11 @@ import (
 // binary, and re-execing it would fork the whole suite. Tests exercise the
 // call sites through their spawn seams instead.
 func SpawnDetached(dir string, args ...string) {
+	SpawnDetachedEnv(dir, os.Environ(), args...)
+}
+
+// SpawnDetachedEnv is SpawnDetached with the child's environment env.
+func SpawnDetachedEnv(dir string, env []string, args ...string) {
 	if testing.Testing() {
 		return
 	}
@@ -30,6 +35,7 @@ func SpawnDetached(dir string, args ...string) {
 	}
 
 	cmd := newDetachedCmd(executable, dir, args...)
+	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		return
 	}

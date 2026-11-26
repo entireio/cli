@@ -334,8 +334,27 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// spawn one detached sweep to fix it. Detached, so the hook's timeout
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
+	sweepOtherReposOnResume(ctx, ag, event)
 
 	return nil
+}
+
+// sweepOtherReposOnResume runs the cross-repository sweep for a resumed
+// session whose last turn never ended (the agent crashed): its turn end would
+// have linked the commits that turn made in other repositories.
+func sweepOtherReposOnResume(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	if event.SessionRef == "" || !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
+	if pre, err := LoadPrePromptState(ctx, event.SessionID); err != nil || pre == nil {
+		return
+	}
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	edited := turnEditedPathsFrom(ctx, ag, event.SessionRef, event.SessionID, true)
+	linkSessionInOtherRepos(ctx, event.SessionID, hookRoot, turnCrossRepoActivity(ctx, event.SessionRef, event.SessionID, hookRoot, edited), true)
 }
 
 // codexSessionStartNotice is the Codex SessionStart warning: a project hook
@@ -552,6 +571,9 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
+	linkSessionInOtherRepos(ctx, event.SessionID, repoRoot,
+		crossRepoActivity{edited: absoluteToolUsePaths(event.CWD, event.ModifiedFiles, event.NewFiles)}, false)
+
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
@@ -575,6 +597,12 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		)
 	}
 	return nil
+}
+
+// absoluteToolUsePaths returns the hook payload's file lists as absolute
+// paths, joining relative ones to eventCWD.
+func absoluteToolUsePaths(eventCWD string, lists ...[]string) []string {
+	return absolutePaths(eventCWD, slices.Concat(lists...))
 }
 
 // normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
@@ -793,6 +821,9 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		initSpan.End()
 		return nil
 	}
+	// Commits this agent makes in other repositories find the session
+	// through this pointer (global enable only).
+	strategy.RecordCrossRepoOwner(ctx, sessionID)
 
 	// Append prompt to prompt.txt on filesystem so it's available for
 	// mid-turn commits and condensation. After InitializeSessionForPrompt, so
@@ -954,7 +985,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	var elsewhere map[string][]string
 	if sessionID != unknownSessionID {
-		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, turnEditedPaths(logCtx, ag, transcriptRef, sessionID)))
+		edited := turnEditedPaths(logCtx, ag, transcriptRef, sessionID)
+		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, edited))
+		// Bounded by crossRepoSyncBudget (the rest runs detached), so the
+		// home's own turn-end work below keeps well inside the hook timeout.
+		linkTurnInOtherRepos(logCtx, ag, transcriptRef, sessionID, hookRoot)
 	}
 
 	// Create session metadata directory
@@ -1940,6 +1975,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		}
 		return nil
 	}
+
+	linkSubagentInOtherRepos(logCtx, ag, event)
 
 	if event.Final {
 		return handleSubagentStopFinal(logCtx, ag, event)
@@ -3019,6 +3056,17 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 	return 0
 }
 
+// turnStartTranscriptOffset is the transcript offset the current turn began
+// at. Unlike resolveTranscriptOffset, it trusts a captured zero: on a
+// session's first turn, CheckpointTranscriptStart may already have moved past
+// the turn's edits when a same-turn commit condensed.
+func turnStartTranscriptOffset(ctx context.Context, preState *PrePromptState, sessionID string) int {
+	if preState != nil && preState.TranscriptOffsetCaptured {
+		return preState.TranscriptOffset
+	}
+	return resolveTranscriptOffset(ctx, preState, sessionID)
+}
+
 // recordCaptureDegraded persists (or clears) the capture-degraded timestamp on
 // session state at turn end, so a failed or budget-breached status scan is
 // visible in `entire status` instead of only in .entire/logs. A healthy turn
@@ -3478,6 +3526,24 @@ func adoptInvestigateEnv(ctx context.Context, state *session.State, expectedAgen
 // out: a subagent's edits in its own throwaway worktree belong to its task
 // record (see strategy.SplitEditsByWorktree). Failures yield none.
 func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string) []string {
+	return turnEditedPathsFrom(ctx, ag, transcriptRef, sessionID, false)
+}
+
+// linkTurnInOtherRepos runs the turn-end cross-repository link and sweep
+// (global enable only), with the subagents' edits too.
+func linkTurnInOtherRepos(ctx context.Context, ag agent.Agent, transcriptRef, sessionID, hookRoot string) {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
+	edited := turnEditedPathsFrom(ctx, ag, transcriptRef, sessionID, true)
+	linkSessionInOtherRepos(ctx, sessionID, hookRoot, turnCrossRepoActivity(ctx, transcriptRef, sessionID, hookRoot, edited), true)
+}
+
+// turnEditedPathsFrom is turnEditedPaths, with withSubagents also the files
+// the turn's subagents edited, which their own transcripts hold. Worktree
+// following keeps to the main agent's edits (a subagent's other-worktree edits
+// are not recorded for that worktree); cross-repository linking takes both.
+func turnEditedPathsFrom(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string, withSubagents bool) []string {
 	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
 	if !ok {
 		return nil
@@ -3486,7 +3552,16 @@ func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, session
 	if err != nil {
 		preState = nil
 	}
-	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, resolveTranscriptOffset(ctx, preState, sessionID))
+	offset := turnStartTranscriptOffset(ctx, preState, sessionID)
+	if extractor, ok := agent.AsSubagentAwareExtractor(ag); ok && withSubagents {
+		if data, readErr := agent.ReadTranscriptFile(transcriptRef); readErr == nil {
+			subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), sessionID)
+			if files, extractErr := extractor.ExtractAllModifiedFiles(data, offset, subagentsDir); extractErr == nil {
+				return files
+			}
+		}
+	}
+	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, offset)
 	if err != nil {
 		return nil
 	}

@@ -514,6 +514,10 @@ type State struct {
 	LastTurnStartKey string     `json:"last_turn_start_key,omitempty"`
 	LastTurnStartAt  *time.Time `json:"last_turn_start_at,omitempty"`
 
+	// CrossRepoLinksCondensed counts the entries of the session's
+	// cross-repository link journal its checkpoints already listed.
+	CrossRepoLinksCondensed int `json:"cross_repo_links_condensed,omitempty"`
+
 	// Line attribution was removed: state files written by older CLIs may
 	// still carry attribution_base_commit, prompt_attributions,
 	// pending_prompt_attribution, and divergence_notice_shown. encoding/json
@@ -1402,6 +1406,20 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	return newStateStoreAt(commonDir), nil
 }
 
+// NewStateStoreForCommonDir creates a state store for the repository whose
+// git common directory is commonDir, already resolved by the caller (for
+// instance with gitdir.CommonDirForPath, which ignores a hook's inherited
+// GIT_DIR where NewStateStoreForWorktree honors it).
+func NewStateStoreForCommonDir(commonDir string) (*StateStore, error) {
+	if !filepath.IsAbs(commonDir) {
+		return nil, fmt.Errorf("git common dir %q is not absolute", commonDir)
+	}
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
+	return newStateStoreAt(commonDir), nil
+}
+
 // ensureTestIsolatedStateDir fails loud when `go test` code reaches a
 // session state directory outside the temp root: the test is missing repo
 // isolation (testutil.InitRepo + t.Chdir, or NewStateStoreForWorktree /
@@ -1464,6 +1482,12 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
 	return s.load(ctx, sessionID, true)
+}
+
+// LoadReadOnly is Load for a store this process does not own (another
+// repository's): a stale record is returned as-is, never deleted.
+func (s *StateStore) LoadReadOnly(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, false)
 }
 
 // load reads one session. When deleteStale is false the record is returned

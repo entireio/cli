@@ -929,3 +929,20 @@ func TestExtractAllUserPrompts_SkipsInjectedBackgroundResult(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"Create red.md in the background", "Review @notes.md\nCalled the Read tool"}, prompts)
 }
+
+// An edit outside the session's directory keeps its absolute path, so the
+// cross-repository sweep can find the repository it lies in.
+func TestModifiedFilesFromMessages_KeepsAbsolutePathsOutsideTheProject(t *testing.T) {
+	t.Parallel()
+	msgs := []ExportMessage{{
+		Info: MessageInfo{Role: roleAssistant},
+		Parts: []Part{
+			{Type: partTypeTool, Tool: "write", State: &ToolState{Input: map[string]any{"filePath": "/work/d/a.txt"}}},
+			{Type: partTypeTool, Tool: "edit", State: &ToolState{Input: map[string]any{"filePath": "/work/e/b.txt"}}},
+		},
+	}}
+	got := modifiedFilesFromMessages(msgs, 0)
+	if len(got) != 2 || got[0] != "/work/d/a.txt" || got[1] != "/work/e/b.txt" {
+		t.Fatalf("got %v", got)
+	}
+}

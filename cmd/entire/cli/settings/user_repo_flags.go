@@ -112,6 +112,16 @@ func setRepoEntryField(repos map[string]json.RawMessage, name, field string, val
 	return nil
 }
 
+// RepoKey names the repository at worktreeRoot the way a `repos` entry
+// would: its normalized origin, else its main worktree's path.
+func RepoKey(ctx context.Context, worktreeRoot string) (string, error) {
+	keys, _, err := usersettings.OriginKeys(ctx, worktreeRoot)
+	if err != nil {
+		keys = nil
+	}
+	return repoEntryKey(ctx, worktreeRoot, keys)
+}
+
 // repoEntryKey is the key a new `repos` entry for this repository gets: its
 // first origin key, or else the path of its main worktree — not this one, so
 // the entry reads the same from every worktree and PathNamesThisClone matches

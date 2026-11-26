@@ -518,6 +518,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	if err != nil || len(sessions) == 0 {
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
+		// No session of this repository: an agent homed in another may be committing.
+		s.prepareCrossRepoCommitMsg(ctx, commitMsgFile, err)
 		// No active sessions or error listing - silently skip (hooks must be resilient)
 		logging.Debug(logCtx, "prepare-commit-msg: no active sessions",
 			slog.String("strategy", "manual-commit"),
@@ -1546,10 +1548,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	findSessionsSpan.End()
 
 	if err != nil || len(sessions) == 0 {
-		logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
-			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", checkpointID.String()),
-		)
+		s.postCommitUnclaimed(ctx, err, repo, commit, checkpointID, worktreePath)
 		return nil
 	}
 	if beforeCondense != nil && beforeCondense(ctx, sessions) {

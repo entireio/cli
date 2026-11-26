@@ -537,6 +537,13 @@ type checkpointSessionJSON struct {
 	InvestigateRunID string `json:"investigate_run_id,omitempty"`
 	InvestigateTopic string `json:"investigate_topic,omitempty"`
 
+	// Cross-repository linking (global enable): a marker of a commit made
+	// here by a session homed elsewhere, or the commits this session made in
+	// other repositories.
+	CrossRepo          *checkpoint.CrossRepoMarker   `json:"cross_repo,omitempty"`
+	LinkedRepos        []checkpoint.LinkedRepoCommit `json:"linked_repos,omitempty"`
+	SessionLinkedRepos []checkpoint.LinkedRepoCommit `json:"session_linked_repos,omitempty"`
+
 	// Error is set when this session's metadata could not be read. The Index
 	// field remains valid; all other content fields are zero. Consumers can
 	// detect this by checking for a non-empty Error.
@@ -732,18 +739,21 @@ func readSessionMetadataForExport(ctx context.Context, reader checkpoint.Session
 
 func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSessionJSON {
 	out := checkpointSessionJSON{
-		Index:            idx,
-		SessionID:        meta.SessionID,
-		Agent:            string(meta.Agent),
-		Model:            meta.Model,
-		Kind:             meta.Kind,
-		ReviewSkills:     meta.ReviewSkills,
-		TurnID:           meta.TurnID,
-		IsTask:           meta.IsTask,
-		ToolUseID:        meta.ToolUseID,
-		FilesTouched:     meta.FilesTouched,
-		InvestigateRunID: meta.InvestigateRunID,
-		InvestigateTopic: meta.InvestigateTopic,
+		Index:              idx,
+		SessionID:          meta.SessionID,
+		Agent:              string(meta.Agent),
+		Model:              meta.Model,
+		Kind:               meta.Kind,
+		ReviewSkills:       meta.ReviewSkills,
+		TurnID:             meta.TurnID,
+		CrossRepo:          meta.CrossRepo,
+		LinkedRepos:        meta.LinkedRepos,
+		SessionLinkedRepos: meta.SessionLinkedRepos,
+		IsTask:             meta.IsTask,
+		ToolUseID:          meta.ToolUseID,
+		FilesTouched:       meta.FilesTouched,
+		InvestigateRunID:   meta.InvestigateRunID,
+		InvestigateTopic:   meta.InvestigateTopic,
 	}
 	if !meta.CreatedAt.IsZero() {
 		ts := meta.CreatedAt
