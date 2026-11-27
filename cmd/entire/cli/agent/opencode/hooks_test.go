@@ -181,7 +181,7 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
 		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
 	}
-	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
+	if !strings.Contains(content, `output.system.push(injection.text)`) {
 		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
 	// Every session-reset site must clear the stashed injection so a session

@@ -58,7 +58,10 @@ if (reduced) {
 const cleanup = await plugin.setup(ctx)
 for (const step of steps) {
   if (step.prompt) await hooks["session.prompt"](step.prompt)
-  if (step.context) await hooks["session.context"](step.context)
+  if (step.context) {
+    await hooks["session.context"](step.context)
+    console.log("SYSTEM " + JSON.stringify(step.context.system.map((s) => s.text ?? s)))
+  }
   if (step.before) await hooks["tool.execute.before"](step.before)
   if (step.after) {
     // noWait: OpenCode keeps delivering events while this hook runs.
@@ -122,6 +125,14 @@ func parentsJSON(parents map[string]string) map[string]any {
 
 func runPluginV2(t *testing.T, scenario map[string]any) []v2Hook {
 	t.Helper()
+	hooks, _ := runPluginV2Output(t, scenario, "")
+	return hooks
+}
+
+// runPluginV2Output is runPluginV2 that also returns the driver's output;
+// inject is printed by the fake turn-start as Entire's context injection.
+func runPluginV2Output(t *testing.T, scenario map[string]any, inject string) ([]v2Hook, []byte) {
+	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
 	}
@@ -149,7 +160,7 @@ func runPluginV2(t *testing.T, scenario map[string]any) []v2Hook {
 	// races between detached hooks visible.
 	script := "#!/bin/sh\nbody=$(cat)\n" +
 		"[ \"$3\" = subagent-start ] && [ -n \"$SLOW_SUBAGENT_START\" ] && sleep 1\n" +
-		"sleep 0.05\nprintf '%s\\t%s\\n' \"$3\" \"$body\" >> " + logPath + "\n"
+		"sleep 0.05\nprintf '%s\\t%s\\n' \"$3\" \"$body\" >> " + logPath + "\n" + injectContextLine
 	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +170,12 @@ func runPluginV2(t *testing.T, scenario map[string]any) []v2Hook {
 	cmd.Dir = dir
 	// OpenCode 2 does not set OPENCODE; a test run from inside OpenCode 1
 	// would inherit it and load the OpenCode 1 plugin instead.
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=")
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "OPENCODE=", "INJECT_CONTEXT="+inject)
 	if slow, _ := scenario["slowSubagentStart"].(bool); slow { //nolint:errcheck // absent means false
 		cmd.Env = append(cmd.Env, "SLOW_SUBAGENT_START=1")
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("node driver failed: %v\n%s", err, out)
 	}
 
@@ -184,7 +196,7 @@ func runPluginV2(t *testing.T, scenario map[string]any) []v2Hook {
 	}
 	f, err := os.Open(logPath)
 	if os.IsNotExist(err) {
-		return nil
+		return nil, out
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +218,7 @@ func runPluginV2(t *testing.T, scenario map[string]any) []v2Hook {
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return hooks
+	return hooks, out
 }
 
 func hookStrings(hooks []v2Hook) []string {
