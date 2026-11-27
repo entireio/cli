@@ -7,11 +7,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -844,4 +846,42 @@ func TestParseSubagentStop_ForwardsAgentTranscriptPath(t *testing.T) {
 	if ev.SessionRef != "/cursor/conv-1.jsonl" {
 		t.Errorf("SessionRef = %q, want the main transcript", ev.SessionRef)
 	}
+}
+
+// cursorProjectDirName transcribes Cursor's workspace-paths.js rule step by
+// step, independently of SanitizePathForCursor.
+func cursorProjectDirName(workspacePath string) string {
+	s := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(workspacePath, "-")
+	s = regexp.MustCompile(`-+`).ReplaceAllString(s, "-")
+	return regexp.MustCompile(`^-+|-+$`).ReplaceAllString(s, "")
+}
+
+// TestParseHookEvent_TurnEnd_NullTranscriptPathInWorktreeRepo reproduces the
+// first-turn miss: Cursor sends a null transcript_path until the transcript
+// file exists, so the path is computed, and for a repo under a dot directory
+// (.worktrees) it must land where Cursor actually writes the transcript.
+// Not parallel: sets HOME and changes directory.
+func TestParseHookEvent_TurnEnd_NullTranscriptPathInWorktreeRepo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", "")
+
+	repo := filepath.Join(t.TempDir(), "a", ".worktrees", "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	testutil.InitRepo(t, repo)
+	t.Chdir(repo)
+	root, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+
+	transcriptDir := filepath.Join(home, ".cursor", "projects", cursorProjectDirName(root), "agent-transcripts")
+	require.NoError(t, os.MkdirAll(transcriptDir, 0o755))
+	transcriptFile := filepath.Join(transcriptDir, "turn-one.jsonl")
+	require.NoError(t, os.WriteFile(transcriptFile, []byte(`{"role":"user"}`+"\n"), 0o644))
+
+	input := `{"conversation_id": "turn-one", "transcript_path": null, "status": "completed", "loop_count": 1}`
+	event, err := (&CursorAgent{}).ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, transcriptFile, event.SessionRef)
 }
