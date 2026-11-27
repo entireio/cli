@@ -79,7 +79,11 @@ func TestGrantAdd_TeamGranteeRefusals(t *testing.T) {
 		f.writeStatus = http.StatusNotFound
 		srv := f.serve(t)
 		_, _, err := runGrantCmd(t, newProjectGrantCmd, srv, "add", teamProjULID, "team:platform", "--role", "reader")
-		require.ErrorContains(t, err, "team platform is not a team of the org that owns project "+teamProjULID)
+		// main.go prints renderCoreError's text, which drops everything but
+		// Core's message when the error wraps a Core error.
+		rendered := renderCoreError(err).Error()
+		require.Contains(t, rendered, "team platform is not a team of the org that owns project "+teamProjULID)
+		require.Contains(t, rendered, "refused by core")
 	})
 	// The CLI refused an account-owned target above, so a 422 is some other
 	// refusal and keeps Core's own message.
