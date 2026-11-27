@@ -86,7 +86,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureUsesWindowsCommands(t *testing.T
 
 	hooksFile, data := readHooksFile(t, tempDir)
 
-	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-start"), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")
@@ -115,7 +115,7 @@ func TestInstallHooks_WindowsWrapperProbeFailureMigratesToWindowsCommands(t *tes
 
 	hooksFile, data := readHooksFile(t, tempDir)
 
-	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
+	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-start"), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.SessionEnd, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex session-end"), "SessionEnd")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), "Stop")

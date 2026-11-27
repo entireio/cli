@@ -11,10 +11,19 @@ import (
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// releasedSessionStart is the SessionStart command released versions wrote on
+// a native Windows host: the direct JSON-warning form, which does not parse
+// under Codex's default PowerShell hook shell.
+const releasedSessionStart = `where.exe entire >nul 2>nul & if errorlevel 1 (echo {^"systemMessage^":^"Entire CLI is enabled but not installed or not on PATH.^"}) else (entire hooks codex session-start)`
+
 // legacyWindowsCommand turns a current Windows wrapper back into the form a
 // version from before the PATH-only setting wrote: no `set …& pushd …& ` before
-// the where.exe guard and no `popd& ` opening the branches.
+// the where.exe guard and no `popd& ` opening the branches. SessionStart gets
+// the direct JSON-warning form those versions wrote.
 func legacyWindowsCommand(command string) string {
+	if strings.Contains(command, "entire hooks codex session-start") && strings.Contains(command, "where.exe entire") {
+		return releasedSessionStart
+	}
 	command = strings.Replace(command, "set NoDefaultCurrentDirectoryInExePath=1& pushd %SystemRoot%& ", "", 1)
 	return strings.ReplaceAll(command, "popd& ", "")
 }
@@ -38,7 +47,7 @@ func rewriteStrings(v any, f func(string) string) any {
 
 // TestCheckHookConfig_WindowsLegacyWrapperIsOutdated pins that `entire status`
 // and `entire doctor` flag Codex hooks written before the PATH-only setting,
-// both the nested silent wrappers and SessionStart's direct JSON-warning form,
+// both the nested silent wrappers and the direct JSON-warning SessionStart,
 // and that the reinstall they point to clears the warning. Mutates the shared
 // probe and the working directory, so no t.Parallel().
 func TestCheckHookConfig_WindowsLegacyWrapperIsOutdated(t *testing.T) {

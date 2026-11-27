@@ -453,8 +453,11 @@ so the command is cut apart and `entire` never runs — at **exit code 0**, so
 nothing reports a problem. Never install an unconditional
 `WrapProductionSilentHookCommand`; choose per host with the `*ForOS` selectors
 (`WrapProductionSilentHookCommandForOS`,
-`WrapProductionJSONWarningHookCommandForOS`,
-`WrapProductionPlainTextWarningHookCommandForOS`), passing one of two gates:
+`WrapProductionPlainTextWarningHookCommandForOS`), passing one of two gates.
+There is no Windows JSON-warning form: JSON's quotes cannot sit inside the
+nested `cmd.exe` block a PowerShell hook shell needs, so codex's SessionStart
+uses the silent nested wrapper on native Windows (see
+`codex.jsonWarningHookCommand`):
 
 | Gate | Use it when | Adopters |
 | --- | --- | --- |
