@@ -470,6 +470,13 @@ func (env *TestEnv) GitAdd(paths ...string) {
 // GitCommit creates a commit with all staged files.
 func (env *TestEnv) GitCommit(message string) {
 	env.T.Helper()
+	env.GitCommitAt(message, time.Now())
+}
+
+// GitCommitAt is GitCommit with an explicit author and committer time, for
+// tests that depend on commit order (git times are whole seconds).
+func (env *TestEnv) GitCommitAt(message string, when time.Time) {
+	env.T.Helper()
 
 	repo, err := gitrepo.OpenPath(env.RepoDir)
 	if err != nil {
@@ -486,7 +493,7 @@ func (env *TestEnv) GitCommit(message string) {
 		Author: &object.Signature{
 			Name:  testAuthorName,
 			Email: testAuthorEmail,
-			When:  time.Now(),
+			When:  when,
 		},
 	})
 	if err != nil {
@@ -936,7 +943,7 @@ func (env *TestEnv) GetLatestCommitMessageOnBranch(branchName string) string {
 // and post-commit hooks as a human (with TTY). This is the default for tests.
 func (env *TestEnv) GitCommitWithHooks(message string, files ...string) {
 	env.T.Helper()
-	env.gitCommitWithHooks(message, true, files...)
+	env.gitCommitWithHooks(message, true, time.Now(), files...)
 }
 
 // GitCommitWithHooksAsAgent is like GitCommitWithHooks but simulates
@@ -944,7 +951,14 @@ func (env *TestEnv) GitCommitWithHooks(message string, files ...string) {
 // skips content detection and interactive prompts for ACTIVE sessions.
 func (env *TestEnv) GitCommitWithHooksAsAgent(message string, files ...string) {
 	env.T.Helper()
-	env.gitCommitWithHooks(message, false, files...)
+	env.gitCommitWithHooks(message, false, time.Now(), files...)
+}
+
+// GitCommitWithHooksAsAgentAt is GitCommitWithHooksAsAgent with an explicit
+// author and committer time.
+func (env *TestEnv) GitCommitWithHooksAsAgentAt(message string, when time.Time, files ...string) {
+	env.T.Helper()
+	env.gitCommitWithHooks(message, false, when, files...)
 }
 
 // prepareCommitMsgCmd builds the prepare-commit-msg hook command. When
@@ -967,7 +981,7 @@ func (env *TestEnv) prepareCommitMsgCmd(simulateTTY bool, hookArgs ...string) *e
 }
 
 // gitCommitWithHooks is the shared implementation for committing with Entire's git hooks.
-func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files ...string) {
+func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, when time.Time, files ...string) {
 	env.T.Helper()
 
 	// Stage files using go-git
@@ -1012,7 +1026,7 @@ func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files .
 		Author: &object.Signature{
 			Name:  testAuthorName,
 			Email: testAuthorEmail,
-			When:  time.Now(),
+			When:  when,
 		},
 	})
 	if err != nil {

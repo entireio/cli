@@ -762,6 +762,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
+		CommitSHAAtWrite:            opts.CommitSHAAtWrite,
 		CrossRepo:                   opts.CrossRepo,
 		LinkedRepos:                 opts.LinkedRepos,
 		SessionLinkedRepos:          opts.SessionLinkedRepos,

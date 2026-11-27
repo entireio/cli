@@ -164,6 +164,12 @@ type WriteOptions struct {
 	// same checkpoint keeps the existing entries and adds new ones.
 	LinkedCommits []LinkedCommit
 
+	// CommitSHAAtWrite is the commit a commit-driven condensation was written
+	// for (HEAD at post-commit). It is informational, not a link: the commit
+	// carries this checkpoint's trailer, which is what attributes it. A rewrite
+	// (an amend re-condensing) replaces it. Empty for writes no commit drove.
+	CommitSHAAtWrite string
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
@@ -467,6 +473,10 @@ type Metadata struct {
 	// but they share the same TurnID for future aggregation/deduplication.
 	TurnID string `json:"turn_id,omitempty"`
 
+	// CommitSHAAtWrite: the commit this session's write was for; see
+	// WriteOptions.CommitSHAAtWrite. Not an attributing link.
+	CommitSHAAtWrite string `json:"written_for_commit,omitempty"`
+
 	// CrossRepo is set on a marker checkpoint (see CrossRepoMarker).
 	CrossRepo *CrossRepoMarker `json:"cross_repo,omitempty"`
 	// LinkedRepos are the commits this session's agent made in other
@@ -708,6 +718,11 @@ type CrossRepoMarker struct {
 	Repo string `json:"repo,omitempty"`
 	// HomeRepo names the session's home repository the same way.
 	HomeRepo string `json:"home_repo"`
+	// SessionIDs link back to the sessions that made the commit, each as its
+	// Entire session ID ("<agent>:<agent session ID>"). The home session's
+	// turn is in the checkpoint's TurnID, as for a home checkpoint. Absent on
+	// older markers.
+	SessionIDs []string `json:"session_ids,omitempty"`
 }
 
 // LinkedRepoCommit is one commit a session's agent made in another
@@ -715,11 +730,15 @@ type CrossRepoMarker struct {
 // CrossRepoMarker.Repo does; no local path is recorded, since the home's
 // checkpoints carry these and are pushed.
 type LinkedRepoCommit struct {
-	RepoKey      string    `json:"repo_key"`
-	SHA          string    `json:"sha"`
-	CheckpointID string    `json:"checkpoint_id,omitempty"`
-	LinkedBy     string    `json:"linked_by"`
-	At           time.Time `json:"at"`
+	RepoKey      string `json:"repo_key"`
+	SHA          string `json:"sha"`
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+	LinkedBy     string `json:"linked_by"`
+	// TurnID is the home session's turn when the commit was made.
+	TurnID string    `json:"turn_id,omitempty"`
+	At     time.Time `json:"at"`
+	// CommittedAt is the commit's git committer time.
+	CommittedAt time.Time `json:"committed_at,omitzero"`
 }
 
 // LinkedCommit is one trailer-less link from a checkpoint to a commit; see

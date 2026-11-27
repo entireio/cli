@@ -323,6 +323,14 @@ type State struct {
 	// sessions that have been condensed at least once. Cleared on new prompt.
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 
+	// CheckpointLinks lists every checkpoint this session contributed to, in
+	// the order they were recorded: its home-repository checkpoints and the
+	// marker checkpoints its agent's commits in other repositories wrote.
+	// Unlike LastCheckpointID and TurnCheckpointIDs it is never cleared, so
+	// each checkpoint's predecessor in the session stays derivable. See
+	// CheckpointLink.
+	CheckpointLinks []CheckpointLink `json:"checkpoint_links,omitempty"`
+
 	// CondensationAttempt is saved before a persistent checkpoint write so a
 	// retry after process death keeps both the intended ID and recovery mode.
 	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
@@ -993,6 +1001,7 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	}
 	// Also normalize via PhaseFromString to handle any other legacy/unknown values.
 	s.Phase = PhaseFromString(string(s.Phase))
+	s.seedCheckpointLinks()
 
 	// Migrate transcript fields: CheckpointTranscriptStart replaces both
 	// CondensedTranscriptLines and TranscriptLinesAtStart from older state files.

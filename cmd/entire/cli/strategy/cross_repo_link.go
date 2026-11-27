@@ -82,7 +82,7 @@ func (s *ManualCommitStrategy) postCommitCrossRepo(ctx context.Context, repo *gi
 		return false
 	}
 	committed := commitFiles(ctx, worktreePath, commit)
-	if err := s.writeCrossRepoMarker(ctx, repo, cpID, home, commit.Hash.String(), committed, linkedByTrailer); err != nil {
+	if err := s.writeCrossRepoMarker(ctx, repo, cpID, home, commit, committed, linkedByTrailer); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "cross-repo"), "post-commit: could not link a session homed in another repository",
 			slog.String("session_id", home.state.SessionID), slog.String("error", err.Error()))
 	}
@@ -170,7 +170,7 @@ func (s *ManualCommitStrategy) LinkCrossRepoCommits(ctx context.Context, session
 		if err != nil {
 			return count, fmt.Errorf("generate checkpoint ID: %w", err)
 		}
-		if err := s.writeCrossRepoMarker(ctx, repo, cpID, home, sha, committed, linkedBySweep); err != nil {
+		if err := s.writeCrossRepoMarker(ctx, repo, cpID, home, commit, committed, linkedBySweep); err != nil {
 			return count, err
 		}
 		// Saved per marker: a run killed partway (the foreground budget) must
@@ -205,12 +205,14 @@ func reportedCommit(sha string, reported []string) bool {
 	return false
 }
 
-// commitsSince lists the commits committed at or after since on the branch
-// checked out in any worktree of the repository (each worktree's HEAD: an
-// agent may commit in a linked worktree while its edits were recorded in the
-// main checkout), newest first.
+// commitsSince lists the most recent commits committed at or after since on
+// the branch checked out in any worktree of the repository (each worktree's
+// HEAD: an agent may commit in a linked worktree while its edits were recorded
+// in the main checkout), oldest first: by committer time, parents before
+// children where times tie, so the links (and the session's CheckpointLinks)
+// follow commit order.
 func commitsSince(ctx context.Context, worktreePath string, since time.Time) []string {
-	args := []string{"-C", worktreePath, "rev-list",
+	args := []string{"-C", worktreePath, "rev-list", "--date-order", "--reverse",
 		fmt.Sprintf("--max-count=%d", maxCrossRepoSweep), fmt.Sprintf("--since=%d", since.Unix()), "HEAD"}
 	cmd := exec.CommandContext(ctx, "git", append(args, worktreeHeads(ctx, worktreePath)...)...)
 	out, err := cmd.Output()

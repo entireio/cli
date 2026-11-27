@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // Cross-repository linking (global enable only). A session lives in the
@@ -325,10 +326,15 @@ const (
 
 // writeCrossRepoMarker stores, on this repository's checkpoint ref, a marker
 // checkpoint saying the home session made commit sha here: no transcript,
-// prompts or tokens, which stay with the session's home. A recorded link
-// (the sweep) also names the commit in LinkedCommits, as attach does. The
-// link is then appended to the home's journal.
-func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *git.Repository, cpID id.CheckpointID, home *crossRepoHome, sha string, committed map[string]struct{}, linkedBy string) error {
+// prompts or tokens, which stay with the session's home. It names the home
+// session's turn, as a home checkpoint does; CrossRepo.CommitSHA names the
+// commit. A recorded link (the sweep, whose commit has no trailer) also names
+// it in LinkedCommits, as attach does.
+// The link is then appended to the home's journal, the handoff the home's
+// own hooks fold into the session's CheckpointLinks (foldCrossRepoLinks):
+// this repository never writes the home's session state.
+func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *git.Repository, cpID id.CheckpointID, home *crossRepoHome, commit *object.Commit, committed map[string]struct{}, linkedBy string) error {
+	sha := commit.Hash.String()
 	worktree, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve this worktree: %w", err)
@@ -344,7 +350,8 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 		CheckpointID: cpID, SessionID: home.state.SessionID, Strategy: StrategyNameManualCommit,
 		Branch: GetCurrentBranchName(repo), FilesTouched: committedFilesExcludingMetadata(committed),
 		Agent: home.state.AgentType, AuthorName: authorName, AuthorEmail: authorEmail,
-		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey},
+		TurnID:    home.state.TurnID,
+		CrossRepo: &cpkg.CrossRepoMarker{CommitSHA: sha, Repo: repoKey, HomeRepo: homeKey, SessionIDs: []string{home.state.EntireSessionID()}},
 	}
 	if linkedBy == linkedBySweep {
 		opts.LinkedCommits = []cpkg.LinkedCommit{{SHA: sha}}
@@ -352,7 +359,7 @@ func (s *ManualCommitStrategy) writeCrossRepoMarker(ctx context.Context, repo *g
 	if err := store.Write(ctx, condensationSessionWriteRequest(opts)); err != nil {
 		return fmt.Errorf("write the marker checkpoint: %w", err)
 	}
-	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, At: time.Now().UTC()}
+	link := cpkg.LinkedRepoCommit{RepoKey: repoKey, SHA: sha, CheckpointID: cpID.String(), LinkedBy: linkedBy, TurnID: home.state.TurnID, At: time.Now().UTC(), CommittedAt: commit.Committer.When.UTC()}
 	if err := appendCrossRepoLink(home, link); err != nil {
 		logging.Warn(logging.WithComponent(ctx, "cross-repo"), "could not record the link in the session's home repository",
 			slog.String("session_id", home.state.SessionID), slog.String("error", err.Error()))

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/redact"
@@ -544,6 +545,15 @@ type checkpointSessionJSON struct {
 	LinkedRepos        []checkpoint.LinkedRepoCommit `json:"linked_repos,omitempty"`
 	SessionLinkedRepos []checkpoint.LinkedRepoCommit `json:"session_linked_repos,omitempty"`
 
+	// EntireSessionID is "<agent>:<agent session ID>", the session's
+	// identity across repositories, derived from the checkpoint metadata.
+	// The session's full checkpoint list is local session state, so it is in
+	// `entire status --json`, not here: a checkpoint exports the same on
+	// every clone.
+	EntireSessionID string `json:"entire_session_id,omitempty"`
+	// CommitSHAAtWrite: see checkpoint.Metadata.CommitSHAAtWrite.
+	CommitSHAAtWrite string `json:"written_for_commit,omitempty"`
+
 	// Error is set when this session's metadata could not be read. The Index
 	// field remains valid; all other content fields are zero. Consumers can
 	// detect this by checking for a non-empty Error.
@@ -746,6 +756,8 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSession
 		Kind:               meta.Kind,
 		ReviewSkills:       meta.ReviewSkills,
 		TurnID:             meta.TurnID,
+		EntireSessionID:    session.EntireSessionIDFor(meta.Agent, meta.SessionID),
+		CommitSHAAtWrite:   meta.CommitSHAAtWrite,
 		CrossRepo:          meta.CrossRepo,
 		LinkedRepos:        meta.LinkedRepos,
 		SessionLinkedRepos: meta.SessionLinkedRepos,

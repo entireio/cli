@@ -426,6 +426,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Agent:                       opts.Agent,
 		Model:                       opts.Model,
 		TurnID:                      opts.TurnID,
+		CommitSHAAtWrite:            opts.CommitSHAAtWrite,
 		CrossRepo:                   opts.CrossRepo,
 		LinkedRepos:                 opts.LinkedRepos,
 		SessionLinkedRepos:          opts.SessionLinkedRepos,

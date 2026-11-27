@@ -487,6 +487,8 @@ Output modes:
                 "pending_turns" counts turns not yet condensed into a
                 checkpoint. "checkpoints" is a deprecated alias with the
                 same value and will be removed in the next release.
+                "session_checkpoint_count" counts every checkpoint the
+                session has recorded across all turns.
   --transcript  Stream the live raw agent transcript bytes to stdout in
                 the agent's native format (e.g. JSONL for
                 Claude/Cursor/Codex). Snapshot is bounded to the file size
@@ -536,6 +538,10 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 	}
 
 	status := sessionPhaseLabel(state)
+	// A display copy: links journaled since the session last folded count too.
+	view := *state
+	view.CheckpointLinks = strategy.CheckpointLinksWithPending(ctx, state)
+	state = &view
 
 	switch mode {
 	case sessionOutputTranscript:
@@ -594,11 +600,17 @@ type sessionInfoJSON struct {
 	// Checkpoints is the deprecated name of PendingTurns, kept for one release
 	// so scripts reading `checkpoints` keep working. Remove it in the release
 	// after the one that introduced pending_turns.
-	Checkpoints    int            `json:"checkpoints"`
-	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
-	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
-	LastPrompt     string         `json:"last_prompt,omitempty"`
-	FilesTouched   []string       `json:"files_touched,omitempty"`
+	Checkpoints    int    `json:"checkpoints"`
+	LastCheckpoint string `json:"last_checkpoint_id,omitempty"`
+	// EntireSessionID is "<agent>:<session_id>". SessionCheckpointCount
+	// counts every checkpoint the session recorded (SessionState.CheckpointLinks),
+	// which, unlike last_checkpoint_id, a new prompt never clears. It is not
+	// the deprecated "checkpoints" (pending turns).
+	EntireSessionID        string         `json:"entire_session_id,omitempty"`
+	SessionCheckpointCount int            `json:"session_checkpoint_count,omitempty"`
+	Tokens                 *tokenInfoJSON `json:"tokens,omitempty"`
+	LastPrompt             string         `json:"last_prompt,omitempty"`
+	FilesTouched           []string       `json:"files_touched,omitempty"`
 
 	// Resolution says how this session was picked when the caller did not name
 	// one — see strategy.SessionResolution. Present only for `session
@@ -647,6 +659,8 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		LastPrompt:     state.LastPrompt,
 		FilesTouched:   state.PendingFiles(),
 	}
+	info.EntireSessionID = state.EntireSessionID()
+	info.SessionCheckpointCount = len(state.CheckpointLinks)
 	if usage := state.TotalTokenUsage(); usage != nil {
 		info.Tokens = &tokenInfoJSON{
 			Total:      totalTokens(usage),
@@ -716,6 +730,9 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
+	}
+	if n := len(state.CheckpointLinks); n > 0 {
+		fmt.Fprintf(w, "Checkpoints: %d recorded\n", n)
 	}
 
 	usage := state.TotalTokenUsage()

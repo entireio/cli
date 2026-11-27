@@ -2119,6 +2119,9 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 			slog.String("checkpoint_id", checkpointID.String()))
 		return false, nil, nil
 	}
+	if head != nil {
+		opts.commitSHA = head.Hash().String()
+	}
 	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
@@ -3785,6 +3788,10 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 			captureSessionBranch(repo, state)
 		}
 	}
+
+	// Links this session's agent made in other repositories during the turn
+	// reach its state here, even when no commit at home condenses it.
+	foldCrossRepoLinks(ctx, state)
 
 	hadMidTurnCommits := len(state.TurnCheckpointIDs) > 0
 
