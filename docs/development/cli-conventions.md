@@ -1016,11 +1016,14 @@ A `view` / `show` command that has a page in the Entire web app takes
 Build the URL from `auth.WebBaseURL()` with path-escaped segments, and prefer
 resolving it without an API call when the reference already names the page.
 When the server supplies a URL, open that and fall back to the built one only
-for servers that omit it; the trail commands share `trailDisplayURL` for this,
-so `trail show`, `trail comment show` and `trail finding show` open the same
-page. Extend a server URL by parsing it (`url.JoinPath`), never by string
-concatenation, as `projectTrailChangeURL` does. Under a project trail,
-`trail finding show --web` opens the change's page, as `trail show --web` does.
+for servers that omit it, as `trailDisplayURL` does for `trail show`. Extend a
+server URL by parsing it (`url.JoinPath`), never by string concatenation, as
+`projectTrailChangeURL` does.
+
+Only add `--web` where the resource itself has a page, or a query parameter
+that selects it. A command whose resource lives inside another page does not
+take the flag: `trail finding show` and `trail comment show` have none, since
+it could only open the trail's page.
 Tests stub the package-level `webOpenURL` seam and so must not be parallel.
 `--web` is for people: do not add it to `agentHelpGuidance`.
 

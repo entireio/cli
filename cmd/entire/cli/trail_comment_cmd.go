@@ -69,9 +69,6 @@ func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *
 		if err != nil {
 			return err
 		}
-		// Older servers omit the trail's url; fill in the same fallback
-		// 'trail show' uses so every callback sees one browser URL.
-		found.URL = trailDisplayURL(*found, forge, owner, repo)
 		return fn(ctx, client, found, basePath)
 	})
 }
@@ -239,11 +236,7 @@ func newTrailCommentShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <discussion-id>",
 		Short: "Show a discussion and its messages",
-		Long: `Show a discussion and its messages.
-
-With --web, open the discussion's trail in the browser instead of printing the
-discussion. A discussion has no page of its own, so this is the trail's page.`,
-		Args: cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			discussionID := args[0]
 			return withNumberedTrail(cmd, func(ctx context.Context, client *api.Client, found *api.TrailResource, basePath string) error {
@@ -259,15 +252,11 @@ discussion. A discussion has no page of its own, so this is the trail's page.`,
 				if err := api.DecodeJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode discussion response: %w", err)
 				}
-				if webRequested(cmd) {
-					return openInWeb(cmd, found.URL)
-				}
 				return printTrailDiscussionDetail(cmd.OutOrStdout(), out, jsonOut)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
-	addWebFlag(cmd)
 	return cmd
 }
 
