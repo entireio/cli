@@ -999,10 +999,15 @@ A `view` / `show` command that has a page in the Entire web app takes
 - `openInWeb(cmd, url)` prints the URL on its own line to stdout, then opens
   the browser. A browser that cannot be launched is a stderr note and exit 0,
   since the URL was delivered; an empty URL is an error.
-  Before printing or opening anything it requires a control-character-free
-  http(s) URL on the `auth.WebBaseURL()` origin (scheme and host:port), so a
-  server-supplied link cannot reach the terminal or the browser unchecked;
-  `ENTIRE_WEB_BASE_URL` is the way to point the CLI at another web origin.
+  Before printing or opening anything it requires valid UTF-8 with only
+  printable runes (no control or bidi-control runes) and an http(s) URL on the
+  `auth.WebBaseURL()` origin, both sides compared through
+  `api.NormalizeOriginURL`, so a server-supplied link cannot reach the terminal
+  or the browser unchecked. The base is validated as an http(s) origin first;
+  `ENTIRE_WEB_BASE_URL` is the way to point the CLI at another web origin. The
+  query is re-encoded (`a b` becomes `a+b`, keys sorted), so assert the
+  encoded form in tests. An opener failure is logged at debug level without
+  the URL.
 
 Build the URL from `auth.WebBaseURL()` with path-escaped segments, and prefer
 resolving it without an API call when the reference already names the page.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -97,8 +98,15 @@ func TestOpenInWeb_EmptyURLErrors(t *testing.T) {
 func TestOpenInWeb_RefusesUnsafeURLs(t *testing.T) {
 	t.Setenv(api.WebBaseURLEnvVar, "https://web.example:8443")
 	for name, tc := range map[string]struct{ target, wantErr string }{
-		"escape sequence":   {"https://web.example:8443/gh/a/b\x1b]0;owned\x07", "control characters"},
-		"newline":           {"https://web.example:8443/gh/a/b\nrm -rf", "control characters"},
+		"escape sequence":   {"https://web.example:8443/gh/a/b\x1b]0;owned\x07", "control or non-printable"},
+		"newline":           {"https://web.example:8443/gh/a/b\nrm -rf", "control or non-printable"},
+		"bidi override":     {"https://web.example:8443/gh/a/\u202eb", "control or non-printable"},
+		"bidi isolate LRI":  {"https://web.example:8443/gh/a/\u2066b", "control or non-printable"},
+		"bidi isolate RLI":  {"https://web.example:8443/gh/a/\u2067b", "control or non-printable"},
+		"bidi isolate FSI":  {"https://web.example:8443/gh/a/\u2068b", "control or non-printable"},
+		"bidi isolate PDI":  {"https://web.example:8443/gh/a/\u2069b", "control or non-printable"},
+		"zero-width space":  {"https://web.example:8443/gh/a/\u200bb", "control or non-printable"},
+		"invalid UTF-8":     {"https://web.example:8443/gh/a/b\xff", "control or non-printable"},
 		"non-HTTP scheme":   {"file:///etc/passwd", "non-HTTP URL"},
 		"javascript scheme": {"javascript:alert(1)", "non-HTTP URL"},
 		"unparseable":       {"https://web.example:8443/%zz", "invalid URL"},
@@ -116,6 +124,7 @@ func TestOpenInWeb_RefusesUnsafeURLs(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 			require.NotContains(t, err.Error(), "\x1b", "URL text in the error is sanitized")
 			require.NotContains(t, err.Error(), "\n")
+			require.False(t, strings.ContainsFunc(err.Error(), isUnsafeURLRune), "error text carries no unsafe rune: %q", err.Error())
 			require.Empty(t, stdout.String())
 			require.Empty(t, stderr.String())
 			require.Empty(t, *opened)
@@ -134,14 +143,67 @@ func TestOpenInWeb_RefusesUnsafeURLs(t *testing.T) {
 func TestOpenInWeb_AcceptsTheWebOrigin(t *testing.T) {
 	t.Setenv(api.WebBaseURLEnvVar, "https://Web.Example:8443/")
 	opened := stubWebOpenURL(t, nil)
-	// Host case differs from the origin's; the re-serialized form is what is
-	// printed and opened.
+	// Host case differs from the origin's; the re-serialized form, with its
+	// query re-encoded, is what is printed and opened.
 	cmd, stdout, _ := newWebOpenTestCmd("HTTPS://WEB.example:8443/gh/acme/web/trails/7?tab=a b")
 	cmd.SetArgs([]string{"--web"})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
-	const want = "https://WEB.example:8443/gh/acme/web/trails/7?tab=a b"
+	const want = "https://WEB.example:8443/gh/acme/web/trails/7?tab=a+b"
 	require.Equal(t, want+"\n", stdout.String())
 	require.Equal(t, []string{want}, *opened)
+}
+
+// An explicit default port names the same origin as none.
+//
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
+func TestOpenInWeb_NormalizesDefaultPorts(t *testing.T) {
+	for name, tc := range map[string]struct{ base, target string }{
+		"https target with :443": {"https://web.example", "https://web.example:443/gh/a/b"},
+		"https base with :443":   {"https://web.example:443", "https://web.example/gh/a/b"},
+		"http target with :80":   {"http://web.example", "http://web.example:80/gh/a/b"},
+		"http base with :80":     {"http://web.example:80", "http://web.example/gh/a/b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(api.WebBaseURLEnvVar, tc.base)
+			opened := stubWebOpenURL(t, nil)
+			cmd, stdout, _ := newWebOpenTestCmd(tc.target)
+			cmd.SetArgs([]string{"--web"})
+			require.NoError(t, cmd.ExecuteContext(t.Context()))
+			require.Equal(t, tc.target+"\n", stdout.String())
+			require.Equal(t, []string{tc.target}, *opened)
+		})
+	}
+
+	t.Run("a non-default port still differs", func(t *testing.T) {
+		t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
+		opened := stubWebOpenURL(t, nil)
+		cmd, stdout, _ := newWebOpenTestCmd("https://web.example:80/gh/a/b")
+		cmd.SetArgs([]string{"--web"})
+		require.ErrorContains(t, cmd.ExecuteContext(t.Context()), "not on the Entire web app origin https://web.example ")
+		require.Empty(t, stdout.String())
+		require.Empty(t, *opened)
+	})
+}
+
+// The base is validated before any URL is compared against it, and the error
+// names the variable that holds the bad value.
+//
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the webOpenURL seam.
+func TestOpenInWeb_RefusesInvalidWebBase(t *testing.T) {
+	for _, base := range []string{"ftp://web.example", "web.example", "https://user@web.example", "https://"} {
+		t.Run(base, func(t *testing.T) {
+			t.Setenv(api.WebBaseURLEnvVar, base)
+			opened := stubWebOpenURL(t, nil)
+			// A target that would match a naive comparison with the base.
+			cmd, stdout, stderr := newWebOpenTestCmd(base + "/gh/a/b")
+			cmd.SetArgs([]string{"--web"})
+			err := cmd.ExecuteContext(t.Context())
+			require.ErrorContains(t, err, api.WebBaseURLEnvVar+" is not a valid http(s) origin")
+			require.Empty(t, stdout.String())
+			require.Empty(t, stderr.String())
+			require.Empty(t, *opened)
+		})
+	}
 }
 
 // Not parallel: swaps the package-level webOpenURL seam.
