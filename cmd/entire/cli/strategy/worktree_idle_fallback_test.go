@@ -155,7 +155,8 @@ func TestCommitLinking_FallbackKeepsTheOwnerOfAnExistingTarget(t *testing.T) {
 // The `checkpoint list --pending` preview lists the sessions a commit here
 // would link: from a worktree with no session of its own, a sibling session
 // idle beyond the window has pending work but is left out, as commit linking
-// leaves it out.
+// leaves it out, while one as idle that recorded edits here is listed, as it
+// still joins the commit.
 func TestPreviewNextCheckpoint_SkipsIdleSiblingSessions(t *testing.T) {
 	mainDir, linkedDir := twoWorktrees(t)
 	ctx := context.Background()
@@ -164,7 +165,15 @@ func TestPreviewNextCheckpoint_SkipsIdleSiblingSessions(t *testing.T) {
 	recent := time.Now().Add(-time.Minute)
 	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
 	saveSiblingSession(t, s, mainDir, "recent", session.PhaseIdle, &recent)
-	for _, id := range []string{"stale", "recent"} {
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+		SessionID:           "edited-here",
+		WorktreePath:        mainDir,
+		LastInteractionTime: &dayAgo,
+		OtherWorktrees: map[string]*session.WorktreeWork{
+			linkedKey(t, linkedDir): {Path: linkedDir, FilesTouched: []string{"feature.go"}, Incarnation: mark(t, linkedDir)},
+		},
+	})
+	for _, id := range []string{"stale", "recent", "edited-here"} {
 		state, err := s.loadSessionState(ctx, id)
 		require.NoError(t, err)
 		state.StepCount = 1
@@ -179,7 +188,7 @@ func TestPreviewNextCheckpoint_SkipsIdleSiblingSessions(t *testing.T) {
 	for _, preview := range previews {
 		ids = append(ids, preview.SessionID)
 	}
-	assert.Equal(t, []string{"recent"}, ids)
+	assert.ElementsMatch(t, []string{"recent", "edited-here"}, ids)
 	assert.ElementsMatch(t, ids, linkingIDs(t, linkedDir), "the preview matches what the commit links")
 }
 
