@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -40,27 +38,12 @@ func agentHelpGuidedPlugins(rootCmd *cobra.Command) []string {
 		if c, _, err := rootCmd.Find([]string{p.Name}); err == nil && c != rootCmd {
 			continue
 		}
-		if m, err := LoadPluginManifest(p.Name); err != nil || m == nil || !m.AgentHelp || !agentHelpEntryIsRelease(p) {
+		if m, err := LoadPluginManifest(p.Name); err != nil || m == nil || !m.AgentHelp || !managedEntryIsPkgBinary(p.Path, p.Name) {
 			continue
 		}
 		names = append(names, p.Name)
 	}
 	return names
-}
-
-// agentHelpEntryIsRelease reports whether p's bin entry is the release binary
-// its manifest describes, pkg/<name>/entire-<name>.
-func agentHelpEntryIsRelease(p *InstalledPlugin) bool {
-	dir, err := PluginPkgDir(p.Name)
-	if err != nil {
-		return false
-	}
-	release, err := os.Stat(filepath.Join(dir, pluginBinaryName(p.Name)))
-	if err != nil {
-		return false
-	}
-	entry, err := os.Stat(p.Path)
-	return err == nil && os.SameFile(entry, release)
 }
 
 // renderAgentHelpGuidedPlugins is the block naming them, "" when there are

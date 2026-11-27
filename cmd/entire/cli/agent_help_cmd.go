@@ -597,8 +597,10 @@ func agentHelpRepoContextWithRefresh(
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }
 
-// runAgentHelp resolves args to a command node and renders it. It is pure (no
-// git / IO): the caller passes the already-resolved repoLine and trailsEnabled.
+// runAgentHelp resolves args to a command node and renders it, without git,
+// exec or network: the caller passes the already-resolved repoLine and
+// trailsEnabled. The bare text path reads the local plugin tree (bin entries
+// and install manifests, os.Stat) to name the plugins with agent guidance.
 func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled bool) (string, error) {
 	target := rootCmd
 	for _, name := range args {

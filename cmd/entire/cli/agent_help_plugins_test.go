@@ -123,3 +123,26 @@ func TestParsePluginMetadataAgentHelp(t *testing.T) {
 		}
 	}
 }
+
+// The block hands each name to agents inside a command to run, so a name
+// validatePluginName accepts but a shell would split or interpret is left
+// out.
+func TestAgentHelpLeavesOutShellUnsafeNames(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
+	withPluginDir(t)
+	for _, name := range []string{"foo;bar", "foo bar"} {
+		if err := validatePluginName(name); err != nil {
+			t.Fatalf("%q is refused earlier (%v); pick a name validatePluginName accepts", name, err)
+		}
+		installReleaseTestPlugin(t, name, true)
+	}
+	installReleaseTestPlugin(t, "ok", true)
+
+	out := agentHelpTopText(t)
+
+	if !strings.Contains(out, "\n  entire agent-help ok\n") {
+		t.Fatalf("the safe name is missing:\n%s", out)
+	}
+	if strings.Contains(out, "foo") {
+		t.Errorf("a shell-unsafe name is listed:\n%s", out)
+	}
+}
