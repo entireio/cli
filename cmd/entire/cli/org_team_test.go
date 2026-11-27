@@ -423,6 +423,22 @@ func TestOrgTeamMemberRemove_NoPromptWithoutATerminal(t *testing.T) {
 	assert.Equal(t, []string{"DELETE /api/v1/orgs/" + testOrgULID + "/teams/" + teamPlatformULID + "/members/acct-alice"}, f.writes)
 }
 
+// Core answers 404 for a user who is not on the team. The removal reports
+// that instead of claiming a change, as grant remove does.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgTeamMemberRemove_NotOnTheTeam(t *testing.T) {
+	f := newTeamCore()
+	f.writeStatus = http.StatusNotFound
+	srv := f.serve(t)
+
+	out, _, err := runOrgCmd(t, srv, "team", "member", "remove", testOrgULID, "platform", "github:zoe", "--yes")
+	require.NoError(t, err)
+	assert.Contains(t, out, "github:zoe is not on team platform; nothing to remove")
+	assert.NotContains(t, out, "Removed")
+	assert.Len(t, f.writes, 1)
+}
+
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgTeamMember_UnknownHandle(t *testing.T) {
 	f := newTeamCore()

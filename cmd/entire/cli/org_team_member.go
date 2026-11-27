@@ -73,8 +73,7 @@ func listTeamMembers(c *coreapi.Client, orgID, teamID string) func(context.Conte
 	}
 }
 
-// teamMemberChange is the --json record of one add or remove; Core answers
-// both with 204.
+// teamMemberChange is the --json record of one add.
 type teamMemberChange struct {
 	OrgID     string `json:"org_id"`
 	TeamID    string `json:"team_id"`
@@ -292,7 +291,7 @@ func newTeamMemberRemoveCmd() *cobra.Command {
 		Use:   "remove <org> <team> <user>",
 		Short: "Remove a user from a team",
 		Long: "Remove a user (addressed as provider:handle) from a team. " +
-			"A terminal asks for confirmation; pass --yes to skip it. Removing someone who is not on the team succeeds.",
+			"A terminal asks for confirmation; pass --yes to skip it. Removing someone who is not on the team reports that and succeeds.",
 		Example: "  entire org team member remove acme platform github:alice",
 		Args:    cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -319,6 +318,11 @@ func newTeamMemberRemoveCmd() *cobra.Command {
 				}
 				params := coreapi.RemoveTeamMemberParams{OrgId: orgID, TeamID: team.ID, AccountID: accountID}
 				if err := c.RemoveTeamMember(ctx, params); err != nil {
+					// The team resolved above, so a 404 means the user is not on it.
+					if isCoreNotFound(err) {
+						fmt.Fprintf(cmd.OutOrStdout(), "%s is not on team %s; nothing to remove\n", label, team.Name)
+						return nil
+					}
 					return teamMemberErr(err, orgRef, team.Name, label)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "✓ Removed %s from team %s\n", label, team.Name)
