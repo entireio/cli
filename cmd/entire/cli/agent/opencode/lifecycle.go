@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/internal/transcript/opencodev2"
 )
 
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile
@@ -368,9 +369,9 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		if err != nil {
 			return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
 		}
-		normalized, err := normalizeOpenCodeExport(data)
+		normalized, err := opencodev2.Normalize(data)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("convert the OpenCode 2 mock export: %w", err)
 		}
 		if !bytes.Equal(normalized, data) {
 			if err := jsonutil.WriteFileAtomicIn(root, mockName, normalized, 0o600); err != nil {
@@ -430,9 +431,9 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 	}
 
 	// OpenCode 2 exports are stored in the 1.x shape every reader expects.
-	normalized, err := normalizeOpenCodeExport(data)
+	normalized, err := opencodev2.Normalize(data)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("convert the OpenCode 2 export: %w", err)
 	}
 	if !bytes.Equal(normalized, data) {
 		if err := jsonutil.WriteFileAtomicIn(root, staged, normalized, 0o600); err != nil {

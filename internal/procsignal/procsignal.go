@@ -3,7 +3,7 @@
 // shared by the two places that can observe a terminating signal:
 //
 //   - the top-level signal handler in cmd/entire, which cancels the root
-//     context on SIGINT/SIGTERM, and
+//     context on SIGINT/SIGTERM/SIGHUP, and
 //   - the keyring interrupt path in internal/entireclient/tokenstore, which
 //     detects Ctrl-C via its own signal.Notify listener so a stuck keyring
 //     read unblocks immediately.

@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
@@ -56,6 +57,11 @@ func (r resumableSession) unresumableReason() string {
 		return "no branch"
 	}
 	return "no committed checkpoint"
+}
+
+// unresumableSessionMessage explains why the picked session can't be resumed.
+func unresumableSessionMessage(item resumableSession) string {
+	return fmt.Sprintf("Session %s can't be resumed: %s.", tuiutil.SanitizeDisplayLine(item.state.SessionID), item.unresumableReason())
 }
 
 // runResumePicker lists stopped sessions across all worktrees and lets the user
@@ -138,7 +144,7 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	chosen := items[idx]
 
 	if !chosen.isResumable() {
-		fmt.Fprintf(w, "Session %s can't be resumed: %s.\n", chosen.state.SessionID, chosen.unresumableReason())
+		fmt.Fprintln(w, unresumableSessionMessage(chosen))
 		return nil
 	}
 
@@ -404,12 +410,12 @@ func buildResumeOptions(items []resumableSession) ([]huh.Option[string], bool) {
 func resumeOptionLabel(item resumableSession) string {
 	s := item.state
 
-	agentLabel := string(s.AgentType)
+	agentLabel := tuiutil.SanitizeDisplayLine(string(s.AgentType))
 	if agentLabel == "" {
 		agentLabel = unknownAgentLabel
 	}
 
-	prompt := strings.TrimSpace(s.LastPrompt)
+	prompt := strings.TrimSpace(tuiutil.SanitizeDisplayLine(s.LastPrompt))
 	if prompt == "" {
 		prompt = "(no prompt recorded)"
 	} else {
@@ -421,7 +427,7 @@ func resumeOptionLabel(item resumableSession) string {
 	if !item.isResumable() {
 		return fmt.Sprintf("(%s) · \"%s\" · %s · last active %s — can't resume", item.unresumableReason(), prompt, agentLabel, when)
 	}
-	return fmt.Sprintf("%s · \"%s\" · %s · last active %s", item.branch, prompt, agentLabel, when)
+	return fmt.Sprintf("%s · \"%s\" · %s · last active %s", tuiutil.SanitizeDisplayLine(item.branch), prompt, agentLabel, when)
 }
 
 // shellQuote wraps a string in single quotes for safe inclusion in a copy-paste

@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // checkpointDeleteFlags are the parsed flags of `checkpoint delete`.
@@ -295,6 +296,9 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if plan.LocalRef != "" {
 		fmt.Fprintf(w, "  ref %s\n", plan.LocalRef)
 	}
+	if plan.OtherLocalRef != "" {
+		fmt.Fprintf(w, "  ref %s\n", plan.OtherLocalRef)
+	}
 	if plan.LocalV1 {
 		fmt.Fprintf(w, "  %s branch\n", paths.MetadataBranchName)
 	}
@@ -313,7 +317,7 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if len(plan.Sessions) > 0 {
 		fmt.Fprintln(w, "\nSessions in this checkpoint (their token counts are removed with it):")
 		for _, s := range plan.Sessions {
-			fmt.Fprintf(w, "  %s  %s  input %d, output %d tokens\n", s.SessionID, s.Agent, s.InputTokens, s.OutputTokens)
+			fmt.Fprintf(w, "  %s  %s  input %d, output %d tokens\n", tuiutil.SanitizeDisplayLine(s.SessionID), tuiutil.SanitizeDisplayLine(s.Agent), s.InputTokens, s.OutputTokens)
 		}
 	}
 	if len(plan.SessionStates) > 0 {
@@ -323,14 +327,14 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 			if s.Active {
 				status = " (session still active)"
 			}
-			fmt.Fprintf(w, "  %s: %s%s\n", s.SessionID, strings.Join(s.Fields, ", "), status)
+			fmt.Fprintf(w, "  %s: %s%s\n", tuiutil.SanitizeDisplayLine(s.SessionID), strings.Join(s.Fields, ", "), status)
 		}
 	}
 	if len(plan.OtherLocalCheckpoints) > 0 {
 		fmt.Fprintln(w, "\nOther local checkpoints of these sessions (not deleted; this list is local only,")
 		fmt.Fprintln(w, "and the sessions stay visible on entire.com while these remain):")
 		for _, o := range plan.OtherLocalCheckpoints {
-			fmt.Fprintf(w, "  %s  %s\n", o.CheckpointID, strings.Join(o.SessionIDs, ", "))
+			fmt.Fprintf(w, "  %s  %s\n", o.CheckpointID, tuiutil.SanitizeDisplayLine(strings.Join(o.SessionIDs, ", ")))
 		}
 		if plan.OtherLocalTruncated {
 			fmt.Fprintln(w, "  (scan truncated; there may be more)")
@@ -502,7 +506,11 @@ type checkpointDeleteJSON struct {
 type checkpointDeleteLocalJSON struct {
 	Ref    string `json:"ref,omitempty"`
 	RefOID string `json:"ref_oid,omitempty"`
-	V1     bool   `json:"v1"`
+	// OtherRef is the checkpoint's ref under the other spelling of its shard,
+	// when it has one there as well; the delete removes both.
+	OtherRef    string `json:"other_ref,omitempty"`
+	OtherRefOID string `json:"other_ref_oid,omitempty"`
+	V1          bool   `json:"v1"`
 	// TrackingV1 names remotes whose remote-tracking v1 ref holds it; each
 	// stays until that remote's copy is deleted.
 	TrackingV1 []string `json:"tracking_v1,omitempty"`
@@ -562,6 +570,10 @@ func buildCheckpointDeleteJSON(plan *strategy.CheckpointDeletePlan, targets []st
 	}
 	if !plan.LocalRefOID.IsZero() {
 		doc.Local.RefOID = plan.LocalRefOID.String()
+	}
+	if plan.OtherLocalRef != "" {
+		doc.Local.OtherRef = plan.OtherLocalRef.String()
+		doc.Local.OtherRefOID = plan.OtherLocalRefOID.String()
 	}
 	if result != nil {
 		doc.Local.RefResult = string(result.LocalRef)

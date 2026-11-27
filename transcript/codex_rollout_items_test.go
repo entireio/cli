@@ -15,7 +15,7 @@ import (
 // path reads; the item path ignores it.
 const codexItemsRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"s1"}}
 {"timestamp":"2030-01-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
-{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"test-model"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/work","model":"test-model"}}
 {"timestamp":"2030-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list the files"}]}}
 {"timestamp":"2030-01-01T00:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"list the files"}]}}}
 {"timestamp":"2030-01-01T00:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Listing."}]}}}
@@ -26,33 +26,61 @@ const codexItemsRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"sessi
 {"timestamp":"2030-01-01T00:00:08.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}
 `
 
-func TestHasCodexItems(t *testing.T) {
+// CodexItemRolloutDecided decides as soon as the first turn holds a user item
+// or ends (task_complete, turn_aborted, a second task_started) without one,
+// and stays undecided before that. A prefix's "true" holds for the whole
+// file, and hasCodexItems is the decided "true" of the whole file.
+func TestCodexItemRolloutDecided(t *testing.T) {
 	t.Parallel()
 	full, err := os.ReadFile(filepath.Join("testdata", "codex_full.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	meta := `{"timestamp":"t","type":"session_meta","payload":{"id":"s1"}}` + "\n"
 	item := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"hi"}]}}}` + "\n"
 	agent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"hi"}]}}}` + "\n"
 	started := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"
 	subagent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","id":"call_1","kind":"started","agent_thread_id":"th2","agent_path":"/root/a"}}}` + "\n"
 	old := `{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}` + "\n"
+	complete := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"\"item_completed\""}}` + "\n"
+	aborted := `{"timestamp":"t","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}` + "\n"
 	cases := []struct {
-		name    string
-		content []byte
-		want    bool
+		name          string
+		content       []byte
+		item, decided bool
 	}{
-		{"current rollout", []byte(codexItemsRollout), true},
-		{"older rollout", full, false},
-		{"items without task_started", []byte(old + item), false},
-		{"first turn without items", []byte(started + old + started + item), false},
-		{"first turn with items", []byte(started + old + item + started + old), true},
-		{"first turn with only a sub-agent item", []byte(started + old + subagent + started + old + item), false},
-		{"first turn with only an agent message item", []byte(started + old + agent + started + old + item), false},
+		{"current rollout", []byte(codexItemsRollout), true, true},
+		{"older rollout", full, false, false},
+		{"items without task_started", []byte(old + item), false, false},
+		{"first turn without items", []byte(started + old + started + item), false, true},
+		{"first turn with items", []byte(started + old + item + started + old), true, true},
+		{"first turn with only a sub-agent item", []byte(started + old + subagent + started + old + item), false, true},
+		{"first turn with only an agent message item", []byte(started + old + agent + started + old + item), false, true},
+		{"only session_meta", []byte(meta), false, false},
+		{"first turn running, no user item yet", []byte(meta + started + old + agent), false, false},
+		{"first turn's user item", []byte(meta + started + item), true, true},
+		{"user item in a partial last line", []byte(meta + started + strings.TrimSuffix(item, "\n")), true, true},
+		{"one turn completed without a user item", []byte(meta + started + old + complete), false, true},
+		{"one turn aborted without a user item", []byte(meta + started + old + aborted), false, true},
+		{"user item after the first turn completed", []byte(started + old + complete + item), false, true},
+		{"one turn completed with a user item", []byte(meta + started + item + old + complete), true, true},
+		{"turn end before any task_started", []byte(meta + complete + item), false, false},
 	}
 	for _, c := range cases {
-		if got := hasCodexItems(c.content); got != c.want {
-			t.Errorf("%s: hasCodexItems = %v, want %v", c.name, got, c.want)
+		gotItem, gotDecided := CodexItemRolloutDecided(c.content)
+		if gotItem != c.item || gotDecided != c.decided {
+			t.Errorf("%s: CodexItemRolloutDecided = (%v, %v), want (%v, %v)", c.name, gotItem, gotDecided, c.item, c.decided)
+		}
+		if got, want := hasCodexItems(c.content), c.item && c.decided; got != want {
+			t.Errorf("%s: hasCodexItems = %v, want %v", c.name, got, want)
+		}
+		// A "true" decided on any prefix holds for the whole content.
+		lines := strings.SplitAfter(string(c.content), "\n")
+		for i := range lines {
+			prefix := strings.Join(lines[:i], "")
+			if it, dec := CodexItemRolloutDecided([]byte(prefix)); dec && it && (!gotItem || !gotDecided) {
+				t.Errorf("%s: prefix of %d lines decided true, the whole content isn't", c.name, i)
+			}
 		}
 	}
 }
@@ -60,7 +88,8 @@ func TestHasCodexItems(t *testing.T) {
 // Each call's usage is the difference between its closing snapshot and the
 // one before, on the call's last assistant line: the first call (m1, e1) gets
 // 100-60 = 40 fresh, 60 cached, 10 out, 4 reasoning on e1; the second (m2)
-// gets 150-100 = 50 fresh, 100 cached, 5 out, and no reasoning (4-4).
+// gets 150-100 = 50 fresh, 100 cached, 5 out, and no reasoning (4-4). The
+// command's result has its exit code and its own directory.
 func TestConvertCodexItems(t *testing.T) {
 	t.Parallel()
 	out, err := Convert([]byte(codexItemsRollout), codexItemsOpts)
@@ -69,7 +98,7 @@ func TestConvertCodexItems(t *testing.T) {
 	}
 	want := `{"v":1,"agent":"codex","cli_version":"0.5.1","type":"user","ts":"2030-01-01T00:00:02.000Z","id":"u1","content":[{"text":"list the files"}]}
 {"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:03.000Z","id":"m1","content":[{"type":"text","text":"Listing."}]}
-{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"e1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"reasoning_tokens":4,"content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a.txt\n","status":"success"},"type":"tool_use"}]}
+{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"e1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"reasoning_tokens":4,"content":[{"id":"e1","input":{"command":"ls"},"name":"Bash","result":{"output":"a.txt\n","status":"success","exitCode":0,"cwd":"/work/repo"},"type":"tool_use"}]}
 {"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:06.000Z","id":"m2","model":"test-model","input_tokens":50,"output_tokens":5,"cache_read_tokens":100,"content":[{"type":"text","text":"Done."}]}
 `
 	if string(out) != want {
@@ -77,9 +106,37 @@ func TestConvertCodexItems(t *testing.T) {
 	}
 }
 
+// codexItemsTurnCWDRollout has a file change after its turn_context, so a
+// slice that starts after the turn_context must still give the change the
+// turn's directory.
+const codexItemsTurnCWDRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2030-01-01T00:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","cwd":"/work/repo","model":"test-model"}}
+{"timestamp":"2030-01-01T00:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"add a file"}]}}}
+{"timestamp":"2030-01-01T00:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Adding."}]}}}
+{"timestamp":"2030-01-01T00:00:04.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"FileChange","id":"f1","changes":{"/work/repo/a.txt":{"type":"add","content":"hi\n"}},"status":"completed"}}}
+{"timestamp":"2030-01-01T00:00:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":10}}}}
+`
+
 func TestConvertWithBoundaryCodexItems(t *testing.T) {
 	t.Parallel()
-	content := []byte(codexItemsRollout)
+	full, err := Convert([]byte(codexItemsTurnCWDRollout), codexItemsOpts)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	const fileChange = `{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"2030-01-01T00:00:04.000Z","id":"f1","model":"test-model","input_tokens":40,"output_tokens":10,"cache_read_tokens":60,"content":[{"id":"f1","input":{"changes":[{"path":"/work/repo/a.txt","kind":"add","diff":"hi\n"}]},"name":"FileChange","result":{"output":"","status":"success","cwd":"/work/repo"},"type":"tool_use"}]}`
+	if !strings.Contains(string(full), fileChange+"\n") {
+		t.Errorf("Convert: no file change line with the turn's cwd\n got %s\nwant a line %s", full, fileChange)
+	}
+	for _, rollout := range []string{codexItemsRollout, codexItemsTurnCWDRollout} {
+		assertCodexItemsBoundary(t, []byte(rollout))
+	}
+}
+
+// assertCodexItemsBoundary checks every StartLine of a rollout: the full
+// output is Convert's, and the delta is its last lines from the boundary.
+func assertCodexItemsBoundary(t *testing.T, content []byte) {
+	t.Helper()
 	full, err := Convert(content, codexItemsOpts)
 	if err != nil {
 		t.Fatalf("Convert: %v", err)
@@ -107,6 +164,60 @@ func TestConvertWithBoundaryCodexItems(t *testing.T) {
 		if want := strings.Join(fullLines[boundary:], ""); string(delta) != want {
 			t.Errorf("StartLine %d: delta is not the full output's last %d lines\ngot:\n%s\nwant:\n%s", start, len(fullLines)-boundary, delta, want)
 		}
+	}
+}
+
+// A file change's result carries the directory of the turn it is in: each
+// turn_context replaces it, one without a string cwd keeps the last (and its
+// model is still read), and a file:// URI is read as its path. A declined
+// command is an error marked declined.
+func TestConvertCodexItemsTurnCWD(t *testing.T) {
+	t.Parallel()
+	fileChange := func(id, path string) string {
+		return `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"FileChange","id":"` + id +
+			`","changes":{"` + path + `":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b\n"}},"status":"completed"}}}` + "\n"
+	}
+	turn := func(payload string) string {
+		return `{"timestamp":"t","type":"turn_context","payload":` + payload + `}` + "\n"
+	}
+	usage := func(in int) string {
+		return fmt.Sprintf(`{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":1}}}}`, in) + "\n"
+	}
+	content := `{"timestamp":"t","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+` + turn(`{"turn_id":"t1","cwd":"/work/repo","model":"m1"}`) + `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"hi"}]}}}
+` + fileChange("f1", "/work/repo/a.go") +
+		`{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"CommandExecution","id":"e1","command":["/bin/bash","-lc","rm -rf build"],"cwd":"file:///work/repo","status":"declined"}}}
+` + turn(`{"turn_id":"t2","cwd":"/work/other","model":"m2"}`) + fileChange("f2", "/work/other/b.go") +
+		turn(`{"turn_id":"t3","cwd":7,"model":"m3"}`) + fileChange("f3", "/work/other/c.go") + usage(10) +
+		turn(`{"turn_id":"t4","model":"m4"}`) + fileChange("f4", "/work/other/d.go") +
+		turn(`{"turn_id":"t5","cwd":"file:///C:/work/win","model":"m5"}`) + fileChange("f5", `C:\\work\\win\\e.go`) + usage(20)
+	out, err := Convert([]byte(content), codexItemsOpts)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	lines, err := Decode(out)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	got := map[string]*ToolResult{}
+	for _, l := range lines {
+		for _, b := range l.Blocks {
+			if b.Type == BlockToolUse {
+				got[b.ID] = b.Result
+			}
+		}
+		if want := map[string]string{"f3": "m3", "f5": "m5"}[l.ID]; want != "" && l.Model != want {
+			t.Errorf("%s: model = %q, want %s", l.ID, l.Model, want)
+		}
+	}
+	for id, cwd := range map[string]string{"f1": "/work/repo", "f2": "/work/other", "f3": "/work/other", "f4": "/work/other", "f5": "C:/work/win"} {
+		if r := got[id]; r == nil || r.CWD != cwd || r.Status != ToolStatusSuccess {
+			t.Errorf("%s: result %+v, want cwd %q", id, r, cwd)
+		}
+	}
+	if r := got["e1"]; r == nil || r.Status != ToolStatusError || !r.Declined || r.ExitCode != nil || r.CWD != "/work/repo" {
+		t.Errorf("declined command: result %+v", r)
 	}
 }
 
@@ -223,5 +334,53 @@ func TestConvertCodexSubAgentRollout(t *testing.T) {
 	}
 	if n := strings.Count(string(out), `"type":"user"`); n != 1 || !strings.Contains(string(out), `"text":"check the tests"`) {
 		t.Errorf("want the one task prompt as a user line, got %d user lines:\n%s", n, out)
+	}
+}
+
+// A decider fed a rollout in chunks decides, after each chunk, what
+// CodexItemRolloutDecided decides on the complete lines fed so far; once
+// decided it never changes; and Flush at the end gives the whole content's
+// decision.
+func TestCodexItemRolloutDeciderMatchesWholeContent(t *testing.T) {
+	t.Parallel()
+	full, err := os.ReadFile(filepath.Join("testdata", "codex_full.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"
+	complete := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}` + "\n"
+	agent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"hi"}]}}}` + "\n"
+	rollouts := map[string][]byte{
+		"current rollout":        []byte(codexItemsRollout),
+		"two-turn rollout":       []byte(codexAdapterRollout),
+		"older rollout":          full,
+		"no user item, no end":   []byte(strings.TrimSuffix(started+agent, "\n")),
+		"no user item, one turn": []byte(started + agent + complete),
+	}
+	for name, content := range rollouts {
+		wantItem, wantDecided := CodexItemRolloutDecided(content)
+		for _, size := range []int{1, 7, 64, len(content)} {
+			d := NewCodexItemRolloutDecider()
+			var firstItem, firstDecided bool
+			for fed := 0; fed < len(content); {
+				n := min(size, len(content)-fed)
+				item, decided := d.Feed(content[fed : fed+n])
+				fed += n
+				complete := content[:bytes.LastIndexByte(content[:fed], '\n')+1]
+				if wi, wd := CodexItemRolloutDecided(complete); item != wi || decided != wd {
+					t.Fatalf("%s, chunks of %d, %d bytes fed: Feed = (%v, %v), whole content of its lines = (%v, %v)",
+						name, size, fed, item, decided, wi, wd)
+				}
+				if firstDecided && (item != firstItem || !decided) {
+					t.Fatalf("%s, chunks of %d: decision flipped from %v to (%v, %v)", name, size, firstItem, item, decided)
+				}
+				if decided && !firstDecided {
+					firstItem, firstDecided = item, true
+				}
+			}
+			if item, decided := d.Flush(); item != wantItem || decided != wantDecided {
+				t.Errorf("%s, chunks of %d: Flush = (%v, %v), want (%v, %v)", name, size, item, decided, wantItem, wantDecided)
+			}
+		}
 	}
 }

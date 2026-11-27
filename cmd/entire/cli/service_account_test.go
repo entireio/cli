@@ -42,6 +42,8 @@ type saFakeCore struct {
 	accounts []coreapi.ServiceAccountWithGrants
 	// providers is what /oidc-providers lists.
 	providers []coreapi.OIDCProvider
+	// resolution, when set, replaces the default /repos/resolve answer.
+	resolution *coreapi.ResolveReposResponse
 }
 
 const saTestBuildkiteID = "wip_01HGHA00000000000BUILDK1TE"
@@ -152,6 +154,10 @@ func (f *saFakeCore) serve(w http.ResponseWriter, r *http.Request) {
 			ID: saTestRepoID, Name: "web", Path: coreapi.NewOptString("/et/acme/web"), OwningProjectId: saTestProjectID,
 		})})
 	case "POST /api/v1/repos/resolve":
+		if f.resolution != nil {
+			writeJSONResponse(t, w, http.StatusOK, f.resolution)
+			return
+		}
 		writeJSONResponse(t, w, http.StatusOK, nativeResolution("acme/web", saTestRepoID))
 	case "GET " + saBase:
 		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListServiceAccountsOutputBody{ServiceAccounts: f.accounts})
@@ -171,9 +177,14 @@ func (f *saFakeCore) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(t, w, http.StatusCreated, &binding)
 	case "GET " + saBase + "/" + saTestID + "/bindings":
 		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListBindingsOutputBody{Bindings: []coreapi.Binding{binding}})
+	case "POST " + saBase + "/" + saTestID + "/secrets":
+		writeJSONResponse(t, w, http.StatusCreated, saTestCreatedSecret())
+	case "GET " + saBase + "/" + saTestID + "/secrets":
+		writeJSONResponse(t, w, http.StatusOK, saTestSecretPage(r.URL.Query().Get("cursor")))
 	case "DELETE " + saBase + "/" + saTestID,
 		"DELETE " + saBase + "/" + saTestID + "/grants/repo/" + saTestRepoID,
-		"DELETE " + saBase + "/" + saTestID + "/bindings/" + saTestBindingID:
+		"DELETE " + saBase + "/" + saTestID + "/bindings/" + saTestBindingID,
+		"DELETE " + saBase + "/" + saTestID + "/secrets/" + saTestSecretID:
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		t.Errorf("unexpected %s", route)

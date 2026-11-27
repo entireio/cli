@@ -29,7 +29,8 @@ func newServiceAccountCmd() *cobra.Command {
 		Long: "A service account is a non-human account owned by a project. " +
 			"Grant it access to the project or its repos, then bind a CI provider, " +
 			"such as GitHub Actions or Buildkite, so its jobs act as the account " +
-			"without a stored secret.\n\n" +
+			"without a stored secret. Anywhere else, create a secret and set it as " +
+			"ENTIRE_TOKEN.\n\n" +
 			"Commands address a service account by its svc_ ID or as <project>/<name>.",
 	}
 	addControlPlaneFlags(cmd)
@@ -37,6 +38,7 @@ func newServiceAccountCmd() *cobra.Command {
 		newSACreateCmd(), newSAListCmd(), newSAGetCmd(), newSADeleteCmd(),
 		newSAGrantCmd(), newSARevokeCmd(), newSAGrantsCmd(),
 		newSAProvidersCmd(), newSABindCmd(), newSABindingsCmd(), newSAUnbindCmd(),
+		newSASecretCmd(),
 	)
 	return requireSubcommand(cmd)
 }

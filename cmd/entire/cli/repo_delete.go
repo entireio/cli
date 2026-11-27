@@ -60,13 +60,15 @@ func newRepoDeleteCmd() *cobra.Command {
 // runRepoDelete is `repo delete`. It is not runControlPlaneDelete because a
 // cascade can answer 202: the server then owns completion, and the command
 // polls until the repo is gone instead of reporting a finished delete.
-func runRepoDelete(cmd *cobra.Command, ref string, opts repoDeleteOptions) error {
+func runRepoDelete(cmd *cobra.Command, rawRef string, opts repoDeleteOptions) error {
+	tr := newTypedRef(rawRef)
+	ref := tr.canon
 	force := forceRequested(cmd)
 	out := cmd.OutOrStdout()
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		resolved, err := resolveRepoDeleteRef(ctx, c, ref)
 		if err != nil {
-			return err
+			return tr.wrapErr(err)
 		}
 		label := "repo " + repoDeleteName(ref, resolved)
 		mirrors := ""

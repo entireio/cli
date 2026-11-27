@@ -12,6 +12,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+func TestRedactGitStderr_RedactsCredentialedURLs(t *testing.T) {
+	t.Parallel()
+	got := redactGitStderr("fatal: unable to access 'https://user:s3cret@github.com/acme/app.git/': 403\n\nhint: check access\n")
+	require.NotContains(t, got, "s3cret")
+	require.Contains(t, got, "fatal: unable to access")
+	require.Contains(t, got, "; hint: check access")
+}
+
 func TestValidateGitRemoteName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -369,6 +377,22 @@ func TestResolveRemoteRepoRef(t *testing.T) {
 			require.Equal(t, want, got)
 		})
 	}
+}
+
+func TestResolveRemoteRepoRef_EntireComURL(t *testing.T) {
+	t.Parallel()
+	dir := applyPlanRepo(t, nil)
+	path, err := resolveRemoteRepoRef(t.Context(), dir, "origin", "/gh/OctoCat/Hello-World")
+	require.NoError(t, err)
+	for _, arg := range []string{"https://entire.com/gh/OctoCat/Hello-World", "entire.com/gh/OctoCat/Hello-World"} {
+		got, err := resolveRemoteRepoRef(t.Context(), dir, "origin", arg)
+		require.NoError(t, err, arg)
+		require.Equal(t, path, got, arg)
+	}
+
+	_, err = resolveRemoteRepoRef(t.Context(), dir, "origin", "https://user:secret@entire.com/gh/o/r")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret")
 }
 
 func TestReportMirrorRemotePlan(t *testing.T) {

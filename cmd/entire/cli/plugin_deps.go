@@ -477,11 +477,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 	if _, err := checkManagedPluginRunnable(entry.Path); err != nil {
 		return issues // The entry check already reports the fault and its remedy.
 	}
-	entryInfo, err := os.Stat(entry.Path)
-	if err != nil {
-		return issues
-	}
-	if pkgInfo, err := os.Stat(binPath); err == nil && os.SameFile(entryInfo, pkgInfo) {
+	if managedEntryIsPkgBinary(entry.Path, m.Name) {
 		return issues
 	}
 	if entryDigest, err := fileSHA256(entry.Path); err == nil && !strings.EqualFold(entryDigest, m.BinarySHA256) {
@@ -493,6 +489,24 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		})
 	}
 	return issues
+}
+
+// managedEntryIsPkgBinary reports whether the bin/ entry at entryPath is the
+// release binary under pkg/<name>/ — a hardlink or a symlink to it. Stat only:
+// it never reads either file, so a byte-identical copy (the cross-volume
+// fallback) reports false and callers that care must hash it themselves. Any
+// stat failure reports false.
+func managedEntryIsPkgBinary(entryPath, name string) bool {
+	dir, err := PluginPkgDir(name)
+	if err != nil {
+		return false
+	}
+	entryInfo, err := os.Stat(entryPath)
+	if err != nil {
+		return false
+	}
+	pkgInfo, err := os.Stat(filepath.Join(dir, pluginBinaryName(name)))
+	return err == nil && os.SameFile(entryInfo, pkgInfo)
 }
 
 // quarantinedPath returns the path to flag when the file (or its symlink

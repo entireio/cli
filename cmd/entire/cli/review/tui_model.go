@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -20,6 +21,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -35,6 +37,9 @@ const (
 	defaultTermWidth  = 80
 	defaultTermHeight = 24
 )
+
+// drillInHint is the dashboard footer's pointer to the per-agent detail view.
+const drillInHint = "Ctrl+O: drill in"
 
 // agentRow holds per-agent live state during the TUI run.
 type agentRow struct {
@@ -75,6 +80,42 @@ type postRunCompleteMsg struct{}
 // tickMsg triggers spinner and duration column updates.
 type tickMsg time.Time
 
+// terminalBackground holds the terminal's answer to the dashboard's
+// background-colour query. The Bubble Tea goroutine records it; the judge's
+// verdict rendering reads it, so nothing else has to query the terminal while
+// the dashboard is reading its input.
+type terminalBackground struct {
+	state atomic.Int32
+}
+
+const (
+	backgroundUnknown int32 = iota
+	backgroundDark
+	backgroundLight
+)
+
+func (b *terminalBackground) record(dark bool) {
+	if dark {
+		b.state.Store(backgroundDark)
+		return
+	}
+	b.state.Store(backgroundLight)
+}
+
+// isDark reports the terminal's answer, or termenv's no-answer fallback when
+// the terminal never replied.
+func (b *terminalBackground) isDark() bool {
+	if b != nil {
+		switch b.state.Load() {
+		case backgroundDark:
+			return true
+		case backgroundLight:
+			return false
+		}
+	}
+	return mdrender.DarkBackgroundFromEnv()
+}
+
 // reviewTUIModel is the Bubble Tea model for the review dashboard.
 type reviewTUIModel struct {
 	rows       []agentRow
@@ -112,6 +153,9 @@ type reviewTUIModel struct {
 	// footer offers a force-quit hint. A second Ctrl+C while cancelling=true
 	// force-quits without waiting for agents to drain.
 	cancelling bool
+
+	// background is shared with TUISink; see terminalBackground.
+	background *terminalBackground
 }
 
 // newReviewTUIModel builds an initial model pre-populated with one row per
@@ -146,6 +190,7 @@ func newReviewTUIModel(agents []string, cancel context.CancelFunc) reviewTUIMode
 		spinner:    sp,
 		termWidth:  defaultTermWidth,
 		termHeight: defaultTermHeight,
+		background: &terminalBackground{},
 	}
 }
 
@@ -156,9 +201,11 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// Init returns the initial spinner tick command.
+// Init starts the spinner ticks and asks the terminal for its background
+// colour. Bubble Tea reads the reply on its own input loop, so the judge's
+// verdict can be styled without a second reader racing the dashboard for it.
 func (m reviewTUIModel) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, tickCmd())
+	return tea.Batch(m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor)
 }
 
 // Update handles all incoming messages.
@@ -236,6 +283,10 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
+
+	case tea.BackgroundColorMsg:
+		m.background.record(msg.IsDark())
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		wasAtBottom := m.detail.AtBottom()
@@ -535,17 +586,19 @@ func (m reviewTUIModel) dashboardView() string {
 	}
 	b.WriteString("\n")
 
+	// Ctrl+O works until the dashboard closes, so the hint stays while the
+	// judge runs: reading the reviewers' reports is what that wait is for.
 	switch {
 	case m.finished && m.finalPhaseRunning:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, m.spinner.View()+" Final judge is consolidating..."+m.finalizeElapsedSuffix())
+		m.writeDashboardLine(&b, m.spinner.View()+" Final judge is consolidating..."+m.finalizeElapsedSuffix()+" · "+drillInHint)
 	case m.finished:
 		m.writeDashboardLine(&b, m.countsLine())
-		m.writeDashboardLine(&b, m.spinner.View()+" Finalizing output..."+m.finalizeElapsedSuffix())
+		m.writeDashboardLine(&b, m.spinner.View()+" Finalizing output..."+m.finalizeElapsedSuffix()+" · "+drillInHint)
 	case m.cancelling:
 		m.writeDashboardLine(&b, "Cancelling agents... · Ctrl+C again: force quit")
 	default:
-		m.writeDashboardLine(&b, "Ctrl+O: drill in · Ctrl+C: cancel")
+		m.writeDashboardLine(&b, drillInHint+" · Ctrl+C: cancel")
 	}
 	return b.String()
 }

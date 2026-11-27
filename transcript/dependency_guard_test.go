@@ -13,7 +13,7 @@ import (
 
 // Other modules import this library, and every module its non-test files
 // import becomes part of their build. Keep it to the standard library and the
-// stdlib-only internal native parsers (Pi's JSONL, Codex's items) so it never
+// stdlib-only internal native parsers (Pi's JSONL, Codex's items, OpenCode 2's exports) so it never
 // pulls in the CLI's dependencies. Native parsing stays behind the module's
 // internal boundary: the library exposes conversion and the Entire Transcript
 // Format, not native readers.
@@ -76,8 +76,9 @@ func TestLibraryImportsOnlyStdlib(t *testing.T) {
 
 // internalParsers are the stdlib-only native parsers the library may import.
 var internalParsers = map[string]bool{
-	"github.com/entireio/cli/internal/transcript/pijsonl":   true,
-	"github.com/entireio/cli/internal/transcript/codexitem": true,
+	"github.com/entireio/cli/internal/transcript/pijsonl":    true,
+	"github.com/entireio/cli/internal/transcript/codexitem":  true,
+	"github.com/entireio/cli/internal/transcript/opencodev2": true,
 }
 
 // isStdlib reports whether path is a standard library import path. Only

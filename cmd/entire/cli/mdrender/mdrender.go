@@ -8,12 +8,16 @@
 //   - RenderForWriter: TTY-aware — renders to a terminal writer with
 //     auto-detected width; passes raw markdown through when w is not a
 //     terminal (so redirected output is grep-friendly, not full of ANSI).
+//     RenderForWriterWithBackground is the same with a caller-supplied
+//     background, for commands whose TUI owns the terminal.
 package mdrender
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
@@ -76,10 +80,33 @@ func Render(markdown string, width int, darkBackground bool) (rendered string, e
 // Width is auto-detected from w (capped at 80); background palette is
 // detected via termenv.HasDarkBackground.
 func RenderForWriter(w io.Writer, markdown string) (string, error) {
+	return RenderForWriterWithBackground(w, markdown, termenv.HasDarkBackground)
+}
+
+// RenderForWriterWithBackground is RenderForWriter with the caller answering
+// the background question; darkBackground runs only when w gets styled output.
+// A command whose TUI owns the terminal passes the TUI's answer: termenv's probe
+// reads the terminal's reply from the tty, racing the TUI's own input reader.
+func RenderForWriterWithBackground(w io.Writer, markdown string, darkBackground func() bool) (string, error) {
 	if !shouldRender(w) {
 		return markdown, nil
 	}
-	return Render(markdown, terminalWidth(w), termenv.HasDarkBackground())
+	return Render(markdown, terminalWidth(w), darkBackground())
+}
+
+// DarkBackgroundFromEnv is termenv's background fallback without the terminal
+// query: COLORFGBG's background slot when set, otherwise dark.
+func DarkBackgroundFromEnv() bool {
+	parts := strings.Split(os.Getenv("COLORFGBG"), ";")
+	if len(parts) < 2 {
+		return true
+	}
+	slot, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil || slot < 0 || slot > 255 {
+		return true
+	}
+	_, _, lightness := termenv.ConvertToRGB(termenv.ANSIColor(slot)).Hsl()
+	return lightness < 0.5 //nolint:mnd // termenv's HasDarkBackground threshold
 }
 
 // shouldRender returns true when styled output is appropriate for w

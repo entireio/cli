@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
@@ -229,10 +230,15 @@ func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun
 // pollIsTransient reports whether a failed status poll is worth repeating: the
 // run already exists and keeps generating on the cell, so a 5xx, a 429, or a
 // dropped connection must not abandon it. A request refused by the redirect
-// policy also surfaces as a *url.Error, but repeating it is refused again.
+// policy also surfaces as a *url.Error, but repeating it is refused again, and
+// so does a refused ENTIRE_TOKEN secret exchange.
 func pollIsTransient(err error) bool {
 	if errors.Is(err, httpclient.ErrRequestPolicy) {
 		return false
+	}
+	var exchange *auth.SecretExchangeError
+	if errors.As(err, &exchange) {
+		return exchange.Retryable()
 	}
 	var httpErr *api.HTTPError
 	if errors.As(err, &httpErr) {

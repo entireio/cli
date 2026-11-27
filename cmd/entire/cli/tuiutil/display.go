@@ -37,10 +37,14 @@ func SanitizeDisplayText(s string) string {
 	}, stripped)
 }
 
-// SanitizeDisplayLine is SanitizeDisplayText for server text shown inline in
-// a one-line message: it also drops bidi controls (U+202A–U+202E,
-// U+2066–U+2069, and the other Bidi_Control runes), which are format
-// characters rather than controls and could visually reorder the line.
+// SanitizeDisplayLine is SanitizeDisplayText for server text or stored
+// metadata shown inline in a one-line message: it also drops bidi controls
+// (U+202A–U+202E, U+2066–U+2069, and the other Bidi_Control runes), which are
+// format characters rather than controls and could visually reorder the line.
+// It keeps emoji sequences intact, so it suits prompts as well as labels such
+// as session IDs, agents, models and branch names. Use it at the text
+// rendering boundary only: JSON output escapes control characters itself and
+// must keep the stored value.
 func SanitizeDisplayLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Bidi_Control, r) {

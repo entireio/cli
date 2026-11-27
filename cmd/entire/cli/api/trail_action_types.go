@@ -79,14 +79,14 @@ type AgentRun struct {
 	} `json:"agent"`
 }
 
-// TrailReviewRerunResponse is POST /repos/{repo_id}/trails/{number}/review-rerun.
+// TrailReviewRerunResponse is POST /repos/{repo_id}/changes/{number}/review-rerun.
 // Launched counts only the repository-configured reviewers it started; the
 // project's agents are started the way a push starts them and are not counted.
 type TrailReviewRerunResponse struct {
 	Launched int `json:"launched"`
 }
 
-// TrailUpdateBranchResponse is POST /repos/{repo_id}/trails/{number}/update-branch.
+// TrailUpdateBranchResponse is POST /repos/{repo_id}/changes/{number}/update-branch.
 // MergeCommitSHA is empty when the branch was already up to date.
 type TrailUpdateBranchResponse struct {
 	MergeCommitSHA string `json:"mergeCommitSha"`

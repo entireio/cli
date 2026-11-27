@@ -96,8 +96,15 @@ const maxSyncReasonRunes = 64
 // tokens, but it is echoed into a terminal, so an escape sequence must not
 // reach it whatever the server sends.
 func cleanSyncReason(raw string) string {
-	if runes := []rune(raw); len(runes) > maxSyncReasonRunes {
-		raw = string(runes[:maxSyncReasonRunes])
+	return terminalText(raw, maxSyncReasonRunes)
+}
+
+// terminalText cuts raw to maxRunes, then strips control and format
+// characters and trims it, so a value from the server or another client can
+// be echoed into a terminal without carrying an escape sequence.
+func terminalText(raw string, maxRunes int) string {
+	if runes := []rune(raw); len(runes) > maxRunes {
+		raw = string(runes[:maxRunes])
 	}
 	return strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
@@ -207,9 +214,10 @@ func newRepoMirrorResyncCmd() *cobra.Command {
 			"  entire repo mirror resync /gh/octocat/hello-world --json",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref, err := parseMirrorRepoRef(args[0], mirrorCloneForge)
+			tr := newTypedRef(args[0])
+			ref, err := parseMirrorRepoRef(tr.canon, mirrorCloneForge)
 			if err != nil {
-				return err
+				return tr.wrapErr(err)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				out, err := c.ResyncMirror(ctx, &coreapi.ResyncMirrorInputBody{

@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +206,9 @@ func TestCloneRefAlwaysRequiresItsForgePrefix(t *testing.T) {
 		"Paul/DogBark",
 		"paul/dogbark.git",
 		"acme/tool",
+		// A pasted entire.com URL names no forge either.
+		"entire.com/acme/tool",
+		"https://entire.com/acme/tool",
 	}
 
 	t.Run("neither grammar accepts a bare pair", func(t *testing.T) {
@@ -268,6 +274,54 @@ func TestCloneRefAlwaysRequiresItsForgePrefix(t *testing.T) {
 				require.Errorf(t, err, "resolveRepoRef(%q, project=%q) must not accept a forge-less pair", ref, project)
 			}
 			require.Zerof(t, calls.Load(), "ref %q must be refused before the control plane", ref)
+		}
+	})
+}
+
+// The entire.com URL spelling is accepted only where a user types a ref, and
+// canonicalized there (newTypedRef). The strict parsers behind it, and the ones
+// that read server text, never accept it: a URL in a server answer must not be
+// treated as a ref the user typed.
+func TestStrictParsersRejectEntireComURLs(t *testing.T) {
+	t.Parallel()
+
+	urls := []string{
+		"https://entire.com/et/proj/repo",
+		"entire.com/et/proj/repo",
+		"https://entire.com/gh/o/r",
+		"entire.com/gh/o/r",
+	}
+	for _, in := range urls {
+		_, _, nativeErr := parseNativeCloneRef(in)
+		require.Errorf(t, nativeErr, "parseNativeCloneRef(%q)", in)
+		_, _, _, mirrorErr := parseMirrorCloneRef(in)
+		require.Errorf(t, mirrorErr, "parseMirrorCloneRef(%q)", in)
+	}
+
+	t.Run("parseDetachedDetail", func(t *testing.T) {
+		t.Parallel()
+		const url = "https://entire.com/et/proj/repo"
+		for _, detail := range []string{
+			"gh/o/r was detached and moved to " + url + `. Clone using "entire repo clone /et/proj/repo" or update your remote using "git remote set-url origin entire://h.entire.io/` + url + `"`,
+			"gh/o/r moved to " + url + ". Update your remote: git remote set-url origin entire://h.entire.io/" + url,
+			"gh/o/r moved to entire.com/et/proj/repo. Update your remote: git remote set-url origin entire://h.entire.io/entire.com/et/proj/repo",
+		} {
+			_, ok := parseDetachedDetail(detail)
+			require.Falsef(t, ok, "detail %q", detail)
+		}
+		// Control: the same sentence with the path form parses.
+		_, ok := parseDetachedDetail("gh/o/r moved to et/proj/repo. Update your remote: git remote set-url origin entire://h.entire.io/et/proj/repo")
+		require.True(t, ok)
+	})
+
+	t.Run("parseEntireCloneURL", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range []string{
+			"entire://h/entire.com/et/proj/repo",
+			"entire://h/https://entire.com/et/proj/repo",
+		} {
+			_, _, err := parseEntireCloneURL(in)
+			require.Errorf(t, err, "parseEntireCloneURL(%q)", in)
 		}
 	})
 }
@@ -1082,35 +1136,6 @@ func TestResolvePullablePlacements_ReturnsPlacements(t *testing.T) {
 	require.Equal(t, "aws-eu-west-1.entire.io", got[1].ClusterHost)
 }
 
-// TestListMirrorsForRepo_FiltersByRepo verifies the client-side repo filter:
-// the list API filters provider+owner server-side, but the repo match (which
-// the API has no param for) is applied locally.
-func TestListMirrorsForRepo_FiltersByRepo(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body := &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-			{Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-us-east-2.entire.io"},
-			{Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-eu-west-1.entire.io"},
-			{Owner: "entirehq", Repo: "entire-cli", ClusterHost: "aws-us-east-2.entire.io"},
-		}}
-		if err := printJSON(w, body); err != nil {
-			t.Errorf("encode response: %v", err)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	c, err := coreapi.NewWithBearer(srv.URL, "tok")
-	require.NoError(t, err)
-
-	got, err := listMirrorsForRepo(t.Context(), c, "github", "entirehq", "entire-api")
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	for _, m := range got {
-		require.Equal(t, "entire-api", m.Repo)
-	}
-}
-
 // testGitHubRef is the /gh/ ref every placement-routing case resolves; the
 // routing under test does not vary with the owner or repo.
 const testGitHubRef = "/gh/owner/repo"
@@ -1488,4 +1513,172 @@ func TestResolvePullablePlacements_DetachedAnswerStaysCoreError(t *testing.T) {
 	_, err = resolvePullablePlacements(t.Context(), c, "owner", "repo")
 	require.Error(t, err)
 	require.Equal(t, testDetachedDetail, coreapi.APIError(err))
+}
+
+// cloneURLFromRef resolves ref through resolveRepoRemoteURL against a fake
+// control plane serving one native repo (paul/dogbark).
+//
+// Not parallel-safe: replaces the package-global activeCoreClient.
+func cloneURLFromRef(t *testing.T, ref string) (cloneURL, queried string, err error) {
+	t.Helper()
+	c := serveNativeRepoFixture(t, nativeRepoFixture{
+		repo: coreapi.Repo{
+			ID:              testNativeRepoULID,
+			Name:            "dogbark",
+			OwningProjectId: testProjectULID,
+			ClusterHost:     coreapi.NewOptString("aws-ap-southeast-2.entire.io"),
+			Path:            coreapi.NewOptString("/et/paul/dogbark"),
+		},
+		queriedFullName: &queried,
+	})
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) { return c, nil }
+	t.Cleanup(func() { activeCoreClient = prev })
+	cloneURL, err = resolveRepoRemoteURL(cloneTestCmdWithContext(t), ref, "", clonePlacementPicker())
+	return cloneURL, queried, err
+}
+
+// Not parallel: swaps the package-global activeCoreClient.
+func TestResolveRepoRemoteURL_EntireComURLs(t *testing.T) {
+	const want = "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark"
+	for _, ref := range []string{
+		"/et/paul/dogbark",
+		"https://entire.com/et/paul/dogbark",
+		"https://entire.com/et/paul/dogbark/",
+		"entire.com/et/paul/dogbark",
+		"  https://entire.com/et/paul/dogbark  ",
+		"HTTPS://ENTIRE.COM/et/paul/dogbark",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			got, queried, err := cloneURLFromRef(t, ref)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+			require.Equal(t, "paul/dogbark", queried, "the native branch parsed the canonical ref")
+		})
+	}
+}
+
+// Not parallel: swaps the package-global activeCoreClient.
+func TestResolveRepoRemoteURL_EntireComMirrorURL(t *testing.T) {
+	srvURL := servePlacements(t, []coreapi.ResolvedPlacement{{ClusterHost: defaultClusterHost}})
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srvURL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+	for _, ref := range []string{"/gh/owner/repo", "https://entire.com/gh/owner/repo", "entire.com/gh/owner/repo"} {
+		got, err := resolveRepoRemoteURL(cloneTestCmdWithContext(t), ref, "", clonePlacementPicker())
+		require.NoError(t, err, ref)
+		require.Equal(t, entireCloneURLScheme+defaultClusterHost+"/gh/owner/repo", got, ref)
+	}
+}
+
+// A pasted URL must never become an entire:// passthrough, even when it
+// embeds one.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestResolveRepoRemoteURL_EntireComNeverPassesThrough(t *testing.T) {
+	_, _, err := cloneURLFromRef(t, "https://entire.com/entire://evil.example/et/a/b")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "invalid <repo>")
+}
+
+// Not parallel: swaps the package-global activeCoreClient.
+func TestResolveRepoRemoteURL_EntireComErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		ref      string
+		want     []string
+		dontWant []string
+	}{
+		{
+			name: "missing repo echoes the typed URL",
+			ref:  "https://entire.com/et/paul",
+			want: []string{`invalid <repo> "https://entire.com/et/paul": expected /et/<project>/<repo> (2 names after the et token, got 1)`},
+		},
+		{
+			name:     "forge-less URL echoes as typed with the did-you-mean",
+			ref:      "entire.com/foo/bar",
+			want:     []string{`invalid <repo> "entire.com/foo/bar"`, "/et/foo/bar or /gh/foo/bar"},
+			dontWant: []string{`"/foo/bar"`},
+		},
+		{
+			name:     "credentials are never echoed",
+			ref:      "https://u:secret@entire.com/et/paul/dogbark",
+			want:     []string{"invalid <repo>"},
+			dontWant: []string{"secret"},
+		},
+		{
+			name: "uppercase forge token is refused like the path form",
+			ref:  "ENTIRE.COM/ET/paul/dogbark",
+			want: []string{`invalid <repo> "ENTIRE.COM/ET/paul/dogbark"`},
+		},
+		{
+			name: "extra path segments get a targeted error",
+			ref:  "https://entire.com/et/paul/dogbark/tree/main",
+			want: []string{`invalid <repo> "https://entire.com/et/paul/dogbark/tree/main"`, "URL has extra path segments; use /et/<project>/<repo>"},
+		},
+		{
+			name: "query string gets a targeted error",
+			ref:  "https://entire.com/et/paul/dogbark?x=1",
+			want: []string{`invalid <repo> "https://entire.com/et/paul/dogbark?x=1"`, "URL has extra path segments; use /et/<project>/<repo>"},
+		},
+		{
+			name: "fragment gets a targeted error",
+			ref:  "https://entire.com/gh/owner/repo#readme",
+			want: []string{`invalid <repo> "https://entire.com/gh/owner/repo#readme"`, "URL has extra path segments; use /gh/<owner>/<repo>"},
+		},
+		{
+			name: "query is echoed as typed",
+			ref:  "https://entire.com/et/acme/web?tab=x",
+			want: []string{`invalid <repo> "https://entire.com/et/acme/web?tab=x"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := cloneURLFromRef(t, tt.ref)
+			require.Error(t, err)
+			for _, w := range tt.want {
+				require.Contains(t, err.Error(), w)
+			}
+			for _, w := range tt.dontWant {
+				require.NotContains(t, err.Error(), w)
+			}
+		})
+	}
+}
+
+// [target-dir] is passed to git exactly as typed; only <repo> is canonicalized.
+//
+// Not parallel: replaces PATH and activeCoreClient.
+func TestRepoClone_TargetDirIsNotCanonicalized(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git is a shell script")
+	}
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	c := serveNativeRepo(t, coreapi.Repo{
+		ID:              testNativeRepoULID,
+		Name:            "dogbark",
+		OwningProjectId: testProjectULID,
+		ClusterHost:     coreapi.NewOptString("aws-ap-southeast-2.entire.io"),
+		Path:            coreapi.NewOptString("/et/paul/dogbark"),
+	})
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) { return c, nil }
+	t.Cleanup(func() { activeCoreClient = prev })
+
+	cmd := newRepoCloneCmd()
+	cmd.SetOut(&nopWriter{})
+	cmd.SetErr(&nopWriter{})
+	cmd.SetArgs([]string{"entire.com/et/paul/dogbark", "entire.com/et/paul/dogbark"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+
+	data, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	require.Equal(t, "clone\nentire://aws-ap-southeast-2.entire.io/et/paul/dogbark\nentire.com/et/paul/dogbark\n", string(data))
 }

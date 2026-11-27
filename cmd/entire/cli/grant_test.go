@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 
@@ -168,4 +169,82 @@ func TestGrantRows(t *testing.T) {
 		})
 		require.Equal(t, []string{ulid, "-", "reader", "inherited", "team"}, row)
 	})
+}
+
+// stagingGrantListing is the listing that misled a reader: paul's direct reader
+// row came first although the project makes him a writer.
+func stagingGrantListing() []coreapi.RepoGrant {
+	g := func(id, handle, name, role, source, typ string) coreapi.RepoGrant {
+		return coreapi.RepoGrant{
+			GranteeId: id, GranteeName: coreapi.NewOptString(handle), DisplayName: coreapi.NewOptString(name),
+			Role: role, Source: source, GranteeType: typ,
+		}
+	}
+	return []coreapi.RepoGrant{
+		g("01PAUL", "github:toothbrush", "paul", "reader", "direct", "account"),
+		g("01PAT", "github:stiak", "Pat Leamon", "admin", "direct", "account"),
+		g("01PAUL", "github:toothbrush", "paul", "writer", "project:dogfooding", "account"),
+		g("01PAT", "github:stiak", "Pat Leamon", "admin", "project:dogfooding", "account"),
+		g("01ORG", "entire", "", "owner", "owner", "org"),
+	}
+}
+
+func TestEffectiveGrants(t *testing.T) {
+	t.Parallel()
+	fold := repoGrantTarget.fold
+
+	t.Run("one row per grantee, strongest role, weaker sources suffixed", func(t *testing.T) {
+		t.Parallel()
+		rows := mapStrings(fold(stagingGrantListing()), repoGrantRow)
+		require.Equal(t, [][]string{
+			{"github:toothbrush", "paul", "writer", "project:dogfooding, direct (reader)", "account"},
+			{"github:stiak", "Pat Leamon", "admin", "direct, project:dogfooding", "account"},
+			{"entire", "-", "owner", "owner", "org"},
+		}, rows)
+	})
+
+	t.Run("single-source rows are unchanged", func(t *testing.T) {
+		t.Parallel()
+		in := []coreapi.ProjectGrant{
+			{GranteeId: "01A", GranteeType: "account", Role: "reader", Source: "direct"},
+			{GranteeId: "01B", GranteeType: "team", Role: "writer", Source: "direct"},
+		}
+		require.Equal(t, in, projectGrantTarget.fold(slices.Clone(in)))
+	})
+
+	t.Run("same id under another grantee type is another grantee", func(t *testing.T) {
+		t.Parallel()
+		in := []coreapi.ProjectGrant{
+			{GranteeId: "01A", GranteeType: "account", Role: "reader", Source: "direct"},
+			{GranteeId: "01A", GranteeType: "team", Role: "admin", Source: "direct"},
+		}
+		require.Len(t, projectGrantTarget.fold(in), 2)
+	})
+
+	t.Run("sources rank by role, direct first among equals", func(t *testing.T) {
+		t.Parallel()
+		in := []coreapi.ProjectGrant{
+			{GranteeId: "01A", GranteeType: "account", Role: "reader", Source: "project:b"},
+			{GranteeId: "01A", GranteeType: "account", Role: "admin", Source: "project:a"},
+			{GranteeId: "01A", GranteeType: "account", Role: "writer", Source: "direct"},
+			{GranteeId: "01A", GranteeType: "account", Role: "admin", Source: "direct"},
+		}
+		out := projectGrantTarget.fold(in)
+		require.Len(t, out, 1)
+		require.Equal(t, "admin", out[0].Role)
+		require.Equal(t, "direct, project:a, direct (writer), project:b (reader)", out[0].Source)
+	})
+
+	t.Run("org membership is not folded", func(t *testing.T) {
+		t.Parallel()
+		require.Nil(t, orgGrantTarget.fold)
+	})
+}
+
+func mapStrings[T any](items []T, row func(T) []string) [][]string {
+	out := make([][]string, len(items))
+	for i, it := range items {
+		out[i] = row(it)
+	}
+	return out
 }

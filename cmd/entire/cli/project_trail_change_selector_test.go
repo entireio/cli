@@ -81,11 +81,11 @@ func TestProjectChangeSelectorReachesBranchWork(t *testing.T) {
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				paths = append(paths, r.Method+" "+r.URL.Path)
 				switch r.URL.Path {
-				case "/api/v1/trails/gh/acme/widget/7":
+				case "/api/v1/repos/repo-id/changes/7":
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Status: "open",
 						Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
 							Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"}}))
-				case "/api/v1/trails/gh/acme/widget/7/reviews/comments":
+				case "/api/v1/repos/repo-id/changes/7/reviews/comments":
 					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
 				default:
 					t.Errorf("unexpected repo request: %s %s", r.Method, r.URL.Path)
@@ -95,7 +95,7 @@ func TestProjectChangeSelectorReachesBranchWork(t *testing.T) {
 
 			out, _, err := executeProjectTrailTest(t, "finding", "list", "widget/7", "--project", "gh/acme", "--json")
 			require.NoError(t, err)
-			require.Contains(t, paths, "GET /api/v1/trails/gh/acme/widget/7/reviews/comments")
+			require.Contains(t, paths, "GET /api/v1/repos/repo-id/changes/7/reviews/comments")
 			var got struct {
 				Trail struct {
 					Number int    `json:"number"`

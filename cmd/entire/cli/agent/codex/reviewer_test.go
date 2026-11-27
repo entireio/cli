@@ -79,6 +79,34 @@ func TestCodexReviewer_EnvVarsSet(t *testing.T) {
 	}
 }
 
+// TestCodexReviewer_WindowsLaunchEnvResolvesFromPath pins that a review run on
+// a Windows host starts codex with NoDefaultCurrentDirectoryInExePath=1. Codex
+// replays its own environment into every hook shell (hooks/src/registry.rs and
+// engine/command_runner.rs in openai/codex), so cmd.exe there resolves each
+// program in a hook line from PATH, not from the reviewed checkout. An
+// inherited value is overridden; other hosts get no entry from Entire.
+func TestCodexReviewer_WindowsLaunchEnvResolvesFromPath(t *testing.T) {
+	// No t.Parallel(): mutates the shared hook-host probe and uses t.Setenv.
+	const key = "NoDefaultCurrentDirectoryInExePath"
+	t.Setenv(key, "") // an inherited value the launch must not keep on Windows
+
+	for _, tc := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "windows", want: "1"},
+		{goos: "linux", want: ""},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			withCodexHookEnvironment(t, tc.goos, false)
+			cmd := buildCodexReviewCmd(context.Background(), reviewtypes.RunConfig{StartingSHA: "deadbeef1234"})
+			if got := envToMap(cmd.Env)[key]; got != tc.want {
+				t.Errorf("%s = %q in the codex launch environment, want %q", key, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCodexReviewer_ArgvShape(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{Skills: []string{"/skill"}}

@@ -430,6 +430,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
+		SessionTokenUsage:           opts.SessionTokenUsage,
 		Redaction:                   redaction,
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
