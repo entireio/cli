@@ -46,6 +46,9 @@ func (b *RequestBody) appendChunk(p []byte) {
 	b.ends = append(b.ends, b.Len()+int64(len(p)))
 }
 
+// Append takes ownership of p and adds it to the end of the body.
+func (b *RequestBody) Append(p []byte) { b.appendChunk(p) }
+
 // replaceRange replaces bytes [start, end) with p. The chunks on either
 // side are re-sliced rather than copied, so the pack stays where it is.
 func (b *RequestBody) replaceRange(start, end int64, p []byte) {

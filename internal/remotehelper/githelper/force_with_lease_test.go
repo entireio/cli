@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,16 @@ import (
 
 // IsolateRepository first: http-backend inherits developer config.
 func gitBackendServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	backend, bare := gitBackend(t)
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	return server, bare
+}
+
+// gitBackend returns a `git http-backend` handler that serves a new bare
+// repository at /et/owner/repo, and the repository's path.
+func gitBackend(t *testing.T) (http.Handler, string) {
 	t.Helper()
 	gitenv.IsolateRepository(t)
 	gitPath, err := exec.LookPath("git")
@@ -45,13 +56,11 @@ func gitBackendServer(t *testing.T) (*httptest.Server, string) {
 			env = append(env, e)
 		}
 	}
-	server := httptest.NewServer(&cgi.Handler{
+	return &cgi.Handler{
 		Path: gitPath,
 		Args: []string{"http-backend"},
 		Env:  env,
-	})
-	t.Cleanup(server.Close)
-	return server, bare
+	}, bare
 }
 
 func runGit(t *testing.T, args ...string) string {

@@ -19,7 +19,45 @@ import (
 
 // handlePush implements the git-remote-helpers "push" / "push for-push"
 // command sequence. Git sends a batch of "push <src>:<dst>" lines
-// terminated by a blank line; we shell out to
+// terminated by a blank line. When the server advertises entire-bb and the
+// push holds a large blob, helperPush builds the push itself (see bbpush).
+// Otherwise sendPackPush hands it to git send-pack.
+func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
+	refspecs, err := readPushBatch(firstLine, stdin)
+	if err != nil {
+		return err
+	}
+	if err := opts.PushError(); err != nil {
+		return err
+	}
+	advertisement, err := pushAdvertisement(ctx, t, adv)
+	if err != nil {
+		return err
+	}
+	if pushed, err := helperPush(ctx, t, advertisement, refspecs, opts, stdout, os.Stderr); pushed {
+		return err
+	}
+	return sendPackPush(ctx, t, advertisement, refspecs, opts, stdout)
+}
+
+// pushAdvertisement reuses the advertisement "list for-push" already
+// fetched. Re-fetching here would observe refs the pre-push hook pushed
+// after Git's ref snapshot, which send-pack reports and Git flags as
+// "unexpected status" (see refAdvCache / ENCLI-267).
+func pushAdvertisement(ctx context.Context, t Transport, adv *refAdvCache) ([]byte, error) {
+	refsResp, err := adv.infoRefs(ctx, t, serviceReceivePack)
+	if err != nil {
+		return nil, fmt.Errorf("fetching receive-pack info/refs: %w", err)
+	}
+	advertisement, err := gitproto.ReadPostServiceAdvertisement(refsResp)
+	_ = refsResp.Close()
+	if err != nil {
+		return nil, fmt.Errorf("reading receive-pack info/refs: %w", err)
+	}
+	return advertisement, nil
+}
+
+// sendPackPush shells out to
 //
 //	git send-pack --stateless-rpc --helper-status --stdin <url>
 //
@@ -32,7 +70,7 @@ import (
 //
 // Protocol flow (mirroring remote-curl.c:push_git + rpc_service):
 //  1. Read remaining "push <src>:<dst>" lines from git until blank
-//     line.
+//     line (handlePush).
 //  2. Fetch v0 info/refs?service=git-receive-pack (the ref
 //     advertisement send-pack would normally read from the network).
 //  3. Feed refspecs (as pktlines + flush) + advertisement to
@@ -49,29 +87,7 @@ import (
 //     When no request was sent there is no trailing flush either
 //     (send-pack guards it with cmds_sent) — stdout continues
 //     straight into the status lines.
-func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
-	refspecs, err := readPushBatch(firstLine, stdin)
-	if err != nil {
-		return err
-	}
-	if err := opts.PushError(); err != nil {
-		return err
-	}
-
-	// Reuse the advertisement "list for-push" already fetched. Re-fetching
-	// here would observe refs the pre-push hook pushed after Git's ref
-	// snapshot, which send-pack reports and Git flags as "unexpected status"
-	// (see refAdvCache / ENCLI-267).
-	refsResp, err := adv.infoRefs(ctx, t, serviceReceivePack)
-	if err != nil {
-		return fmt.Errorf("fetching receive-pack info/refs: %w", err)
-	}
-	advertisement, err := gitproto.ReadPostServiceAdvertisement(refsResp)
-	_ = refsResp.Close()
-	if err != nil {
-		return fmt.Errorf("reading receive-pack info/refs: %w", err)
-	}
-
+func sendPackPush(ctx context.Context, t Transport, advertisement []byte, refspecs []string, opts *Options, stdout io.Writer) error {
 	var preamble bytes.Buffer
 	for _, spec := range refspecs {
 		fmt.Fprintf(&preamble, "%04x%s\n", len(spec)+5, spec)

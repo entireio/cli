@@ -59,6 +59,10 @@ func withoutMultiACK(adv []byte) []byte {
 	return append([]byte(pktLine(first)), adv[n:]...)
 }
 
+func (e *execTransport) InfoRefsForPush(ctx context.Context) (io.ReadCloser, error) {
+	return e.InfoRefs(ctx, serviceReceivePack)
+}
+
 func (e *execTransport) InfoRefsV2(context.Context) (io.ReadCloser, error) {
 	return nil, errors.New("execTransport speaks v0 only")
 }
@@ -84,6 +88,8 @@ func (e *execTransport) ServiceRPC(ctx context.Context, service string, body io.
 func (e *execTransport) Do(context.Context, string, string, io.ReadSeeker, func(*http.Request)) (*http.Response, error) {
 	return nil, errors.New("execTransport speaks git only")
 }
+
+func (e *execTransport) RepoLocation() (string, string) { return "file://" + e.dir, "/repo" }
 
 func (e *execTransport) ErrorBaseURL() string { return "file://" + e.dir }
 
