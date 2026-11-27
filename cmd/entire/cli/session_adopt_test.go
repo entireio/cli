@@ -223,16 +223,18 @@ func TestSessionAdopt_ExternalStoreRetiresSourceSession(t *testing.T) {
 		t.Fatal("source EndedAt after SessionStart = nil, want retirement timestamp")
 	}
 
-	err = strategy.NewManualCommitStrategy().InitializeSession(
+	err = strategy.NewManualCommitStrategy().InitializeSessionForPrompt(
 		context.Background(),
 		sessionID,
 		agent.AgentTypeClaudeCode,
 		"",
 		"source prompt after adoption",
 		"",
+		"",
+		false,
 	)
 	if err != nil {
-		t.Fatalf("InitializeSession in the adopted-away source repo should no-op without disrupting the hook, got: %v", err)
+		t.Fatalf("InitializeSessionForPrompt in the adopted-away source repo should no-op without disrupting the hook, got: %v", err)
 	}
 
 	sourceAfterTurnStart, err := sourceStore.Load(context.Background(), sessionID)

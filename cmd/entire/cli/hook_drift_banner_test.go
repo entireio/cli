@@ -114,11 +114,21 @@ func TestMissingHooksBannerSuffix_OpenCodeOutdatedStaysSilent(t *testing.T) {
 func TestHandleLifecycleSessionStart_MissingHooksWarning(t *testing.T) {
 	t.Chdir(setupGitRepoForPhaseTest(t))
 	writeOutdatedClaudeHooks(t)
-	ag := newMockHookResponseAgent()
+	ag := &requiredHooksReportingAgent{mockHookResponseAgent: newMockHookResponseAgent()}
 	ag.name = agent.AgentNameClaudeCode
 
 	require.NoError(t, handleLifecycleSessionStart(context.Background(), ag, &agent.Event{
 		Type: agent.SessionStart, SessionID: "test-missing-hooks-warning", Timestamp: time.Now(),
 	}))
 	require.Contains(t, ag.lastMessage, "Run 'entire agent add claude-code' to add them.")
+}
+
+// requiredHooksReportingAgent is a hook-response mock that answers
+// agent.RequiredHooksReporter the way Claude Code does.
+type requiredHooksReportingAgent struct {
+	*mockHookResponseAgent
+}
+
+func (a *requiredHooksReportingAgent) MissingRequiredHooks(ctx context.Context) bool {
+	return (&claudecode.ClaudeCodeAgent{}).MissingRequiredHooks(ctx)
 }

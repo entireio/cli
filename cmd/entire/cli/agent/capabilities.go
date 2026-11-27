@@ -40,7 +40,9 @@ type CapabilityDeclarer interface {
 //   - ModelLister
 //   - OutOfBandTokenSource (refuses CapabilityDeclarer agents)
 //   - PermissionConfigOwner
+//   - PromptRepeatReporter
 //   - ProtectedFilesProvider
+//   - RequiredHooksReporter
 //   - RestoredSessionPathResolver
 //   - SessionBaseDirProvider
 //   - SessionEndBudgeter
@@ -57,6 +59,7 @@ type CapabilityDeclarer interface {
 //   - TranscriptSanitizer
 //   - TurnEndHookTimeouter
 //   - UsageCounterSource (refuses CapabilityDeclarer agents)
+//   - UserHookInstaller
 //
 // Their As* helpers resolve through builtinCapability, or through
 // nonDeclarerCapability for the entries marked as refusing CapabilityDeclarer

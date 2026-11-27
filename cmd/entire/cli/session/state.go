@@ -505,6 +505,15 @@ type State struct {
 	// for backward compatibility with existing state files.
 	LastPrompt string `json:"last_prompt,omitempty"`
 
+	// LastTurnStartKey identifies the last UserPromptSubmit this session
+	// handled (a hash of the session ID, the prompt and the agent's turn ID
+	// when it sends one), and LastTurnStartAt when. A second Entire install
+	// firing for the same prompt, such as a user-level hook beside a project
+	// one, is skipped while the turn it repeats is still running. Only the
+	// last key is kept.
+	LastTurnStartKey string     `json:"last_turn_start_key,omitempty"`
+	LastTurnStartAt  *time.Time `json:"last_turn_start_at,omitempty"`
+
 	// Line attribution was removed: state files written by older CLIs may
 	// still carry attribution_base_commit, prompt_attributions,
 	// pending_prompt_attribution, and divergence_notice_shown. encoding/json

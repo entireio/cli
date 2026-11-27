@@ -280,6 +280,10 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 			// Restricted reviews construct an allowlisted subprocess environment;
 			// PATH must use the canonical absolute-directory filter, not a copy.
 			repoPrefix + "execx",
+			// Cross-process advisory locks. With global_enable every
+			// Entire process (including parallel hooks) may add hooks to the
+			// user-level settings.json, so the read-merge-write is locked.
+			repoPrefix + "internal/flock",
 		},
 		"antigravity": {
 			// Cross-process advisory locks. agy fires its title command on

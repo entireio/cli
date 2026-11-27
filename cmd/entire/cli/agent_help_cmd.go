@@ -232,6 +232,23 @@ var agentHelpGuidance = map[string]string{
 		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
 		"bearer and dials the right host for you.",
 
+	// Global enable records sessions and pushes checkpoints in every repository
+	// the user works in, so agreeing to it belongs to the user.
+	"enable": "Global enable (--global) is the user's decision. Never run `entire enable\n" +
+		"--global` on their behalf: it turns Entire on in every repository they work\n" +
+		"in, and their checkpoints push with git push. It refuses agent sessions; ask\n" +
+		"the user to run it. Running `entire enable` in a repository on only through\n" +
+		"global enable does not enable it for the user either; they have to run it\n" +
+		"themselves.",
+
+	// Global enable adds status --json fields an agent cannot infer.
+	"status": "With --json: enabled_by is \"global\" when the repository is on only\n" +
+		"through global enable (the user never ran `entire enable` here); user_hooks\n" +
+		"lists agents whose Entire hooks are in their user-level config;\n" +
+		"user_hooks_shadowed lists those whose project hooks here take over from\n" +
+		"the user-level ones; user_settings_error says why the user settings file\n" +
+		"is ignored, and user_settings_ignored names parts of it that were dropped.",
+
 	// Reviewing someone else's branch loads its hooks, MCP servers, and
 	// settings, so approval belongs to the user. The refusal text says the same;
 	// this is the copy an agent reads before it ever runs the command.

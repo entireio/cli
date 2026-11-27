@@ -26,6 +26,9 @@ var relocationEnvVars = []string{
 	"FACTORY_HOME_OVERRIDE",
 	"PI_CODING_AGENT_DIR",
 	"PI_CODING_AGENT_SESSION_DIR",
+	// OpenCode's global config directory, where global enable installs its
+	// user-level plugin.
+	"XDG_CONFIG_HOME",
 }
 
 // RelocationEnvVars returns every relocation variable a built-in agent honors,

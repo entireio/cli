@@ -714,3 +714,23 @@ func ResetShared() {
 		delete(sharedRoots, key)
 	}
 }
+
+// ClaimOnceMarker creates name in root exclusively, writing content, and
+// reports whether this call created it: the first caller wins, and one that
+// finds it already there gets false and no error.
+func ClaimOnceMarker(root *os.Root, name, content string) (bool, error) {
+	f, err := OpenFileNoFollow(root, name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if content != "" {
+		if _, err := f.WriteString(content); err != nil {
+			return true, err //nolint:wrapcheck // callers name the marker
+		}
+	}
+	return true, nil
+}

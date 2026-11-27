@@ -23,7 +23,6 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -33,7 +32,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 )
@@ -156,13 +157,15 @@ const missingHooksWarning = "\n  Entire's Claude Code hooks in this repo are mis
 	"\n  so some activity isn't recorded. Run 'entire agent add claude-code' to add them."
 
 // missingHooksBannerSuffix returns missingHooksWarning when it applies to ag.
-// Only Claude Code, and only its missing-required-hook check: the rest of
+// Only agents that implement agent.RequiredHooksReporter (Claude Code), and
+// only that missing-required-hook check: the rest of
 // CheckHookConfig (commands or timeouts an install would rewrite) and the
 // exact-match checks of OpenCode, Pi and Copilot also fire when a teammate's
 // newer CLI wrote the config, and would tell them to downgrade it. Those
 // stay with `entire status` and `entire doctor`.
 func missingHooksBannerSuffix(ctx context.Context, ag agent.Agent) string {
-	if ag.Name() != agent.AgentNameClaudeCode || !claudecode.MissingRequiredHooks(ctx) {
+	reporter, ok := agent.AsRequiredHooksReporter(ag)
+	if !ok || !reporter.MissingRequiredHooks(ctx) {
 		return ""
 	}
 	return missingHooksWarning
@@ -237,7 +240,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 
 	// Codex-only: append a bounded, read-only discovery or trust warning.
 	if ag.Name() == agent.AgentNameCodex {
-		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
+		if warning := codexSessionStartNotice(ctx, ag); warning != "" {
 			message += " " + warning
 		}
 	}
@@ -281,7 +284,9 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			// settings file, which resume/compact/clear SessionStarts would
 			// throw away. Appended after any agent-help pointer, which only
 			// Factory AI Droid gets, so for Claude Code it ends the banner.
+			message += globalEnableBannerSuffix(ctx, ag.Name())
 			message += missingHooksBannerSuffix(ctx, ag)
+			message += unreadableUserSettingsBannerSuffix(ctx, ag.Name())
 			if err := writer.WriteHookResponse(message); err != nil {
 				hookResponseSpan.RecordError(err)
 				hookResponseSpan.End()
@@ -331,6 +336,116 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	maybeSpawnSessionSweep(ctx)
 
 	return nil
+}
+
+// codexSessionStartNotice is the Codex SessionStart warning: a project hook
+// discovery or trust problem, else user-level hooks awaiting approval.
+func codexSessionStartNotice(ctx context.Context, ag agent.Agent) string {
+	if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
+		return warning
+	}
+	return userLevelHookSessionStartWarning(ctx, ag)
+}
+
+// initializeTurnSession starts the session's turn for this prompt and
+// reports whether it repeats one already handled: a second Entire install
+// (user-level beside project hooks) fired for it, and the first turn-start
+// does the rest. Any other failure is logged; it must not block the prompt.
+func initializeTurnSession(ctx, logCtx context.Context, strat *strategy.ManualCommitStrategy, ag agent.Agent, event *agent.Event) bool {
+	err := strat.InitializeSessionForPrompt(ctx, event.SessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model, event.TurnID,
+		turnStartMayRepeat(ctx, ag, event))
+	if errors.Is(err, strategy.ErrDuplicateTurnStart) {
+		logging.Info(logCtx, "skipping repeated turn-start for a prompt already handled",
+			slog.String("session_id", event.SessionID))
+		return true
+	}
+	if err != nil {
+		logging.Warn(logCtx, "failed to initialize session state",
+			slog.String("error", err.Error()))
+	}
+	return false
+}
+
+// turnStartMayRepeat reports whether this turn-start may be a second Entire
+// install firing for a prompt already handled, so a repeat is skipped: a
+// user-level hook, or an agent that sends a turn ID to tell prompts apart.
+// An agent.PromptRepeatReporter answers for itself: Claude Code runs one
+// identical hook command once itself, so there only a
+// project UserPromptSubmit command that differs from the user-level one (an
+// older CLI's) can fire twice; otherwise the same prompt again (say, after a
+// missed Stop) is the developer's.
+func turnStartMayRepeat(ctx context.Context, ag agent.Agent, event *agent.Event) bool {
+	if reporter, ok := agent.AsPromptRepeatReporter(ag); ok {
+		return reporter.PromptHookMayFireTwice(ctx)
+	}
+	return event.TurnID != "" || isUserScopeHook(ctx)
+}
+
+// globalEnableBannerLines tell the developer, in the session that is about to
+// install Entire's git hooks, that global enable is the only reason.
+var globalEnableBannerLines = []string{
+	"Entire is on in this repository through global enable (you have not run `entire enable` here).",
+	"It installs its git hooks here, and its session checkpoints are pushed with your git pushes.",
+	"Run `entire disable` here to stop.",
+}
+
+// globalEnableBannerSuffix is the SessionStart banner addition for a
+// repository on only through global enable whose git hooks are not installed
+// yet: the first prompt installs them. The user flag is checked first, since
+// it needs no git subprocess and settles every developer without global enable.
+func globalEnableBannerSuffix(ctx context.Context, agentName types.AgentName) string {
+	if !settings.UserTierEnablesEverywhere(ctx) || strategy.IsGitHookInstalled(ctx) {
+		return ""
+	}
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || !s.EnabledOnlyByGlobal() {
+		return ""
+	}
+	return bannerSuffix(agentName, globalEnableBannerLines...)
+}
+
+// bannerSuffix formats lines to end a SessionStart banner: indented lines,
+// or one line for Codex, which shows its banner as a single line.
+func bannerSuffix(agentName types.AgentName, lines ...string) string {
+	if agentName == agent.AgentNameCodex {
+		return " " + strings.Join(lines, " ")
+	}
+	return "\n  " + strings.Join(lines, "\n  ")
+}
+
+// reportGlobalEnableGitHookInstall says so on stderr when the git hooks this
+// TurnStart just installed are there only because of global enable. Never
+// stdout: some agents read TurnStart stdout as context. Claude Code hides a
+// successful hook's stderr, so the SessionStart banner and this log line are
+// what reach its users.
+func reportGlobalEnableGitHookInstall(ctx context.Context) {
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || !s.EnabledOnlyByGlobal() {
+		return
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[entire] Installed Entire's git hooks in %s because global enable is on; run 'entire disable' here to stop.\n",
+		tuiutil.SanitizeDisplayText(root))
+	logging.Info(ctx, "global enable: installed git hooks in a repository enabled only through it",
+		slog.String("worktree", root))
+}
+
+// ensureTurnStartSetup runs TurnStart's strategy setup, which installs the git
+// hooks when they are missing, and reports an install that only global enable
+// asked for. A failure is logged: it must not block the prompt.
+func ensureTurnStartSetup(ctx, logCtx context.Context) {
+	installed, err := strategy.EnsureSetupReport(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "failed to ensure strategy setup",
+			slog.String("error", err.Error()))
+		return
+	}
+	if installed {
+		reportGlobalEnableGitHookInstall(logCtx)
+	}
 }
 
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
@@ -659,10 +774,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// it before CapturePrePromptState: the snapshot should describe the tree the
 	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if err := strategy.EnsureSetup(ctx); err != nil {
-		logging.Warn(logCtx, "failed to ensure strategy setup",
-			slog.String("error", err.Error()))
-	}
+	ensureTurnStartSetup(ctx, logCtx)
 	setupSpan.End()
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
@@ -674,8 +786,17 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 	captureSpan.End()
 
+	// Initialize session (setup already ran above, before the first status read)
+	_, initSpan := perf.Start(ctx, "init_session")
+	strat := GetStrategy(ctx)
+	if repeated := initializeTurnSession(ctx, logCtx, strat, ag, event); repeated {
+		initSpan.End()
+		return nil
+	}
+
 	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits and condensation. It goes to the session's home
+	// mid-turn commits and condensation. After InitializeSessionForPrompt, so
+	// a repeated turn-start does not append the prompt twice. It goes to the session's home
 	// worktree, where its other prompts are (see OpenSessionEntireDir).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
@@ -696,14 +817,6 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				}
 			}
 		}
-	}
-
-	// Initialize session (setup already ran above, before the first status read)
-	_, initSpan := perf.Start(ctx, "init_session")
-	strat := GetStrategy(ctx)
-	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
-		logging.Warn(logCtx, "failed to initialize session state",
-			slog.String("error", err.Error()))
 	}
 
 	// Best-effort: adopt ENTIRE_REVIEW_* / ENTIRE_INVESTIGATE_* env vars set

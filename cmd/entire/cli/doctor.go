@@ -206,6 +206,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
 
+	// Global enable: every agent's user-level hooks.
+	checkUserLevelHooks(cmd)
+
 	// Agent-specific: Antigravity title-tee (token-usage surface).
 	checkAntigravityTitleTee(cmd)
 
@@ -664,6 +667,10 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 	return confirmed, nil
 }
 
+// leftoverGitHooksHint explains Entire's git hooks in a repository that is
+// not set up, typically installed by global enable that is now off.
+const leftoverGitHooksHint = "Entire's git hooks are still installed here (left by global enable or an earlier setup); they do nothing. Remove them with `entire disable --uninstall`."
+
 // checkGitHooks reports whether Entire's git hooks are installed and current,
 // and offers to reinstall them when they are not.
 //
@@ -688,6 +695,13 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 
 	switch strategy.CheckGitHookState(ctx) {
 	case strategy.GitHooksCurrent:
+		if !settings.IsSetUpAny(ctx) {
+			// Left by global enable, now off: status says "not set up", so
+			// "OK" would read as Entire running here.
+			fmt.Fprintln(w, "Git hooks: INSTALLED, but Entire is not set up here")
+			fmt.Fprintln(w, "  "+leftoverGitHooksHint)
+			return nil
+		}
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
 
@@ -704,6 +718,12 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// disable` still wants working hooks, because the hooks themselves are
 		// what no-op while disabled.
 		if !settings.IsSetUpAny(ctx) {
+			return nil
+		}
+		if !settings.IsSetUp(ctx) && !settings.IsSetUpLocal(ctx) {
+			// Set up only through the user settings file (global enable or
+			// a repos entry): the first agent turn here installs them.
+			fmt.Fprintln(w, "Git hooks: not installed yet; they install on the first agent session in this repository")
 			return nil
 		}
 		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")

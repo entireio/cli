@@ -57,13 +57,13 @@ func TestInitializeSession_CodexCorrection_CleanOwners(t *testing.T) {
 		{name: "unknown"},
 	} {
 		sessionID := "codex-clean-" + owner.name
-		require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+		require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", "", "", false))
 		state, err := s.loadSessionState(ctx, sessionID)
 		require.NoError(t, err)
 		state.AgentType = owner.agentType
 		require.NoError(t, s.saveSessionState(ctx, state))
 
-		require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", ""))
+		require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", "", "", false))
 		state, err = s.loadSessionState(ctx, sessionID)
 		require.NoError(t, err)
 		assertCleanCodexCorrection(t, state)
@@ -142,14 +142,14 @@ func TestInitializeSession_CodexCallerWithoutTranscriptDoesNotMigrateAccounting(
 	ctx := context.Background()
 	sessionID := "codex-unproven-owner"
 	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", "", "", false))
 	state, err := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	state.AgentType = ""
 	state.SubagentTokensBaseline = &agent.TokenUsage{InputTokens: 7}
 	require.NoError(t, s.saveSessionState(ctx, state))
 
-	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, "", "second", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCodex, "", "second", "", "", false))
 	state, err = s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	require.Equal(t, agent.AgentTypeCodex, state.AgentType)
@@ -274,7 +274,7 @@ func TestInitializeSession_HintWinsRaceAtTurnStart(t *testing.T) {
 
 	// TurnStart phase: Claude Code fires first with no transcript path (the bug condition).
 	s := &ManualCommitStrategy{}
-	err = s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first prompt", "")
+	err = s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first prompt", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(ctx, sessionID)
@@ -297,13 +297,13 @@ func TestInitializeSession_TranscriptPathRepairsExistingState(t *testing.T) {
 
 	// Bootstrap an already-wrong session.
 	s := &ManualCommitStrategy{}
-	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first prompt", "", "", false))
 	state, err := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	require.Equal(t, agent.AgentTypeClaudeCode, state.AgentType)
 
 	// Subsequent turn arrives via Cursor's hook with a Cursor transcript path.
-	err = s.InitializeSession(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "second prompt", "")
+	err = s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "second prompt", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(ctx, sessionID)
@@ -343,17 +343,17 @@ func TestInitializeSession_ConcurrentRaceRepairsOnNextTurn(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_ = s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "prompt", "") //nolint:errcheck // see comment above
+		_ = s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false) //nolint:errcheck // see comment above
 	}()
 	go func() {
 		defer wg.Done()
-		_ = s.InitializeSession(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "prompt", "") //nolint:errcheck // see comment above
+		_ = s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "prompt", "", "", false) //nolint:errcheck // see comment above
 	}()
 	wg.Wait()
 
 	// Simulate the next turn: cursor's hook fires again with its transcript
 	// path. correctSessionAgentType repairs any wrong AgentType from the race.
-	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "next prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeCursor, cursorTranscript, "next prompt", "", "", false))
 
 	state, lErr := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, lErr)
@@ -374,7 +374,7 @@ func TestInitializeSession_ClaudeCodeTranscriptKeepsClaudeCode(t *testing.T) {
 	sessionID := "test-session-claude"
 
 	s := &ManualCommitStrategy{}
-	err := s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, claudeTranscript, "first prompt", "")
+	err := s.InitializeSessionForPrompt(ctx, sessionID, agent.AgentTypeClaudeCode, claudeTranscript, "first prompt", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(ctx, sessionID)

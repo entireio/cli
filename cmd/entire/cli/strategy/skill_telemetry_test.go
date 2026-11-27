@@ -109,8 +109,8 @@ func TestEmitSkillInvocationTelemetry_RunsOutsideTheSessionGate(t *testing.T) {
 	writeTelemetrySettings(t, "true")
 
 	sessionID := "sess-gate-scope"
-	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 	const emitterMark = "written-by-emitter"
 	var emitterWritePersisted bool
@@ -154,8 +154,8 @@ func TestMutateSessionStateOnSaved_SkipRunsNoEffect(t *testing.T) {
 	writeTelemetrySettings(t, "true")
 
 	sessionID := "sess-skip-report"
-	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 	effects := 0
 	err := MutateSessionStateOnSaved(t.Context(), sessionID, func(state *SessionState) error {
@@ -195,8 +195,8 @@ func TestMutateSessionStateOnSaved_NestedEffectHeldForTheOuterFrame(t *testing.T
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionID := "sess-nested-" + strings.ReplaceAll(tt.name, " ", "-")
-			require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-				t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+			require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+				t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 			var effects []string
 			err := MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
@@ -235,8 +235,8 @@ func TestMutateSessionStateOnSaved_PanicDiscardsQueuedEffects(t *testing.T) {
 	writeTelemetrySettings(t, "true")
 
 	sessionID := "sess-panic-discard"
-	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 	effects := 0
 	func() {
@@ -277,8 +277,8 @@ func TestMutateSessionStateOnSaved_NestedEffectDoesNotLeakToTheNextFrame(t *test
 	writeTelemetrySettings(t, "true")
 
 	sessionID := "sess-nested-no-leak"
-	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 	nestedRuns := 0
 	require.NoError(t, MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {
@@ -305,8 +305,8 @@ func TestMutateSessionStateOnSaved_PanickingEffectDoesNotSkipTheRest(t *testing.
 	writeTelemetrySettings(t, "true")
 
 	sessionID := "sess-effect-panic"
-	require.NoError(t, (&ManualCommitStrategy{}).InitializeSession(
-		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", ""))
+	require.NoError(t, (&ManualCommitStrategy{}).InitializeSessionForPrompt(
+		t.Context(), sessionID, agent.AgentTypeClaudeCode, "", "prompt", "", "", false))
 
 	var effects []string
 	err := MutateSessionStateOnSaved(t.Context(), sessionID, func(_ *SessionState) error {

@@ -27,7 +27,7 @@ func TestInitializeSession_SetsPhaseActive(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-phase-1", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-phase-1", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-phase-1")
@@ -51,7 +51,7 @@ func TestInitializeSession_IdleToActive(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-idle", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Manually set to IDLE (simulating post-Stop state)
@@ -63,7 +63,7 @@ func TestInitializeSession_IdleToActive(t *testing.T) {
 	require.NoError(t, err)
 
 	// Second call should transition IDLE → ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "", "")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-idle", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-idle")
@@ -81,7 +81,7 @@ func TestInitializeSession_ActiveToActive_CtrlCRecovery(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call
-	err := s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-ctrlc")
@@ -96,7 +96,7 @@ func TestInitializeSession_ActiveToActive_CtrlCRecovery(t *testing.T) {
 	time.Sleep(time.Millisecond)
 
 	// Second call (Ctrl-C recovery) - should stay ACTIVE with updated time
-	err = s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-ctrlc")
@@ -118,7 +118,7 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Manually set to ENDED
@@ -131,7 +131,7 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call InitializeSession again - should transition ENDED → ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-ended-reenter")
@@ -152,7 +152,7 @@ func TestInitializeSession_EmptyPhaseBackwardCompat(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	// Manually clear the phase (simulating pre-state-machine file)
@@ -163,7 +163,7 @@ func TestInitializeSession_EmptyPhaseBackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call again - empty phase treated as IDLE → should go to ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-empty-phase")
@@ -197,7 +197,7 @@ func TestInitializeSession_SetsCLIVersion(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-cli-version", "Claude Code", "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-cli-version", "Claude Code", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-cli-version")
@@ -216,7 +216,7 @@ func TestInitializeSession_SetsModelName(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-model", "OpenCode", "", "", "claude-sonnet-4-20250514")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-model", "OpenCode", "", "", "claude-sonnet-4-20250514", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-model")
@@ -236,7 +236,7 @@ func TestInitializeSession_UpdatesModelOnSubsequentTurn(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First turn with model A
-	err := s.InitializeSession(context.Background(), "test-session-model-update", "OpenCode", "", "", "gpt-4o")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-model-update", "OpenCode", "", "", "gpt-4o", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-model-update")
@@ -248,7 +248,7 @@ func TestInitializeSession_UpdatesModelOnSubsequentTurn(t *testing.T) {
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Second turn with model B — should update
-	err = s.InitializeSession(context.Background(), "test-session-model-update", "OpenCode", "", "", "claude-sonnet-4-20250514")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-model-update", "OpenCode", "", "", "claude-sonnet-4-20250514", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-model-update")
@@ -266,7 +266,7 @@ func TestInitializeSession_EmptyModelDoesNotOverwrite(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First turn with a model
-	err := s.InitializeSession(context.Background(), "test-session-model-keep", "OpenCode", "", "", "gpt-4o")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-model-keep", "OpenCode", "", "", "gpt-4o", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-model-keep")
@@ -278,7 +278,7 @@ func TestInitializeSession_EmptyModelDoesNotOverwrite(t *testing.T) {
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Second turn with empty model — should preserve existing
-	err = s.InitializeSession(context.Background(), "test-session-model-keep", "OpenCode", "", "", "")
+	err = s.InitializeSessionForPrompt(context.Background(), "test-session-model-keep", "OpenCode", "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-model-keep")
@@ -296,7 +296,7 @@ func TestCondenseAndMarkFullyCondensed_Guards(t *testing.T) {
 		t.Chdir(dir)
 
 		s := &ManualCommitStrategy{}
-		require.NoError(t, s.InitializeSession(context.Background(), "test-session", "Claude Code", "", "", ""))
+		require.NoError(t, s.InitializeSessionForPrompt(context.Background(), "test-session", "Claude Code", "", "", "", "", false))
 
 		state, err := s.loadSessionState(context.Background(), "test-session")
 		require.NoError(t, err)
@@ -321,7 +321,7 @@ func TestCondenseAndMarkFullyCondensed_Guards(t *testing.T) {
 		t.Chdir(dir)
 
 		s := &ManualCommitStrategy{}
-		require.NoError(t, s.InitializeSession(context.Background(), "test-session", "Claude Code", "", "", ""))
+		require.NoError(t, s.InitializeSessionForPrompt(context.Background(), "test-session", "Claude Code", "", "", "", "", false))
 
 		state, err := s.loadSessionState(context.Background(), "test-session")
 		require.NoError(t, err)
@@ -348,7 +348,7 @@ func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateL
 	ctx := context.Background()
 	s := &ManualCommitStrategy{}
 	const sessionID = "files-waiting-for-commit"
-	require.NoError(t, s.InitializeSession(ctx, sessionID, "Claude Code", "", "", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(ctx, sessionID, "Claude Code", "", "", "", "", false))
 
 	state, err := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)

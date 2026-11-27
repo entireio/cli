@@ -798,7 +798,7 @@ func TestManualCommit_PrepareCommitMsg_SkipsSessionWithoutContent(t *testing.T) 
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-no-content", agent.AgentTypeClaudeCode, "", "", "")
+	err := s.InitializeSessionForPrompt(context.Background(), "test-session-no-content", agent.AgentTypeClaudeCode, "", "", "", "", false)
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-no-content")

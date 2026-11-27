@@ -5556,3 +5556,23 @@ func linkTo(t *testing.T, dir, target string) {
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
 	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
 }
+
+// The user-settings exclusion covers every clone of the repository, so the
+// summary names that scope, and only when uninstall will write it.
+func TestConfirmUninstall_NamesUserTierExclusionScope(t *testing.T) {
+	t.Parallel()
+	for _, exclusion := range []bool{true, false} {
+		var stdout, stderr bytes.Buffer
+		_, err := confirmUninstall(newUninstallPrinter(&stdout, &stderr), uninstallSummary{
+			entireDirExists:   true,
+			userTierExclusion: exclusion,
+		})
+		if err == nil {
+			t.Fatal("expected the no-terminal guard to stop after the summary")
+		}
+		out := stdout.String()
+		if got := strings.Contains(out, "user settings") && strings.Contains(out, "every clone and worktree of this repository"); got != exclusion {
+			t.Errorf("exclusion=%v: summary names the cross-clone scope=%v, got:\n%s", exclusion, got, out)
+		}
+	}
+}

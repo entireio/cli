@@ -1,0 +1,169 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+// MergedUserFile is an agent's own user-level config file (a settings or
+// hooks file the user also edits) that Entire merges its hooks into. The
+// agent supplies the merge; this type owns the shared shape: the "agent not
+// in use" check, the lock, the read-only fast path, symlink handling and the
+// health report.
+type MergedUserFile struct {
+	// Path is the file; its directory missing means the agent is not in use.
+	Path string
+	// MaxBytes, when set, refuses a larger file.
+	MaxBytes int
+	// Perm is the mode of a newly created file; an existing file keeps its own.
+	Perm os.FileMode
+	// HasEntire reports whether data holds any Entire hook.
+	HasEntire func(data []byte) bool
+	// Merge returns data with Entire's hooks merged in and how many entries
+	// that changed (0: already current). exists is false for a missing file.
+	Merge func(data []byte, exists bool) ([]byte, int, error)
+	// Strip returns data without Entire's hooks and whether that changed it.
+	Strip func(data []byte) ([]byte, bool, error)
+	// Version finds the installed Entire hook version (nil: the one recorded
+	// at install, Stamp).
+	Version func(data []byte) int
+	// Stamp is the hook version recorded at install for a file whose content
+	// cannot carry one (Claude Code runs a hook in both its user and project
+	// settings once only when the commands are identical).
+	Stamp int
+
+	state userHookState
+}
+
+// configDirMissing reports an agent's user-level directory that does not
+// exist: the agent is not in use here, and nothing is created for it.
+func configDirMissing(dir string) bool {
+	_, err := os.Stat(dir)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// read returns the file, reporting a missing one as !exists.
+func (m MergedUserFile) read() ([]byte, bool, error) {
+	data, err := UserConfigFile{Path: m.Path}.Read()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", m.Path, err)
+	}
+	if m.MaxBytes > 0 && len(data) > m.MaxBytes {
+		return nil, false, fmt.Errorf("%s exceeds %d bytes", m.Path, m.MaxBytes)
+	}
+	return data, true, nil
+}
+
+// Ensure merges Entire's hooks in while wanted holds (see
+// userHookState.ensure), or returns ErrUserHooksNotInUse when the file's
+// directory is absent.
+func (m MergedUserFile) Ensure(ctx context.Context, wanted func(context.Context) bool) (UserHookInstall, error) {
+	result := UserHookInstall{Path: m.Path}
+	if configDirMissing(filepath.Dir(m.Path)) {
+		return result, userHooksNotInUseError{dir: filepath.Dir(m.Path)}
+	}
+	return m.state.ensure(ctx, m.Path, wanted, func(rec *userHookRecord) (UserHookInstall, error) {
+		data, exists, err := m.read()
+		if err != nil {
+			return result, err
+		}
+		output, count, err := m.Merge(data, exists)
+		result.Changed, result.Updated = count, exists && m.HasEntire(data)
+		if err != nil || count == 0 || rec == nil {
+			return result, err
+		}
+		rec.CreatedFile = rec.CreatedFile || !exists
+		rec.Version = m.Stamp
+		return result, UserConfigFile{Path: m.Path}.Write(output, m.Perm)
+	})
+}
+
+// Remove strips Entire's hooks under the lock, keeping everything else, and
+// reports whether there were any. A file Entire created that holds nothing
+// else is deleted rather than left as {}.
+func (m MergedUserFile) Remove(ctx context.Context) (bool, error) {
+	if configDirMissing(filepath.Dir(m.Path)) {
+		return false, nil
+	}
+	removed := false
+	err := m.state.locked(ctx, m.Path, func(rec *userHookRecord) error {
+		data, exists, err := m.read()
+		if err != nil || !exists || !m.HasEntire(data) {
+			*rec = userHookRecord{}
+			return err
+		}
+		output, changed, err := m.Strip(data)
+		if err != nil || !changed {
+			return err
+		}
+		file := UserConfigFile{Path: m.Path}
+		if holdsNothing(output) && rec.CreatedFile {
+			err = file.Remove()
+		} else {
+			err = file.Write(output, m.Perm)
+		}
+		if err != nil {
+			return err
+		}
+		removed, *rec = true, userHookRecord{}
+		return nil
+	})
+	return removed, err
+}
+
+// holdsNothing reports JSON that is an object with no keys, or whose only
+// keys hold empty objects (Codex's {"hooks": {}}).
+func holdsNothing(data []byte) bool {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	for _, value := range doc {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(value, &inner) != nil || len(inner) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Inspect reports the file's health without writing.
+func (m MergedUserFile) Inspect() UserHookReport {
+	report := UserHookReport{Path: m.Path}
+	if configDirMissing(filepath.Dir(m.Path)) {
+		report.State = UserHooksNotInUse
+		return report
+	}
+	data, exists, err := m.read()
+	switch {
+	case err != nil:
+		report.State, report.Err = UserHooksUnavailable, err
+		return report
+	case !exists || !m.HasEntire(data):
+		report.State = UserHooksAbsent
+		return report
+	}
+	if m.Version != nil {
+		report.Version = m.Version(data)
+	} else {
+		report.Version = m.state.record(m.Path).Version
+	}
+	_, count, err := m.Merge(data, true)
+	switch {
+	case err != nil:
+		report.State, report.Err = UserHooksUnavailable, err
+	case count > 0:
+		report.State = UserHooksOutdated
+	default:
+		report.State = UserHooksCurrent
+	}
+	return report
+}

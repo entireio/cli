@@ -177,7 +177,7 @@ func TestGuestTurnStart_KeepsBranchAndBase(t *testing.T) {
 	before := mustLoad(t, s, "guest-turn-start")
 
 	chdirWorktree(t, linkedDir)
-	require.NoError(t, s.InitializeSession(t.Context(), "guest-turn-start", agent.AgentTypeClaudeCode, "", "next prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "guest-turn-start", agent.AgentTypeClaudeCode, "", "next prompt", "", "", false))
 	after := mustLoad(t, s, "guest-turn-start")
 	assert.Equal(t, before.Branch, after.Branch, "a guest turn start captured the linked tree's branch")
 	assert.Equal(t, before.BaseCommit, after.BaseCommit, "a guest turn start moved the base")
@@ -187,7 +187,7 @@ func TestGuestTurnStart_KeepsBranchAndBase(t *testing.T) {
 	testutil.WriteFile(t, mainDir, "later.txt", "later")
 	testutil.GitAdd(t, mainDir, "later.txt")
 	testutil.RunGit(t, mainDir, "commit", "-q", "-m", "later at home")
-	require.NoError(t, s.InitializeSession(t.Context(), "guest-turn-start", agent.AgentTypeClaudeCode, "", "home prompt", ""))
+	require.NoError(t, s.InitializeSessionForPrompt(t.Context(), "guest-turn-start", agent.AgentTypeClaudeCode, "", "home prompt", "", "", false))
 	home := mustLoad(t, s, "guest-turn-start")
 	assert.Equal(t, testutil.GetHeadHash(t, mainDir), home.BaseCommit)
 }

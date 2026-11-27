@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -78,6 +79,61 @@ func extensionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 // extension that shells out to a path inside the working tree would run
 // whatever the checked-out branch contains.
 func renderExtension() string {
+	return renderExtensionFor(false)
+}
+
+// User-level placeholders: each is a whole template line, removed from the
+// project render (which stays byte-identical to what earlier CLIs wrote) and
+// replaced in the user-level one.
+const (
+	userLevelImportsLine   = "//__ENTIRE_USER_LEVEL_IMPORTS__\n"
+	userLevelStepAsideLine = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE__\n"
+)
+
+// userLevelImports and userLevelStepAside make the user-level extension do
+// nothing where Pi also loads this project's own Entire extension, of any CLI
+// version (see agent.ProjectCopyCheck). Pi
+// 0.70 discovers project extensions only in <cwd>/.pi/extensions (no upward
+// search), so that is the one place to look. Checked once per load: /reload,
+// /new and /resume build a new instance and look again.
+func userLevelImports() string {
+	return `import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+` + agent.ProjectCopyCheck(entireMarker)
+}
+
+func userLevelStepAside() string {
+	return agent.UserLevelHeader("  ", "extension", userHooksVersion) +
+		`  if (isEntireProjectCopy(join(process.cwd(), ".pi", "extensions", "entire", "index.ts"), false)) return;
+`
+}
+
+// renderExtensionFor renders the extension, the user-level variant when
+// userLevel.
+func renderExtensionFor(userLevel bool) string {
+	if userLevel {
+		return userExtensionRender()
+	}
+	return projectExtensionRender()
+}
+
+// The renders never change within a process, so each is built once.
+var (
+	projectExtensionRender = sync.OnceValue(func() string {
+		return agent.RenderUserLevel(baseExtension(), false, map[string]string{
+			userLevelImportsLine: "", userLevelStepAsideLine: "",
+		})
+	})
+	userExtensionRender = sync.OnceValue(func() string {
+		return agent.MarkUserLevel(agent.RenderUserLevel(baseExtension(), true, map[string]string{
+			userLevelImportsLine:   userLevelImports(),
+			userLevelStepAsideLine: userLevelStepAside(),
+		}), entireMarker)
+	})
+)
+
+func baseExtension() string {
 	return strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, "entire")
 }
 

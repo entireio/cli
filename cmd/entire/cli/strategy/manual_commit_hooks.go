@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3347,18 +3349,77 @@ func explicitlyIncomplete(complete *bool) bool {
 	return complete != nil && !*complete
 }
 
-// InitializeSession creates session state for a new session or updates an existing one.
-// This implements the optional SessionInitializer interface.
-// Called during UserPromptSubmit to allow git hooks to detect active sessions.
+// ErrDuplicateTurnStart is InitializeSessionForPrompt finding that this
+// session already handled the same prompt in the turn still running: a
+// second Entire install fired for it. The caller skips the rest of the
+// prompt's handling.
+var ErrDuplicateTurnStart = errors.New("turn start already handled for this prompt")
+
+// turnStartDedupeWindow bounds how long a handled prompt counts as a repeat.
+// Two installs fire for one prompt within moments of each other.
+const turnStartDedupeWindow = time.Minute
+
+// InitializeSessionForPrompt creates session state for a new session or
+// updates an existing one at UserPromptSubmit, so git hooks can detect active
+// sessions. If the session already exists and HEAD has moved, it updates
+// BaseCommit to the new HEAD. agentType is the human-readable agent name,
+// transcriptPath the live transcript (for mid-session commit detection),
+// userPrompt the prompt (stored truncated as LastPrompt) and model the LLM
+// model identifier (empty if unknown).
 //
-// If the session already exists and HEAD has moved (e.g., user committed), updates
-// BaseCommit to the new HEAD.
-//
-// agentType is the human-readable name of the agent (e.g., "Claude Code").
-// transcriptPath is the path to the live transcript file (for mid-session commit detection).
-// userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
-// model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
-func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
+// It records the prompt and, when mayRepeat, skips a repeat of the prompt it
+// handled last: the same session, prompt text and agent turn ID (agentTurnID,
+// when the agent sends one), within turnStartDedupeWindow, while that turn is
+// still active. mayRepeat is the caller's word that a second Entire install
+// can fire for this prompt; without it the same short prompt sent again after
+// a missed Stop would be dropped. The check and the record happen under the
+// session lock, before a turn ID is generated. Returns ErrDuplicateTurnStart
+// for a repeat.
+func (s *ManualCommitStrategy) InitializeSessionForPrompt(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model, agentTurnID string, mayRepeat bool) error {
+	return s.initializeTurn(ctx, sessionID, agentType, transcriptPath, userPrompt, model,
+		turnDedupe{key: turnStartKey(sessionID, userPrompt, agentTurnID), mayRepeat: mayRepeat})
+}
+
+// turnDedupe is a turn start's repeat key (empty: none) and whether it may
+// be skipped as a repeat.
+type turnDedupe struct {
+	key       string
+	mayRepeat bool
+}
+
+// turnStartKey is the dedupe key of a prompt, or "" when there is nothing to
+// tell two prompts apart by (no prompt text and no agent turn ID).
+func turnStartKey(sessionID, userPrompt, agentTurnID string) string {
+	if userPrompt == "" && agentTurnID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + userPrompt + "\x00" + agentTurnID))
+	return hex.EncodeToString(sum[:])
+}
+
+// isRepeatedTurnStart reports whether a turn start that may repeat one
+// repeats the prompt state handled last, in a turn that is still running.
+func isRepeatedTurnStart(state *SessionState, dedupe turnDedupe, now time.Time) bool {
+	return dedupe.mayRepeat && dedupe.key != "" && state.LastTurnStartKey == dedupe.key &&
+		state.LastTurnStartAt != nil && now.Sub(*state.LastTurnStartAt) < turnStartDedupeWindow &&
+		state.Phase.IsActive()
+}
+
+// claimTurnStart refuses a repeat with ErrDuplicateTurnStart, else remembers
+// this prompt as the one the session handled last.
+func claimTurnStart(state *SessionState, dedupe turnDedupe) error {
+	now := time.Now()
+	if isRepeatedTurnStart(state, dedupe, now) {
+		return ErrDuplicateTurnStart
+	}
+	if dedupe.key != "" {
+		state.LastTurnStartKey = dedupe.key
+		state.LastTurnStartAt = &now
+	}
+	return nil
+}
+
+func (s *ManualCommitStrategy) initializeTurn(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath, userPrompt, model string, dedupe turnDedupe) error {
 	// Concurrent calls for the same session_id are accepted; convergence on
 	// AgentType is via correctSessionAgentType on the next turn.
 	repo, err := OpenRepository(ctx)
@@ -3382,80 +3443,18 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	var remember string
 	var homeAgentType types.AgentType
 	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
-		if state.BaseCommit == "" {
-			return errPartialState
-		}
-		if state.AdoptedIntoWorktreePath != "" {
-			logging.Info(logging.WithComponent(ctx, "hooks"), "skipping adopted-away source session",
-				slog.String("session_id", sessionID),
-				slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
-			return ErrMutationSkip
-		}
-		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
-			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
-				slog.String("session_id", sessionID),
-				slog.String("error", transErr.Error()))
-		}
-
-		turnID, err := id.Generate()
-		if err != nil {
-			return fmt.Errorf("failed to generate turn ID: %w", err)
-		}
-		state.TurnID = turnID.String()
-
-		// A transcript path is stronger evidence than both a stored owner and
-		// the current hook. Apply transcript-proven corrections first, including
-		// the empty-owner case, so a Codex correction can initialize all of its
-		// child-accounting markers atomically.
-		if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
-			logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
-				slog.String("session_id", sessionID),
-				slog.String("from", string(state.AgentType)),
-				slog.String("to", string(corrected)),
-				slog.String("transcript_path", transcriptPath))
-			if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
-				transitionSessionToCodex(state)
-			}
-			state.AgentType = corrected
-			// The recorded home belonged to the previous agent's layout.
-			state.AgentHome = ""
-		} else if state.AgentType == "" && resolvedAgentType != "" {
-			state.AgentType = resolvedAgentType
-		}
-		if model != "" {
-			state.ModelName = model
-		}
-		if userPrompt != "" {
-			state.LastPrompt = truncatePromptForStorage(userPrompt)
-		}
-		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
-			state.TranscriptPath = transcriptPath
-		}
-		// Read before the turn's calls: a transcript rewritten since the last
-		// reading (a resume restoring an older copy) still reads lower than
-		// the session's total, which is how the ledger tells it apart.
-		ObserveTokenLedger(ctx, state)
-		remember = updateSessionAgentHome(ctx, state)
-		homeAgentType = state.AgentType
-		captureSessionOwner(state)
-		reconcileWorktreePathForResumedTurn(ctx, state)
-
-		// A turn resumed in another worktree leaves the session's branch and
-		// base where its home has them (see hookInSessionHome).
-		// An unresolvable worktree counts as home, as before this check.
-		if worktreeRoot, wtErr := paths.WorktreeRoot(ctx); wtErr != nil || hookInSessionHome(worktreeRoot, state) {
-			captureSessionBranch(repo, state)
-			if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
-				return err
-			}
-		}
-
-		state.LastCheckpointID = ""
-		state.TurnCheckpointIDs = nil
-		return nil
+		out, err := startTurnOnExistingState(ctx, repo, state, turnStartInput{
+			sessionID: sessionID, transcriptPath: transcriptPath, userPrompt: userPrompt,
+			model: model, dedupe: dedupe, resolvedAgentType: resolvedAgentType,
+		})
+		remember, homeAgentType = out.remember, out.homeAgentType
+		return err
 	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
 	if turnStartErr == nil {
 		return nil
+	}
+	if errors.Is(turnStartErr, ErrDuplicateTurnStart) {
+		return turnStartErr
 	}
 	if !errors.Is(turnStartErr, ErrStateNotFound) && !errors.Is(turnStartErr, errPartialState) {
 		return fmt.Errorf("failed to update session state: %w", turnStartErr)
@@ -3463,12 +3462,16 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 
 	// Initialize new session (or repair a partial state). The MutateSessionState
 	// call below reloads the freshly-persisted state under lock and runs the
-	// turn-start mutations on top of it.
+	// turn-start mutations on top of it. A concurrent install for the same
+	// first prompt reaches here too, so the repeat check runs under the lock.
 	if err := s.initializeSession(ctx, repo, sessionID, resolvedAgentType, transcriptPath, userPrompt, model); err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if err := claimTurnStart(state, dedupe); err != nil {
+			return err
+		}
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -3478,6 +3481,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		captureSessionOwner(state)
 		return nil
 	})
+	if errors.Is(mutErr, ErrDuplicateTurnStart) {
+		return mutErr
+	}
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
@@ -3485,6 +3491,104 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized session",
 		slog.String("session_id", sessionID))
 	return nil
+}
+
+// turnStartInput is what startTurnOnExistingState needs from the hook.
+type turnStartInput struct {
+	sessionID, transcriptPath, userPrompt, model string
+	dedupe                                       turnDedupe
+	resolvedAgentType                            types.AgentType
+}
+
+// turnStartOutput carries the agent home to remember once the state is saved.
+type turnStartOutput struct {
+	remember      string
+	homeAgentType types.AgentType
+}
+
+// startTurnOnExistingState applies a turn start to an existing session's
+// state, under its lock. It returns errPartialState for a state without a
+// base commit, ErrMutationSkip for an adopted-away session, and
+// ErrDuplicateTurnStart for a repeat of the prompt the running turn started
+// from.
+func startTurnOnExistingState(ctx context.Context, repo *git.Repository, state *SessionState, in turnStartInput) (turnStartOutput, error) {
+	var out turnStartOutput
+	sessionID, transcriptPath, userPrompt, model, resolvedAgentType :=
+		in.sessionID, in.transcriptPath, in.userPrompt, in.model, in.resolvedAgentType
+	if state.BaseCommit == "" {
+		return out, errPartialState
+	}
+	if state.AdoptedIntoWorktreePath != "" {
+		logging.Info(logging.WithComponent(ctx, "hooks"), "skipping adopted-away source session",
+			slog.String("session_id", sessionID),
+			slog.String("adopted_into_worktree", state.AdoptedIntoWorktreePath))
+		return out, ErrMutationSkip
+	}
+	if err := claimTurnStart(state, in.dedupe); err != nil {
+		return out, err
+	}
+	if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
+			slog.String("session_id", sessionID),
+			slog.String("error", transErr.Error()))
+	}
+
+	turnID, err := id.Generate()
+	if err != nil {
+		return out, fmt.Errorf("failed to generate turn ID: %w", err)
+	}
+	state.TurnID = turnID.String()
+
+	// A transcript path is stronger evidence than both a stored owner and
+	// the current hook. Apply transcript-proven corrections first, including
+	// the empty-owner case, so a Codex correction can initialize all of its
+	// child-accounting markers atomically.
+	if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
+		logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
+			slog.String("session_id", sessionID),
+			slog.String("from", string(state.AgentType)),
+			slog.String("to", string(corrected)),
+			slog.String("transcript_path", transcriptPath))
+		if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
+			transitionSessionToCodex(state)
+		}
+		state.AgentType = corrected
+		// The recorded home belonged to the previous agent's layout.
+		state.AgentHome = ""
+	} else if state.AgentType == "" && resolvedAgentType != "" {
+		state.AgentType = resolvedAgentType
+	}
+	if model != "" {
+		state.ModelName = model
+	}
+	if userPrompt != "" {
+		state.LastPrompt = truncatePromptForStorage(userPrompt)
+	}
+	if transcriptPath != "" && state.TranscriptPath != transcriptPath {
+		state.TranscriptPath = transcriptPath
+	}
+	// Read before the turn's calls: a transcript rewritten since the last
+	// reading (a resume restoring an older copy) still reads lower than
+	// the session's total, which is how the ledger tells it apart.
+	ObserveTokenLedger(ctx, state)
+	remember := updateSessionAgentHome(ctx, state)
+	out.remember, out.homeAgentType = remember, state.AgentType
+	captureSessionOwner(state)
+	reconcileWorktreePathForResumedTurn(ctx, state)
+
+	// A turn resumed in another worktree leaves the session's branch and
+	// base where its home has them (see hookInSessionHome).
+	// An unresolvable worktree counts as home, as before this check.
+	if worktreeRoot, wtErr := paths.WorktreeRoot(ctx); wtErr != nil || hookInSessionHome(worktreeRoot, state) {
+		captureSessionBranch(repo, state)
+		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+			return out, err
+		}
+	}
+
+	state.LastCheckpointID = ""
+	state.TurnCheckpointIDs = nil
+	return out, nil
 }
 
 // captureSessionBranch records the branch HEAD currently points at into the

@@ -25,6 +25,8 @@ func init() {
 
 //nolint:revive // OpenCodeAgent is clearer than Agent in this context
 type OpenCodeAgent struct {
+	agent.GeneratedUserHooks[userPluginSource]
+
 	// CommandRunner overrides text-generation subprocess creation when non-nil.
 	CommandRunner agent.TextCommandRunner
 }

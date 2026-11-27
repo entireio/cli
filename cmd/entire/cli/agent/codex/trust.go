@@ -95,6 +95,24 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\.(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)')\]`)
 
 func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
+	records, ok := readCodexTrustRecords(configPath)
+	if !ok {
+		return nil, false
+	}
+	keys := make(map[string]struct{}, len(records))
+	for key := range records {
+		keys[key] = struct{}{}
+	}
+	return keys, true
+}
+
+// codexTrustedHashRegex matches the trusted_hash line inside one
+// `[hooks.state.<key>]` table body.
+var codexTrustedHashRegex = regexp.MustCompile(`(?m)^[ \t]*trusted_hash[ \t]*=[ \t]*"(sha256:[0-9a-f]{64})"[ \t]*(?:#.*)?$`)
+
+// readCodexTrustRecords maps each `[hooks.state.<key>]` key to the
+// trusted_hash recorded in its table ("" when the table has none).
+func readCodexTrustRecords(configPath string) (map[string]string, bool) {
 	file, err := os.Open(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
 	if err != nil {
 		return nil, false
@@ -105,20 +123,34 @@ func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
 		return nil, false
 	}
 	text := string(data)
-	keys := make(map[string]struct{})
+	records := make(map[string]string)
 	for _, m := range codexTrustStateHeaderRegex.FindAllStringSubmatchIndex(text, -1) {
+		var key string
 		if m[2] < 0 {
 			// Literal string: no escapes, the body is the key.
-			keys[text[m[4]:m[5]]] = struct{}{}
-			continue
+			key = text[m[4]:m[5]]
+		} else {
+			decoded, ok := unescapeTOMLBasicString(text[m[2]:m[3]])
+			if !ok {
+				continue
+			}
+			key = decoded
 		}
-		key, ok := unescapeTOMLBasicString(text[m[2]:m[3]])
-		if !ok {
-			continue
-		}
-		keys[key] = struct{}{}
+		records[key] = trustedHashInTable(text[m[1]:])
 	}
-	return keys, true
+	return records, true
+}
+
+// trustedHashInTable returns the trusted_hash in the table body that starts
+// at rest and ends at the next table header.
+func trustedHashInTable(rest string) string {
+	if next := strings.Index(rest, "\n["); next >= 0 {
+		rest = rest[:next]
+	}
+	if m := codexTrustedHashRegex.FindStringSubmatch(rest); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // unescapeTOMLBasicString decodes the body of a TOML basic string. TOML's

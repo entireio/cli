@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
@@ -960,6 +962,7 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 	var agentName string
 	var bootstrapOpts BootstrapOptions
 	var insecureHTTPAuth bool
+	var enableGlobal bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -974,21 +977,31 @@ Entire's hook.
 
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
-publish the repository yourself when you're ready.`,
-		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
+publish the repository yourself when you're ready.
+
+With --global, Entire is enabled in every repository you work in instead: it
+sets global_enable in your Entire user settings and adds Entire's hooks to the
+user-level config of Claude Code, Codex, Pi and OpenCode. It asks you to agree
+first (--yes agrees and prints what was agreed to) and does not set up the
+current repository.`,
+		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
+		RunE: runEnableGlobalOr(&enableGlobal, &opts.Yes, func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
 			// so it can be registered here (first, therefore run last) while
 			// the picker itself waits until every flag has been accepted.
 			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
-			// Best-effort: after a successful enable, probe and cache whether
-			// trails are enabled for the repo. A freshly bootstrapped repo has no
-			// origin yet, so this does nothing until the user adds one.
+			// After a successful enable, whichever path it took: the developer
+			// has now enabled this repository themselves, so claim it from
+			// global enable. Then, best-effort, probe and cache whether trails
+			// are enabled for the repo. A freshly bootstrapped repo has no
+			// origin yet, so the probe does nothing until the user adds one.
 			defer func() {
 				if runErr != nil {
 					return
 				}
+				claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 				cacheTrailsEnablementAfterEnable(ctx, insecureHTTPAuth)
 			}()
 
@@ -1098,9 +1111,10 @@ publish the repository yourself when you're ready.`,
 			needsIdentity := repoExisted || (bootstrap != nil && bootstrap.commit)
 			return continueEnableAfterAgentValidation(ctx, cmd, opts, selectedAgent, repoRoot, needsIdentity,
 				identityFactory(cmd.OutOrStdout(), cmd.ErrOrStderr(), insecureHTTPAuth))
-		},
+		}),
 	}
 
+	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in for Claude Code, Codex, Pi and OpenCode (sets global_enable in your Entire user settings and installs their user-level hooks)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
@@ -1115,7 +1129,7 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory+". With --global, accepts the global enable disclosure, which is still printed")
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -1265,6 +1279,7 @@ func newDisableCmd() *cobra.Command {
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
+	var disableGlobal bool
 
 	cmd := &cobra.Command{
 		Use:   "disable",
@@ -1287,8 +1302,17 @@ To completely remove Entire integrations from this repository, use --uninstall:
 An external agent's hooks live inside its plugin, so removing them means asking the
 plugin to do it. Any removal step that fails - built-in agent, external plugin, git
 hooks, or repository state - makes the uninstall exit non-zero and report that Entire
-was not fully uninstalled.`,
+was not fully uninstalled.
+
+With --global, Entire stops being enabled in every repository: global_enable is
+turned off in your Entire user settings and Entire's user-level agent hooks are
+removed. Repositories you enabled with ` + "`entire enable`" + ` stay enabled.`,
+		Annotations: map[string]string{skipGlobalEnableHooksAnnotation: skipGlobalEnableHooksEnabled},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Before --uninstall: --global with it is refused, not ignored.
+			if disableGlobal {
+				return runDisableGlobal(cmd)
+			}
 			ctx := cmd.Context()
 			if uninstall {
 				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
@@ -1304,8 +1328,23 @@ was not fully uninstalled.`,
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
+	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false and removes Entire's user-level hooks for every agent); repositories enabled with `entire enable` stay enabled")
 
 	return cmd
+}
+
+// enableUnscopedInUserSettings runs enableInUserSettings for an `entire
+// enable` that named no settings file, printing the enabled status when it
+// handled the enable.
+func enableUnscopedInUserSettings(ctx context.Context, w io.Writer, opts EnableOptions) (bool, error) {
+	if opts.UseLocalSettings || opts.UseProjectSettings {
+		return false, nil
+	}
+	handled, err := enableInUserSettings(ctx, w, true)
+	if err != nil || !handled {
+		return handled, err
+	}
+	return true, printEnabledStatus(ctx, w, opts)
 }
 
 func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
@@ -1385,6 +1424,16 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 	// to the existing project settings.json but wrote the enabled flag to
 	// settings.local.json, leaving the project file the user disabled still
 	// enabled=false.
+	return finishEnableOnConfiguredRepo(ctx, w, opts, usedSetupFlow)
+}
+
+// finishEnableOnConfiguredRepo turns Entire on in an already configured
+// repository: through the user settings file while global enable is on (see
+// enableInUserSettings), else in the resolved settings file.
+func finishEnableOnConfiguredRepo(ctx context.Context, w io.Writer, opts EnableOptions, usedSetupFlow bool) error {
+	if handled, err := enableUnscopedInUserSettings(ctx, w, opts); handled || err != nil {
+		return err
+	}
 	targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 	useProject := targetFile == settings.EntireSettingsFile
 
@@ -1690,11 +1739,58 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
+	// A repository on only through global enable, or claimed in the user
+	// settings file, is turned off there, so every clone and worktree of it
+	// stays off; the per-worktree local file would leave the others recording.
+	globalOnly := false
+	if s, err := LoadEntireSettings(ctx); err == nil && (s.EnabledOnlyByGlobal() || reposEntryEnablesHere(ctx)) {
+		if !useProjectSettings {
+			if err := disableInUserSettings(ctx, w, s.EnabledOnlyByGlobal()); err != nil {
+				return err
+			}
+			// A local file still enabling this worktree outranks the
+			// entry; turn it off too, below.
+			if after, err := LoadEntireSettings(ctx); err != nil || !after.Enabled {
+				return nil //nolint:nilerr // the entry is written; a reload failure changes nothing
+			}
+		}
+		globalOnly = s.EnabledOnlyByGlobal()
+	}
+
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
+	if globalOnly {
+		// Keep the local files beside the committed one just written out of
+		// git, in a repository that may have no .entire/.gitignore yet. After
+		// the write, so the file no longer ignores itself and can be committed.
+		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
+			logging.Debug(ctx, "disable: could not update .entire/.gitignore", slog.String("error", err.Error()))
+		}
+	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
+	return nil
+}
+
+// reposEntryEnablesHere reports whether this repository's `repos` entry in
+// the user settings file sets enabled: true.
+func reposEntryEnablesHere(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	return err == nil && settings.UserReposEntryEnables(ctx, root)
+}
+
+// disableInUserSettings writes enabled: false to this repository's `repos`
+// entry, for every clone and worktree.
+func disableInUserSettings(ctx context.Context, w io.Writer, globalOnly bool) error {
+	key, err := setRepoEnabledHere(ctx, false)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Entire is now disabled in %s (repos in %s).\n", describeRepoKey(key), usersettings.Path())
+	if globalOnly {
+		fmt.Fprintln(w, "global enable stays on for your other repositories.")
+	}
 	return nil
 }
 
@@ -2859,6 +2955,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			hookState:         agHookState,
 			geminiHooks:       geminiHooks,
 			geminiHooksErr:    geminiHooksErr,
+			userTierExclusion: userTierKeepsRepoOn(ctx),
 		})
 		if err != nil {
 			return err
@@ -2875,7 +2972,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// successes to stdout, warnings to stderr via the printer — handles its
 	// errors, and returns only whether it succeeded. ok is the single fact
 	// tracked across the run; the steps are otherwise isolated from each other.
-	ok := uninstallAgentHooks(ctx, p, repoRoot, agHookState)
+	ok := excludeFromUserTier(ctx, p)
+	ok = uninstallAgentHooks(ctx, p, repoRoot, agHookState) && ok
 	ok = uninstallRetiredGeminiHooks(p, repoRoot) && ok
 	ok = uninstallGitHooks(ctx, p) && ok
 	ok = uninstallSessionStates(ctx, p) && ok
@@ -2890,6 +2988,29 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	p.successVerdict("Entire has been removed from this repository.")
 	p.farewell()
 	return nil
+}
+
+// excludeFromUserTier turns this repository off in the user settings file
+// when that file would otherwise keep it on: with global enable on, or a
+// `repos` entry enabling it, the user-level agent hooks would treat the
+// repository as configured, reinstall its git hooks and resume recording.
+func excludeFromUserTier(ctx context.Context, p *uninstallPrinter) bool {
+	if !userTierKeepsRepoOn(ctx) {
+		return true
+	}
+	key, err := setRepoEnabledHere(ctx, false)
+	if err != nil {
+		p.warn("Could not turn Entire off for this repository in %s: %v", usersettings.Path(), err)
+		return false
+	}
+	p.step("Turned Entire off for %s (repos in %s)", describeRepoKey(key), usersettings.Path())
+	return true
+}
+
+// userTierKeepsRepoOn reports whether the user settings file enables this
+// repository, so uninstall must write an exclusion for it.
+func userTierKeepsRepoOn(ctx context.Context) bool {
+	return settings.UserTierEnablesEverywhere(ctx) || reposEntryEnablesHere(ctx)
 }
 
 // uninstallGitHooks removes Entire's git hooks and reports what it did.
@@ -3002,6 +3123,9 @@ type uninstallSummary struct {
 	// checked.
 	geminiHooks    bool
 	geminiHooksErr error
+	// userTierExclusion reports that uninstall will write enabled: false to
+	// this repository's `repos` entry in the user settings file.
+	userTierExclusion bool
 }
 
 // confirmUninstall prints the removal summary and asks the user to confirm.
@@ -3011,7 +3135,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	p.blank()
 	p.plain("This will completely remove Entire from this repository:")
 	p.blank()
-	rows := make([]explainRow, 0, 7)
+	rows := make([]explainRow, 0, 8)
 	if len(summary.hookState.installed) > 0 {
 		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
@@ -3037,6 +3161,9 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
+	}
+	if summary.userTierExclusion {
+		rows = append(rows, explainRow{Label: "user settings", Value: "turn Entire off in " + usersettings.Path() + " for every clone and worktree of this repository"})
 	}
 	fmt.Fprint(p.w, p.out.metadataRows(rows))
 	p.blank()

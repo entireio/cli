@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -103,7 +104,80 @@ func removeLegacyPlugin(ctx context.Context) (bool, error) {
 // that shelled out to a path inside the working tree would run whatever the
 // checked-out branch contains.
 func renderPlugin() string {
-	return pluginTemplate
+	return renderPluginFor(false)
+}
+
+// User-level placeholders: each is a whole template line, removed from the
+// project render (which stays byte-identical to what earlier CLIs wrote) and
+// replaced in the user-level one.
+const (
+	userLevelImportsLine     = "//__ENTIRE_USER_LEVEL_IMPORTS__\n"
+	userLevelStepAsideV1Line = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V1__\n"
+	userLevelStepAsideV2Line = "  //__ENTIRE_USER_LEVEL_STEP_ASIDE_V2__\n"
+)
+
+// renderPluginFor renders the plugin, the user-level variant when userLevel.
+//
+// The user-level variant does nothing where OpenCode also runs a project's
+// own Entire plugin: OpenCode finds .opencode directories by searching up
+// from the directory it serves to the repository root, so the same search
+// runs here, per plugin instance (OpenCode 1) or location (OpenCode 2).
+//
+// Seam for later work: a stored injection (a Pi-style session message rather
+// than the system-prompt transform both variants use today) belongs in the
+// shared hook code, so both variants get it; nothing here is user-level only
+// beyond the step-aside.
+func renderPluginFor(userLevel bool) string {
+	if userLevel {
+		return userPluginRender()
+	}
+	return projectPluginRender()
+}
+
+// The renders never change within a process, so each is built once.
+var (
+	projectPluginRender = sync.OnceValue(func() string {
+		return agent.RenderUserLevel(pluginTemplate, false, map[string]string{
+			userLevelImportsLine: "", userLevelStepAsideV1Line: "", userLevelStepAsideV2Line: "",
+		})
+	})
+	userPluginRender = sync.OnceValue(func() string {
+		return agent.MarkUserLevel(agent.RenderUserLevel(pluginTemplate, true, map[string]string{
+			userLevelImportsLine:     userLevelPluginPrelude(),
+			userLevelStepAsideV1Line: "  if (userLevelSteppedAside(directory, false)) return {}\n",
+			userLevelStepAsideV2Line: "  if (userLevelSteppedAside(ctx.location.directory, true)) return\n",
+		}), entireMarker)
+	})
+)
+
+// userLevelPluginPrelude is the user-level code before the plugin's own. Any
+// project Entire plugin this OpenCode runs counts (see agent.ProjectCopyCheck):
+// OpenCode 2 loads only the plugin directory, not the legacy plugins one, and
+// runs only a copy that exports setup.
+func userLevelPluginPrelude() string {
+	return `import { existsSync } from "node:fs"
+import { dirname, join } from "node:path"
+
+` + agent.UserLevelHeader("", "plugin", userHooksVersion) + agent.ProjectCopyCheck(entireMarker) + `
+function userLevelSteppedAside(start: string, openCode2: boolean): boolean {
+  let self = ""
+  try {
+    self = fileURLToPath(import.meta.url)
+  } catch {}
+  const subs = openCode2 ? ["plugin"] : ["plugin", "plugins"]
+  let dir = start
+  for (;;) {
+    for (const sub of subs) {
+      const candidate = join(dir, ".opencode", sub, "entire.ts")
+      if (candidate !== self && isEntireProjectCopy(candidate, openCode2)) return true
+    }
+    if (existsSync(join(dir, ".git"))) return false
+    const parent = dirname(dir)
+    if (parent === dir) return false
+    dir = parent
+  }
+}
+`
 }
 
 // InstallHooks writes the Entire plugin file to .opencode/plugin/entire.ts,

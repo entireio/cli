@@ -66,6 +66,10 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
 
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		fmt.Fprintf(w, "  ignoring user settings: %v\n", err)
+	}
+
 	// Get absolute paths for settings files
 	settingsPath, err := paths.AbsPath(ctx, EntireSettingsFile)
 	if err != nil {
@@ -82,8 +86,11 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return err //nolint:wrapcheck // already contextual; a bare %w only changes the concrete type
 	}
 
-	if !projectExists && !localExists {
+	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		if strategy.AnyGitHookInstalled(ctx) {
+			fmt.Fprintln(w, "  "+leftoverGitHooksHint)
+		}
 		return nil
 	}
 
@@ -101,12 +108,37 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	writeRefusedAgentHomes(w)
+	writeUserSettingsRejections(w, s)
+	writeCommittedKeysIgnoredForGlobalEnable(w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// enabledByGlobal is status --json's enabled_by for a repository on only
+// through global enable.
+const enabledByGlobal = "global"
+
+// userTierConfiguresWorktree reports whether the user settings file configures
+// this repository. Both .entire files live in the WORKTREE, so a repository
+// configured through the user settings file has neither in a freshly added
+// worktree, and answering from them alone reports "not set up" for a
+// repository whose hooks are installed and running.
+func userTierConfiguresWorktree(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	return err == nil && settings.UserTierConfiguresRepo(ctx, root)
+}
+
+// writeUserSettingsRejections names each part of the user settings file that
+// was dropped. Nothing else says so, and the user can see the setting in their
+// own file.
+func writeUserSettingsRejections(w io.Writer, s *settings.EntireSettings) {
+	for _, reason := range s.UserLayerRejections() {
+		fmt.Fprintf(w, "  ignoring user setting: %s\n", reason)
+	}
 }
 
 // writeRefusedAgentHomes names every agent relocation variable Entire refuses.
@@ -116,6 +148,16 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 func writeRefusedAgentHomes(w io.Writer) {
 	for _, err := range agent.RefusedRelocationEnvVars() {
 		fmt.Fprintf(w, "  ignoring agent home: %v\n", err)
+	}
+}
+
+// writeCommittedKeysIgnoredForGlobalEnable names the committed settings a
+// repository enabled only through global enable does not apply. Without it a
+// setting the user can read in .entire/settings.json is silently inert.
+func writeCommittedKeysIgnoredForGlobalEnable(w io.Writer, s *EntireSettings) {
+	if keys := s.CommittedKeysIgnoredForGlobalEnable(); len(keys) > 0 {
+		fmt.Fprintf(w, "  ignoring %s from %s: this repository is enabled only through global enable (run 'entire enable' here to use them)\n",
+			strings.Join(keys, ", "), EntireSettingsFile)
 	}
 }
 
@@ -142,6 +184,8 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
 	writeRefusedAgentHomes(w)
+	writeUserSettingsRejections(w, effectiveSettings)
+	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -218,6 +262,9 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(sty.render(sty.green, "●"))
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Enabled"))
+		if s.EnabledOnlyByGlobal() {
+			b.WriteString(" (global enable)")
+		}
 	} else {
 		b.WriteString(sty.render(sty.red, "○"))
 		b.WriteString(" ")
@@ -235,11 +282,22 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 
 	// Show enabled agents
 	if s.Enabled {
-		if displayNames := InstalledAgentDisplayNames(ctx); len(displayNames) > 0 {
+		agents := resolveStatusAgents(ctx)
+		if len(agents.project) > 0 {
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.dim, "  Agents · "))
 
-			b.WriteString(strings.Join(displayNames, ", "))
+			b.WriteString(strings.Join(agents.project, ", "))
+		}
+		if len(agents.userLevel) > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.dim, "  User-level hooks · "))
+			b.WriteString(strings.Join(agents.userLevel, ", "))
+		}
+		if len(agents.shadowed) > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.dim, "  Project hooks take over from user-level hooks · "))
+			b.WriteString(strings.Join(agents.shadowed, ", "))
 		}
 
 		// Warn when installed hooks are out of date. Status stays read-only and
@@ -1172,6 +1230,22 @@ type statusJSON struct {
 	// CODEX_HOME, ...) set to a value Entire refuses, one message per variable.
 	// Resume and attach fail for that agent until it is fixed.
 	RefusedAgentHomes []string `json:"refused_agent_homes,omitempty"`
+	// UserSettingsIgnored lists the parts of the user settings file that were
+	// dropped, one message each.
+	UserSettingsIgnored []string `json:"user_settings_ignored,omitempty"`
+	// UserSettingsError is why the whole user settings file is ignored (it
+	// does not parse, or is a symlink); global_enable and repos entries in it
+	// then do not apply. Reported set up or not.
+	UserSettingsError string `json:"user_settings_error,omitempty"`
+	// EnabledBy is "global" when the repository is on only through global
+	// enable (`entire enable` was never run here).
+	EnabledBy string `json:"enabled_by,omitempty"`
+	// UserHooks lists the agents whose Entire hooks are installed in their
+	// user-level config (global enable on).
+	UserHooks []string `json:"user_hooks,omitempty"`
+	// UserHooksShadowed lists the agents among UserHooks whose project hooks
+	// in this repository take over from the user-level ones.
+	UserHooksShadowed []string `json:"user_hooks_shadowed,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1288,8 +1362,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
 
-	if !projectExists && !localExists {
-		return writeJSON(statusJSON{Error: "not set up"})
+	userSettingsErr := userSettingsErrorText(ctx)
+	if !projectExists && !localExists && !userTierConfiguresWorktree(ctx) {
+		return writeJSON(statusJSON{Error: "not set up", UserSettingsError: userSettingsErr})
 	}
 
 	s, err := LoadEntireSettings(ctx)
@@ -1302,15 +1377,17 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
+		// Before the Enabled gate: a dropped `enabled` is one of the
+		// things a user would need to see.
+		UserSettingsIgnored: s.UserLayerRejections(),
+		UserSettingsError:   userSettingsErr,
 	}
 	for _, refusal := range agent.RefusedRelocationEnvVars() {
 		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
 	}
 
 	if s.Enabled {
-		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
-			result.Agents = names
-		}
+		fillStatusAgentsJSON(ctx, s, &result)
 
 		result.SecretScanners = nonDefaultSecretScanners(s)
 
@@ -1404,4 +1481,26 @@ func legacyShadowBranchCount(ctx context.Context) int {
 		return 0
 	}
 	return len(branches)
+}
+
+// fillStatusAgentsJSON sets status --json's agents, user_hooks and
+// enabled_by.
+func fillStatusAgentsJSON(ctx context.Context, s *EntireSettings, result *statusJSON) {
+	agents := resolveStatusAgents(ctx)
+	if len(agents.project) > 0 {
+		result.Agents = agents.project
+	}
+	result.UserHooks = agents.userLevel
+	result.UserHooksShadowed = agents.shadowed
+	if s.EnabledOnlyByGlobal() {
+		result.EnabledBy = enabledByGlobal
+	}
+}
+
+// userSettingsErrorText is why the user settings file is ignored, or "".
+func userSettingsErrorText(ctx context.Context) string {
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		return err.Error()
+	}
+	return ""
 }

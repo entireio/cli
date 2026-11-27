@@ -637,6 +637,26 @@ comments at each site say which case applies:
   back to "Unknown" and signing was skipped. Scope is global + system only;
   `.git/config` is served by `r.Storer.Config()` and never reaches this. Its
   mutating methods fail closed.
+- **User-level agent config (global enable)** — `agent.UserHookInstaller`
+  implementations write the developer's own agent config: Claude Code's
+  `$CLAUDE_CONFIG_DIR/settings.json` (else `~/.claude/settings.json`), Codex's
+  `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`, resolved by
+  `resolveCodexHome`, never by project hook discovery), Pi's
+  `$PI_CODING_AGENT_DIR/extensions/entire/index.ts` (else `~/.pi/agent/...`)
+  and OpenCode's `$XDG_CONFIG_HOME/opencode/plugin/entire.ts` (else
+  `~/.config/opencode/...`). These paths are the developer's own (often a
+  dotfiles checkout), not ones a repository supplies, so `agent.UserConfigFile`
+  follows a symlinked file to its target, keeping its mode, and refuses a link
+  that does not resolve; Pi's and OpenCode's directories under the agent's
+  home are created with a plain `MkdirAll`. Nothing is created when the agent's
+  home is absent. Writes take one lock, `user-hooks.lock` in the `userdirs`
+  config root, and record what Entire created (files, directories) and Claude
+  Code's hook version in `user-hooks.json` there, written through
+  `jsonutil.WriteFileAtomicIn`; nothing of Entire's own goes in the agent's
+  directory. Removal deletes only directories that record names, and never a
+  symlinked directory. This covers those files only,
+  not worktree agent configs, which keep the rules above; the project copies
+  are never written by global enable.
 - **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a
   repo path, so neither can build its own store, and the path they receive was
   already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).

@@ -2,12 +2,14 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -397,4 +399,55 @@ func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
 	}
 	events, err := declaredCodexEventsFromDocument(document)
 	return events, err == nil
+}
+
+// Golden hashes recorded by Codex 0.172 for Entire's project Stop and
+// SessionStart hooks: the reproduction must match Codex byte for byte.
+func TestCodexHookDeclarationHash_MatchesCodex(t *testing.T) {
+	t.Parallel()
+	stop := `{"type":"command","command":"sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex stop'","timeout":30}`
+	hash, ok := codexHookDeclarationHash("Stop", "stop", nil, json.RawMessage(stop))
+	require.True(t, ok)
+	assert.Equal(t, "sha256:b667168b4504bb7b99c5afea6af0dbb0f45898bf61c6dabdee686a00e6dae992", hash)
+
+	sessionStart := `{"type":"command","command":"sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; if ! entire --version </dev/null >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled, but the entire command on PATH failed to run, so this session may not be captured. Check that entire --version works in this shell. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks codex session-start'","timeout":30}`
+	hash, ok = codexHookDeclarationHash("SessionStart", "session_start", nil, json.RawMessage(sessionStart))
+	require.True(t, ok)
+	assert.Equal(t, "sha256:4e9a590c1223e17801c538ebafed7ac0d311ff0c92ba236c873e75f6d88e18ca", hash)
+}
+
+// Fields the reproduction does not model make the hash unknown, never a guess.
+func TestCodexHookDeclarationHash_UnmodeledFieldsAreUnknown(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		`{"type":"command","command":"entire hooks codex stop","onFailure":"block"}`,
+		`{"type":"mcp_tool","server":"s","tool":"t"}`,
+		"{\"type\":\"command\",\"command\":\"entire \\u2028 stop\"}",
+		`not json`,
+	} {
+		_, ok := codexHookDeclarationHash("Stop", "stop", nil, json.RawMessage(raw))
+		assert.False(t, ok, raw)
+	}
+}
+
+func TestReadCodexTrustRecords_CapturesTrustedHashPerTable(t *testing.T) {
+	t.Parallel()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	hash := "sha256:" + strings.Repeat("a", 64)
+	configTOML := `[hooks.state."/repo/.codex/hooks.json:stop:0:0"]
+trusted_hash = "` + hash + `"
+
+[hooks.state."/repo/.codex/hooks.json:session_start:0:0"]
+enabled = true
+
+[other]
+trusted_hash = "sha256:` + strings.Repeat("b", 64) + `"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configTOML), 0o600))
+	records, ok := readCodexTrustRecords(configPath)
+	require.True(t, ok)
+	assert.Equal(t, map[string]string{
+		"/repo/.codex/hooks.json:stop:0:0":          hash,
+		"/repo/.codex/hooks.json:session_start:0:0": "",
+	}, records)
 }

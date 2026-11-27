@@ -372,19 +372,12 @@ func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.A
 	}
 	defer root.Close()
 
-	f, oErr := root.OpenFile(sessionID+".agent", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if oErr != nil {
-		if errors.Is(oErr, os.ErrExist) {
-			// First-writer-wins: another caller already claimed this session.
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to create agent hint file: %w", oErr)
+	// First-writer-wins: another caller may already have claimed this session.
+	created, err = osroot.ClaimOnceMarker(root, sessionID+".agent", string(agentType))
+	if err != nil {
+		return false, fmt.Errorf("failed to create agent hint file: %w", err)
 	}
-	defer f.Close()
-	if _, wErr := f.WriteString(string(agentType)); wErr != nil {
-		return false, fmt.Errorf("failed to write agent hint file: %w", wErr)
-	}
-	return true, nil
+	return created, nil
 }
 
 // ClaimSessionStartBanner records that the SessionStart banner has been emitted
@@ -410,15 +403,11 @@ func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed boo
 	}
 	defer root.Close()
 
-	f, oErr := root.OpenFile(sessionID+".banner", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if oErr != nil {
-		if errors.Is(oErr, os.ErrExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to create banner marker file: %w", oErr)
+	claimed, err = osroot.ClaimOnceMarker(root, sessionID+".banner", "")
+	if err != nil {
+		return false, fmt.Errorf("failed to create banner marker file: %w", err)
 	}
-	_ = f.Close()
-	return true, nil
+	return claimed, nil
 }
 
 // LoadAgentTypeHint reads the agent type hint written by SessionStart.
