@@ -64,6 +64,10 @@ func TestMain(m *testing.M) {
 		// security allowlist should not be widened for test convenience.
 		// testing.Testing() is false in the spawned binary, so it is told here.
 		"ENTIRE_TEST_ALLOW_FILE_REMOTES": "1",
+		// Cross-repo sweeps finish in the foreground, so a test that reads
+		// the links right after turn end does not race a detached child
+		// that a loaded parallel run would otherwise hand them to.
+		"ENTIRE_TEST_CROSS_REPO_SYNC_BUDGET": "60s",
 	}
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {
