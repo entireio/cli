@@ -15,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 )
 
@@ -33,6 +34,9 @@ type PendingCheckpoint struct {
 // InitRepo initializes a git repository in the given directory with test user config.
 func InitRepo(t *testing.T, repoDir string) {
 	t.Helper()
+	t.Cleanup(func() {
+		osroot.ForgetTree(repoDir)
+	})
 
 	repo, err := git.PlainInit(repoDir, false)
 	if err != nil {
