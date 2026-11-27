@@ -31,21 +31,7 @@ func setupFindingReplyTest(t *testing.T, discussionID string, thread http.Handle
 // read through its review reports it (full).
 func setupFindingReplyTestListing(t *testing.T, listed, full string, thread http.HandlerFunc) {
 	t.Helper()
-	setupFindingReplyTestAt(t, "", listed, full, thread)
-}
-
-// setupFindingReplyTestAt is setupFindingReplyTestListing with the project
-// trail's server URL; empty leaves the trail without one.
-func setupFindingReplyTestAt(t *testing.T, trailURL, listed, full string, thread http.HandlerFunc) {
-	t.Helper()
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		if trailURL != "" && r.Method == http.MethodGet && (r.URL.Path == "/api/v1/gh/acme/trails/42" || r.URL.Path == projectTrailTestPath) {
-			item := workingProjectTestResource()
-			item.URL = trailURL
-			w.Header().Set("ETag", `W/"parent-version"`)
-			assert.NoError(t, json.NewEncoder(w).Encode(item))
-			return
-		}
 		if !serveWorkingProjectRead(t, w, r) {
 			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -263,48 +249,4 @@ func TestTrailFindingShow_DoesNotReadAThreadIDThatIsNotOnePathSegment(t *testing
 		assert.Contains(t, out, "Finding body")
 		assert.Contains(t, errOut, "invalid reply thread ID", "thread %q", id)
 	}
-}
-
-// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
-// webOpenURL seam and client constructors.
-func TestTrailFindingShow_Web(t *testing.T) {
-	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
-	setupFindingReplyTest(t, findingReplyTestDiscussion, func(_ http.ResponseWriter, r *http.Request) {
-		t.Errorf("finding show --web must not read replies: %s %s", r.Method, r.URL.Path)
-	})
-
-	t.Run("opens the trail page", func(t *testing.T) {
-		// Neither the fixture's project trail nor its change carries a server
-		// URL, so this is the fallback 'trail show --web' builds too. The
-		// branch is not part of it, so no branch name can break the URL.
-		const page = "https://web.example/gh/acme/widget/trails/7"
-		opened := stubWebOpenURL(t, nil)
-		out, errOut, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme", "--web")
-		require.NoError(t, err)
-		assert.Equal(t, page+"\n", out)
-		assert.Empty(t, errOut)
-		assert.Equal(t, []string{page}, *opened)
-	})
-
-	t.Run("opens the change page under a project trail with a URL", func(t *testing.T) {
-		// The same page 'trail show --web' opens for this change.
-		setupFindingReplyTestAt(t, "https://web.example/gh/acme/-/trails/42?view=intent#top", findingReplyTestDiscussion, findingReplyTestDiscussion,
-			func(_ http.ResponseWriter, r *http.Request) {
-				t.Errorf("finding show --web must not read replies: %s %s", r.Method, r.URL.Path)
-			})
-		const page = "https://web.example/gh/acme/-/trails/42/changes/widget/7?view=intent"
-		opened := stubWebOpenURL(t, nil)
-		out, _, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme", "--web")
-		require.NoError(t, err)
-		assert.Equal(t, page+"\n", out)
-		assert.Equal(t, []string{page}, *opened)
-	})
-
-	t.Run("an unknown finding still errors", func(t *testing.T) {
-		opened := stubWebOpenURL(t, nil)
-		out, _, err := executeProjectTrailTest(t, "finding", "show", "widget/7", "no-such-finding", "--project", "gh/acme", "--web")
-		require.Error(t, err)
-		assert.Empty(t, out)
-		assert.Empty(t, *opened)
-	})
 }

@@ -73,18 +73,6 @@ type trailReviewTarget struct {
 	Owner string
 	Repo  string
 	Trail api.TrailResource
-	// WebURL is the page --web opens when it is not the repo trail's own:
-	// in project mode, the change's page under its project trail.
-	WebURL string
-}
-
-// webURL is the page 'finding show --web' opens: the mode's own page when it
-// set one, otherwise the trail's server URL or the fallback 'trail show' uses.
-func (t trailReviewTarget) webURL() string {
-	if u := strings.TrimSpace(t.WebURL); u != "" {
-		return u
-	}
-	return trailDisplayURL(t.Trail, t.Host, t.Owner, t.Repo)
 }
 
 func newTrailFindingCmd(mode *trailMode) *cobra.Command {
@@ -224,12 +212,7 @@ func newTrailReviewShowCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "show [<trail>] <finding-id>",
 		Short: "Show a finding",
-		Long: `Show a finding and its replies.
-
-With --web, open the finding's trail in the browser instead of printing the
-finding. A finding has no page of its own, so this is the page 'trail show
---web' opens: the trail's page, or the change's page under a project trail.`,
-		Args: cobra.RangeArgs(1, 2),
+		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector, commentID, err := parseTrailSelectorAndCommentID(args, targetOpts.Selector)
 			if err != nil {
@@ -238,7 +221,6 @@ finding. A finding has no page of its own, so this is the page 'trail show
 			return runTrailReviewShow(cmd, targetOpts.Mode, selector, commentID)
 		},
 	}
-	addWebFlag(cmd)
 	return cmd
 }
 
@@ -426,9 +408,6 @@ func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, co
 	if err != nil {
 		return err
 	}
-	if webRequested(cmd) {
-		return openInWeb(cmd, target.webURL())
-	}
 	if hydrated, _, hydrateErr := hydrateTrailReviewCommentWithState(cmd.Context(), client, target.Trail.ID, comment); hydrateErr == nil {
 		comment = hydrated
 	}
@@ -534,13 +513,7 @@ func projectTrailReviewTarget(cmd *cobra.Command, selector string, localOnly boo
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}
-	// The same page 'trail show --web' opens for this change. The working
-	// context has verified the change's number and repository, so the page is
-	// named from those; empty when the project trail has no URL, which leaves
-	// the repo trail's page.
-	change, _ := trailChangeSelectorFor(api.ChangeSummary{Repository: selected.Repo, Number: selected.Work.Number})
-	page := projectTrailChangeURL(selected.Parent.URL, change)
-	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work, WebURL: page}, nil
+	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work}, nil
 }
 
 func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
