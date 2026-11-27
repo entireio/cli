@@ -560,7 +560,7 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("session %s has no transcript path recorded", state.SessionID))
 	}
 
-	path, err := strategy.ResolveTranscriptPath(state)
+	path, err := strategy.ResolveTranscriptPath(ctx, state)
 	if err != nil {
 		cmd.SilenceUsage = true
 		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("transcript unavailable: %w", err))

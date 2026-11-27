@@ -29,7 +29,7 @@ func TestResolveTranscriptPath_FileExists(t *testing.T) {
 		AgentType:      agent.AgentTypeCursor,
 	}
 
-	resolved, err := resolveTranscriptPath(state)
+	resolved, err := resolveTranscriptPath(t.Context(), state)
 	if err != nil {
 		t.Fatalf("resolveTranscriptPath() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestResolveTranscriptPath_ReResolvesToNestedLayout(t *testing.T) {
 		AgentType:      agent.AgentTypeCursor,
 	}
 
-	resolved, err := resolveTranscriptPath(state)
+	resolved, err := resolveTranscriptPath(t.Context(), state)
 	if err != nil {
 		t.Fatalf("resolveTranscriptPath() error = %v", err)
 	}
@@ -103,7 +103,7 @@ func TestResolveTranscriptPath_FileNotFoundAndCannotResolve(t *testing.T) {
 		AgentType:      agent.AgentTypeCursor,
 	}
 
-	_, err := resolveTranscriptPath(state)
+	_, err := resolveTranscriptPath(t.Context(), state)
 	if err == nil {
 		t.Fatal("resolveTranscriptPath() expected error, got nil")
 	}
@@ -126,7 +126,7 @@ func TestResolveTranscriptPath_UnknownAgentFallsThrough(t *testing.T) {
 		AgentType:      "Unknown Agent",
 	}
 
-	_, err := resolveTranscriptPath(state)
+	_, err := resolveTranscriptPath(t.Context(), state)
 	if err == nil {
 		t.Fatal("resolveTranscriptPath() expected error, got nil")
 	}
@@ -140,7 +140,7 @@ func TestResolveTranscriptPath_EmptyPath(t *testing.T) {
 		AgentType:      agent.AgentTypeCursor,
 	}
 
-	_, err := resolveTranscriptPath(state)
+	_, err := resolveTranscriptPath(t.Context(), state)
 	if err == nil {
 		t.Fatal("resolveTranscriptPath() expected error for empty path, got nil")
 	}
@@ -163,7 +163,7 @@ func TestResolveTranscriptPath_DirectoryPathReturnsAsIs(t *testing.T) {
 		AgentType:      agent.AgentTypeCursor,
 	}
 
-	resolved, err := resolveTranscriptPath(state)
+	resolved, err := resolveTranscriptPath(t.Context(), state)
 	if err != nil {
 		t.Fatalf("resolveTranscriptPath() error = %v", err)
 	}
@@ -191,7 +191,7 @@ func TestResolveTranscriptPath_ClaudeCodeNoReResolution(t *testing.T) {
 		AgentType:      agent.AgentTypeClaudeCode,
 	}
 
-	_, err := resolveTranscriptPath(state)
+	_, err := resolveTranscriptPath(t.Context(), state)
 	if err == nil {
 		t.Fatal("resolveTranscriptPath() expected error, got nil")
 	}
