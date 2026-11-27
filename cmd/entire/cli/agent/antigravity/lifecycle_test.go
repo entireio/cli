@@ -183,9 +183,10 @@ func TestParseHookEvent_Stop_FullyIdleTrueEmitsTurnEnd(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_Stop_FullyIdleFalseReturnsNil(t *testing.T) {
+// fullyIdle=false is a pause, not the turn's end: subagents are still running,
+// and agy may send no further Stop once they finish.
+func TestParseHookEvent_Stop_FullyIdleFalseIsAPause(t *testing.T) {
 	t.Parallel()
-	// Synthesize a stop payload with fullyIdle=false
 	payload := StopPayload{
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
@@ -202,8 +203,8 @@ func TestParseHookEvent_Stop_FullyIdleFalseReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev != nil {
-		t.Errorf("expected nil event for stop with fullyIdle=false, got %+v", ev)
+	if ev == nil || ev.Type != agent.TurnEnd || !ev.AwaitingSubagents {
+		t.Errorf("expected a TurnEnd marked AwaitingSubagents for fullyIdle=false, got %+v", ev)
 	}
 }
 
@@ -331,7 +332,9 @@ func TestParseHookEvent_PreToolUse_ReplaceFileContent(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_PreToolUse_NonMutatingToolReturnsNil(t *testing.T) {
+// A non-mutating tool is still a ToolUse, with no files: a subagent's first
+// tool call, whatever it is, is where it is first marked as one.
+func TestParseHookEvent_PreToolUse_NonMutatingToolHasNoFiles(t *testing.T) {
 	t.Parallel()
 	// Use the testdata fixture which uses run_command (non-mutating)
 	data, err := os.ReadFile("testdata/hook_stdin_pre_tool_use.json")
@@ -343,8 +346,8 @@ func TestParseHookEvent_PreToolUse_NonMutatingToolReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev != nil {
-		t.Errorf("expected nil event for non-mutating tool run_command, got %+v", ev)
+	if ev == nil || ev.Type != agent.ToolUse || len(ev.ModifiedFiles)+len(ev.NewFiles) != 0 {
+		t.Errorf("expected a ToolUse without files for non-mutating tool run_command, got %+v", ev)
 	}
 }
 

@@ -298,3 +298,53 @@ func TestFactoryDroidTopLevelSessionStillCheckpoints(t *testing.T) {
 		t.Errorf("a top-level session must not be recorded as a task, got %+v", state.TaskRecords)
 	}
 }
+
+// TestFactoryDroidWorkerFileCommittedMidTurn covers a commit made while a
+// Worker is still in its turn: the Worker wrote a file but has not reached its
+// Stop. Its session is already marked as a subagent (its transcript names the
+// parent from its session_start line), so it never links a commit itself; the
+// commit must still get a checkpoint that attributes the file to the parent.
+func TestFactoryDroidWorkerFileCommittedMidTurn(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+	env.WriteFile(".gitignore", ".entire/\n")
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd(".gitignore")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	parent := env.NewFactoryDroidSession()
+	appendLines(t, parent.TranscriptPath, `{"type":"session_start","id":"`+parent.ID+`"}`)
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmitWithTranscript(parent.ID, parent.TranscriptPath))
+
+	const toolUseID = "toolu_worker_midturn"
+	worker := env.NewFactoryDroidSession()
+	appendLines(t, worker.TranscriptPath,
+		`{"type":"message","id":"w1","message":{"role":"user","content":[{"type":"text","text":"Write docs/summary.md"}]}}`)
+	worker.MarkAsWorkerSession(parent.ID, toolUseID, "worker: Write the summary")
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmitWithTranscript(worker.ID, worker.TranscriptPath))
+
+	// The Worker writes the file during its turn; no Stop yet.
+	env.WriteFile("docs/summary.md", "A short summary.\n")
+	appendLines(t, worker.TranscriptPath,
+		`{"type":"message","id":"w2","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_w1","name":"Write","input":{"file_path":"docs/summary.md","content":"A short summary.\n"}}]}}`)
+
+	env.GitCommitWithHooks("Add summary", "docs/summary.md")
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	require.NotEmpty(t, checkpointID, "the mid-turn commit must carry a checkpoint trailer")
+	summaryRaw, ok := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(checkpointID))
+	require.True(t, ok, "the checkpoint summary must exist")
+	var summary checkpoint.CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryRaw), &summary))
+	taskRaw, hasTask := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointTaskFilePath(checkpointID, toolUseID, "task.json"))
+	var task checkpoint.TaskRecord
+	if hasTask {
+		require.NoError(t, json.Unmarshal([]byte(taskRaw), &task))
+	}
+	require.True(t, containsFile(summary.FilesTouched, "docs/summary.md") || containsFile(task.Files, "docs/summary.md"),
+		"the Worker's file must be attributed in the checkpoint: summary %s, task %s", summaryRaw, taskRaw)
+}
