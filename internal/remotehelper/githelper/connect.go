@@ -277,6 +277,9 @@ func postRound(ctx context.Context, t Transport, stdout io.Writer, wantsBuf, hav
 
 const nakPkt = "0008NAK\n"
 
+// packHeader starts a pack file, which no pkt-line length can.
+const packHeader = "PACK"
+
 // roundTail keeps the last bytes of a streamed round response. The server
 // sets the response size, so the helper does not buffer the round.
 type roundTail struct {
@@ -335,17 +338,12 @@ func relaySingleACKRound(w io.Writer, r io.Reader, acks *ackState, final bool) e
 	// reach pktline.MaxSize.
 	br := bufio.NewReaderSize(r, pktline.MaxSize)
 	for {
-		l, payload, err := pktline.PeekLine(br)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		var errLine *pktline.ErrorLine
-		if errors.As(err, &errLine) {
-			// Pass the server's ERR to git, which reports it and stops.
-			break
-		}
+		l, payload, done, err := peekRoundLine(br, final)
 		if err != nil {
-			return fmt.Errorf("peeking pkt-line: %w", err)
+			return err
+		}
+		if done {
+			break
 		}
 		line := string(bytes.TrimSuffix(payload, []byte("\n")))
 		isACK := strings.HasPrefix(line, "ACK ")
@@ -384,6 +382,27 @@ func relaySingleACKRound(w io.Writer, r io.Reader, acks *ackState, final bool) e
 		}
 	}
 	return nil
+}
+
+// peekRoundLine peeks the next pkt-line of a round response. done reports
+// that no negotiation line follows: the response ended, the server sent ERR
+// (passed on to git, which reports it and stops), or, in the done round, the
+// pack starts raw, as it does without side-band (its header is no pkt-line).
+func peekRoundLine(br *bufio.Reader, final bool) (l int, payload []byte, done bool, err error) {
+	if final {
+		if header, peekErr := br.Peek(len(packHeader)); peekErr == nil && string(header) == packHeader {
+			return 0, nil, true, nil
+		}
+	}
+	l, payload, err = pktline.PeekLine(br)
+	var errLine *pktline.ErrorLine
+	switch {
+	case errors.Is(err, io.EOF), errors.As(err, &errLine):
+		return 0, nil, true, nil
+	case err != nil:
+		return 0, nil, false, fmt.Errorf("peeking pkt-line: %w", err)
+	}
+	return l, payload, false, nil
 }
 
 // drainShallowUpdate consumes a leading shallow/unshallow pktline run
