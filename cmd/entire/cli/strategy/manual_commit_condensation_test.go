@@ -1994,6 +1994,68 @@ func TestCondenseSessionByID_ClearsPendingFiles(t *testing.T) { //nolint:paralle
 	require.Empty(t, previews, "checkpoint list --pending must no longer preview a condensed session")
 }
 
+// A commit-less condense must not turn an ENDED session into an IDLE one:
+// PrepareCommitMsg and PostCommit skip only ENDED sessions marked
+// FullyCondensed, so they would check the dead session on every commit. A
+// session in any other phase still becomes IDLE, and is not marked
+// FullyCondensed, which no turn start would clear. The phase decides, not
+// EndedAt: a session resumed with a stale EndedAt is live.
+func TestCondenseSessionByID_EndedSessionStaysEnded(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	for _, tc := range []struct {
+		name               string
+		phase              session.Phase
+		ended              bool
+		wantPhase          session.Phase
+		wantFullyCondensed bool
+	}{
+		{name: "ended", phase: session.PhaseEnded, ended: true, wantPhase: session.PhaseEnded, wantFullyCondensed: true},
+		{name: "stuck active", phase: session.PhaseActive, wantPhase: session.PhaseIdle},
+		{name: "idle", phase: session.PhaseIdle, wantPhase: session.PhaseIdle},
+		{name: "active with a stale end time", phase: session.PhaseActive, ended: true, wantPhase: session.PhaseIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			paths.ClearWorktreeRootCache()
+			t.Cleanup(paths.ClearWorktreeRootCache)
+
+			s := &ManualCommitStrategy{}
+			sessionID := "commitless-condense-keeps-phase"
+			metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+			testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+			testutil.WriteFile(t, dir, "test.txt", "agent content")
+			require.NoError(t, s.SaveStep(t.Context(), StepContext{
+				SessionID:     sessionID,
+				ModifiedFiles: []string{"test.txt"},
+				MetadataDir:   metadataDir,
+				CommitMessage: "Checkpoint 1",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agent.AgentTypeClaudeCode,
+			}))
+			endedAt := time.Now().UTC()
+			require.NoError(t, MutateSessionState(t.Context(), sessionID, func(state *SessionState) error {
+				state.Phase = tc.phase
+				if tc.ended {
+					state.EndedAt = &endedAt
+				}
+				return nil
+			}))
+
+			require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+			state, err := s.loadSessionState(t.Context(), sessionID)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			require.False(t, state.LastCheckpointID.IsEmpty(), "fixture: the session was condensed, not skipped")
+			assert.Equal(t, tc.wantPhase, state.Phase)
+			assert.Equal(t, tc.wantFullyCondensed, state.FullyCondensed)
+			assert.Equal(t, tc.ended, state.EndedAt != nil, "EndedAt must be left as it was")
+			assert.False(t, state.HasPendingWork())
+		})
+	}
+}
+
 // TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript: a Workflow agent's
 // task record whose declared path was lost still resolves to its transcript
 // under <subagents>/workflows/<runId>/ (#2685), the layout

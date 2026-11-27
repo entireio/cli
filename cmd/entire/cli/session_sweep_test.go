@@ -104,9 +104,8 @@ func TestIsSweepableZombie(t *testing.T) {
 			want: false,
 		},
 		{
-			// Condensing it again would reset Phase to IDLE while FullyCondensed
-			// and EndedAt stay set, so PostCommit's FullyCondensed+ENDED skip
-			// would stop matching and re-evaluate the dead session every commit.
+			// FullyCondensed excludes a session even when a task record still
+			// counts as pending work.
 			name: "ended and fully condensed with a completed-unmaterialized task record is not a zombie",
 			state: session.State{
 				Phase:          session.PhaseEnded,
@@ -263,13 +262,10 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 			"old zombie must not remain condensable after the sweep")
 		// ...and its state must show CondenseSessionByID actually ran, not
 		// that the predicate merely stopped matching: the skip path (no
-		// transcript/files — this fixture) sets FullyCondensed=true and keeps
-		// PhaseEnded; the full condense path resets Phase to IDLE (and
-		// StepCount to 0). Either way the ENDED+uncondensed combination is
-		// gone.
-		assert.True(t, zombieAfter.FullyCondensed || zombieAfter.Phase != session.PhaseEnded,
-			"swept zombie must be marked fully condensed or moved out of ENDED, got phase=%s fullyCondensed=%v",
-			zombieAfter.Phase, zombieAfter.FullyCondensed)
+		// transcript/files — this fixture) and the full condense path both
+		// set FullyCondensed=true and keep PhaseEnded.
+		assert.True(t, zombieAfter.FullyCondensed, "swept zombie must be marked fully condensed")
+		assert.Equal(t, session.PhaseEnded, zombieAfter.Phase, "swept zombie must stay ENDED")
 	}
 	// (absence from the list is also success: fully cleaned up)
 }
