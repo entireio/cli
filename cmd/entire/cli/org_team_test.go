@@ -357,6 +357,35 @@ func TestOrgTeamMemberAdd_PickerOffersActiveNonMembers(t *testing.T) {
 	assert.Contains(t, out, "✓ Added github:bob to team platform")
 }
 
+// The picker label carries the display name. The --json member is the handle
+// alone, so a command accepts it back. A service account is never offered.
+//
+// Not parallel: swaps the activeCoreClient and teamMemberPicker seams.
+func TestOrgTeamMemberAdd_PickerJSONNamesTheHandle(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	f := newTeamCore()
+	bob := member("github:bob", acctBob.id)
+	bob.DisplayName = coreapi.NewOptString("Bob Builder")
+	f.orgMembers = []coreapi.OrgMemberListItem{bob, member("github:ci-bot", "svc_01HZX7QABCDEFGHJKMNPQRSTC3")}
+	srv := f.serve(t)
+
+	var offered []grantCandidate
+	prev := teamMemberPicker
+	teamMemberPicker = func(_ *cobra.Command, _ grantPickerTarget, candidates []grantCandidate) ([]grantCandidate, error) {
+		offered = candidates
+		return candidates, nil
+	}
+	t.Cleanup(func() { teamMemberPicker = prev })
+
+	out, _, err := runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform", "--json")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"github:bob · Bob Builder"}, labels(offered))
+	var added []teamMemberChange
+	require.NoError(t, json.Unmarshal([]byte(out), &added))
+	require.Len(t, added, 1)
+	assert.Equal(t, "github:bob", added[0].Member)
+}
+
 // Not parallel: swaps the activeCoreClient and teamMemberPicker seams.
 func TestOrgTeamMemberAdd_EmptyPoolAddsNobody(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_TTY", "1")

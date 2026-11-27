@@ -63,6 +63,7 @@ func TestGrantAdd_TeamGranteeRefusals(t *testing.T) {
 		srv := f.serve(t)
 		_, _, err := runGrantCmd(t, newProjectGrantCmd, srv, "add", teamProjULID, "team:nope", "--role", "reader")
 		require.ErrorContains(t, err, `no team named "nope" in the org that owns project `+teamProjULID)
+		require.ErrorContains(t, err, "run `entire org team list "+testOrgULID+"`")
 		assert.Empty(t, f.writes)
 	})
 	t.Run("account-owned project", func(t *testing.T) {
@@ -80,12 +81,15 @@ func TestGrantAdd_TeamGranteeRefusals(t *testing.T) {
 		_, _, err := runGrantCmd(t, newProjectGrantCmd, srv, "add", teamProjULID, "team:platform", "--role", "reader")
 		require.ErrorContains(t, err, "team platform is not a team of the org that owns project "+teamProjULID)
 	})
+	// The CLI refused an account-owned target above, so a 422 is some other
+	// refusal and keeps Core's own message.
 	t.Run("core 422", func(t *testing.T) {
 		f := newTeamCore()
 		f.writeStatus = http.StatusUnprocessableEntity
 		srv := f.serve(t)
 		_, _, err := runGrantCmd(t, newProjectGrantCmd, srv, "add", teamProjULID, "team:platform", "--role", "reader")
-		require.ErrorContains(t, err, "project "+teamProjULID+" is not owned by an org")
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "is not owned by an org")
 	})
 }
 
@@ -101,6 +105,10 @@ func TestOrgGrant_RefusesATeamGrantee(t *testing.T) {
 	for _, verb := range []string{"add", "remove"} {
 		_, _, err := runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "team:platform")
 		require.ErrorContains(t, err, "team:platform is a team; a team cannot hold org access")
+		_, _, err = runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "Team:platform")
+		require.ErrorContains(t, err, "Team:platform is a team; a team cannot hold org access")
+		_, _, err = runGrantCmd(t, newProjectGrantCmd, srv, verb, teamProjULID, "team:")
+		require.ErrorContains(t, err, "team: names no team; write team:<name>")
 	}
 }
 

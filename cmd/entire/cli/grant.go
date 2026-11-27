@@ -169,7 +169,7 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:     use,
-		Short:   fmt.Sprintf("Grant a user %s access", t.noun),
+		Short:   fmt.Sprintf("Grant %s %s access", granteeNoun(t), t.noun),
 		Long:    long,
 		Hidden:  t.addDocumentedAs != "",
 		Example: example,
@@ -233,16 +233,31 @@ const (
 	teamGranteePrefix = granteeTypeTeam + ":"
 )
 
-// teamGranteeName reports whether a grantee is team:<name>, and the name.
+// granteeNoun names who can hold a grant on the target.
+func granteeNoun[Row any](t grantTarget[Row]) string {
+	if t.grantTeam != nil {
+		return "a user or team"
+	}
+	return "a user"
+}
+
+// teamGranteeName reports whether a grantee is team:<name>, and the name. The
+// prefix matches in any case, and the name can be empty.
 func teamGranteeName(ref string) (string, bool) {
-	name, ok := strings.CutPrefix(ref, teamGranteePrefix)
-	return name, ok && name != ""
+	n := len(teamGranteePrefix)
+	if len(ref) < n || !strings.EqualFold(ref[:n], teamGranteePrefix) {
+		return "", false
+	}
+	return ref[n:], true
 }
 
 // ensureGranteeAccepted checks a typed grantee before any request: a team
 // where the target takes teams, and otherwise a provider-qualified handle.
 func ensureGranteeAccepted[Row any](t grantTarget[Row], grantee string) error {
-	if _, ok := teamGranteeName(grantee); ok {
+	if name, ok := teamGranteeName(grantee); ok {
+		if name == "" {
+			return fmt.Errorf("%s names no team; write team:<name>, e.g. team:platform", grantee)
+		}
 		if t.grantTeam == nil {
 			return fmt.Errorf("%s is a team; a team cannot hold %s access, so grant it a project or repo instead", grantee, t.noun)
 		}
@@ -266,18 +281,16 @@ func resolveGrantTeam[Row any](ctx context.Context, c *coreapi.Client, t grantTa
 		return "", err
 	}
 	if !ok {
-		return "", fmt.Errorf("no team named %q in the org that owns %s (run `entire org team list <org>` to see team names)", name, pt.describe())
+		return "", fmt.Errorf("no team named %q in the org that owns %s (run `entire org team list %s` to see team names)", name, pt.describe(), orgID)
 	}
 	return team.ID, nil
 }
 
-// teamGrantErr names the team and the target in Core's team grant refusals.
+// teamGrantErr names the team and the target in Core's 404 for a team grant.
+// resolveGrantTeam already refused a target that no org owns.
 func teamGrantErr(err error, pt grantPickerTarget, name string) error {
-	switch coreapi.APIErrorStatus(err) {
-	case http.StatusNotFound:
-		return fmt.Errorf("team %s is not a team of the org that owns %s", name, pt.describe())
-	case http.StatusUnprocessableEntity:
-		return fmt.Errorf("%s is not owned by an org; only an org's projects and repos take team grants", pt.describe())
+	if coreapi.APIErrorStatus(err) == http.StatusNotFound {
+		return fmt.Errorf("team %s is not a team of the org that owns %s: %w", name, pt.describe(), err)
 	}
 	return err
 }
@@ -591,7 +604,7 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 	long, example := grantRemoveHelp(t)
 	cmd := &cobra.Command{
 		Use:     fmt.Sprintf("remove <%s> [grantee]", t.noun),
-		Short:   fmt.Sprintf("Revoke a user's %s access", t.noun),
+		Short:   fmt.Sprintf("Revoke %s access from %s", t.noun, granteeNoun(t)),
 		Long:    long,
 		Example: example,
 		Args:    cobra.RangeArgs(1, 2),

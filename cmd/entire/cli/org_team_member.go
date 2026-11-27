@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -115,7 +116,7 @@ func newTeamMemberAddCmd() *cobra.Command {
 					if err != nil {
 						return err
 					}
-					picked = []grantCandidate{{ref: accountID, label: displayGranteeName(user), byID: true}}
+					picked = []grantCandidate{{ref: accountID, label: displayGranteeName(user), byID: true, handle: user}}
 				} else if picked, err = pickTeamMembers(ctx, cmd, c, orgRef, orgID, team); err != nil {
 					return err
 				}
@@ -189,7 +190,8 @@ func teamMemberPool(ctx context.Context, c *coreapi.Client, orgID, teamID string
 	pool := memberPool{window: listWindow{scanned: len(members), partial: partial}}
 	for _, m := range members {
 		handle, ok := grantableMember(m)
-		if !ok {
+		// Core refuses a service account as a team member.
+		if !ok || strings.HasPrefix(m.AccountId, saIDPrefix) {
 			continue
 		}
 		pool.addressable++
@@ -238,9 +240,10 @@ func addTeamMembers(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, 
 			}
 			continue
 		}
-		added = append(added, teamMemberChange{OrgID: orgID, TeamID: team.ID, AccountID: p.ref, Member: p.label})
+		member := displayGranteeName(p.handle)
+		added = append(added, teamMemberChange{OrgID: orgID, TeamID: team.ID, AccountID: p.ref, Member: member})
 		if !jsonRequested(cmd) {
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Added %s to team %s\n", p.label, team.Name)
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ Added %s to team %s\n", member, team.Name)
 		}
 	}
 	if err := emitTeamMemberJSON(cmd, added, single); err != nil {

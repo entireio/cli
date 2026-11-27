@@ -67,12 +67,15 @@ type grantCandidate struct {
 	byID bool
 	// granteeType is the type the typed-id route revokes; "" means account.
 	granteeType string
+	// handle is the provider-qualified handle, without the display name that
+	// label can carry. It is what a command accepts back.
+	handle string
 }
 
 // handleCandidate is a candidate addressed by its handle and shown in the
 // spelling users type.
 func handleCandidate(handle string) grantCandidate {
-	return grantCandidate{ref: handle, label: displayGranteeName(handle)}
+	return grantCandidate{ref: handle, label: displayGranteeName(handle), handle: handle}
 }
 
 // memberCandidate is an org member's candidate: addressed by handle, and
