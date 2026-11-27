@@ -66,6 +66,10 @@ func (r *tokenTurnRun) start(tokens, sub int, files ...string) {
 	}
 }
 
+// tokenTurnSubagentModel is the model every subagent's calls name; a
+// checkpoint's subagent tokens must carry it.
+const tokenTurnSubagentModel = "claude-haiku-4-5"
+
 func (r *tokenTurnRun) subagent(tokens int) {
 	r.t.Helper()
 	r.nextSub++
@@ -73,6 +77,7 @@ func (r *tokenTurnRun) subagent(tokens int) {
 		id:    fmt.Sprintf("a%016d", r.nextSub),
 		file:  fmt.Sprintf("sub%d.txt", r.nextSub),
 		usage: map[string]int{"input_tokens": tokens, "output_tokens": tokens},
+		model: tokenTurnSubagentModel,
 	}
 	require.NoError(r.t, r.env.SimulateSubagentStart(SubagentStartInput{
 		SessionID: r.s.ID, TranscriptPath: r.s.TranscriptPath, AgentID: a.id, AgentType: "workflow-subagent",
@@ -170,6 +175,9 @@ func (r *tokenTurnRun) verify() {
 		gotSub := 0
 		if u.SubagentTokens != nil {
 			gotSub = u.SubagentTokens.OutputTokens
+			if gotSub > 0 {
+				assert.Equal(r.t, tokenTurnSubagentModel, u.SubagentTokens.Model, "%s: subagent model", w.step)
+			}
 		}
 		assert.Equal(r.t, w.out, u.OutputTokens, "%s: checkpoint must hold exactly the turns it newly covers", w.step)
 		assert.Equal(r.t, w.sub, gotSub, "%s: subagent tokens", w.step)

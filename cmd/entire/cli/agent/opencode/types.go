@@ -25,8 +25,8 @@ type turnEndRaw struct {
 // subagentRaw is the payload the plugin sends for both subagent-start (when
 // the parent's `task` tool part first carries the child session ID,
 // state.metadata.sessionId) and subagent-stop (tool.execute.after for the
-// `task` tool). The child's model is not carried: task records have no model
-// field, and the exported child transcript records it per message.
+// `task` tool). The child's model is not carried here: the exported child
+// transcript records it per message (see CalculateSubagentTokenUsage).
 type subagentRaw struct {
 	SessionID       string `json:"session_id"`       // parent
 	ToolUseID       string `json:"tool_use_id"`      // task part callID
@@ -70,6 +70,9 @@ type MessageInfo struct {
 	Time      Time    `json:"time"`
 	Tokens    *Tokens `json:"tokens,omitempty"`
 	Cost      float64 `json:"cost,omitempty"`
+	// ModelID is the model that produced an assistant message, in the form
+	// the plugin reports as the session's model (no provider prefix).
+	ModelID string `json:"modelID,omitempty"`
 }
 
 // Message role constants.

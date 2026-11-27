@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -425,11 +426,7 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 			if err != nil {
 				continue
 			}
-			subagentUsage.InputTokens += agentUsage.InputTokens
-			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
-			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
-			subagentUsage.OutputTokens += agentUsage.OutputTokens
-			subagentUsage.APICallCount += agentUsage.APICallCount
+			subagentUsage = types.AddTokenUsage(subagentUsage, agentUsage)
 		}
 		if subagentUsage.APICallCount > 0 {
 			mainUsage.SubagentTokens = subagentUsage

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -136,6 +137,70 @@ func sumUsage(usageByMessageID map[string]messageUsage) *agent.TokenUsage {
 		usage.OutputTokens += u.OutputTokens
 	}
 	return usage
+}
+
+// addModelsByMessageID records the model of each assistant message in
+// transcript, keyed like addUsageByMessageID. The first fragment naming a
+// model wins, as in the transcript library's per-call lines, so the model a
+// checkpoint's token usage names matches the model on that call's line.
+func addModelsByMessageID(modelByMessageID map[string]string, transcript []TranscriptLine) {
+	for _, line := range transcript {
+		if line.Type != envelopeTypeAssistant {
+			continue
+		}
+		var msg messageWithUsage
+		if err := json.Unmarshal(line.Message, &msg); err != nil || msg.ID == "" {
+			continue
+		}
+		if _, seen := modelByMessageID[msg.ID]; seen {
+			continue
+		}
+		if msg.Model != "" && msg.Model != syntheticModel {
+			modelByMessageID[msg.ID] = msg.Model
+		}
+	}
+}
+
+// sumUsageByModel totals usageByMessageID like sumUsage, split by the model
+// that produced each message so subagents on different models stay apart
+// (see TokenUsage.ByModel). A message with no usage and no model (Claude
+// Code's <synthetic> API-error entry) is not a model call and is left out, as
+// the transcript library leaves it; one naming a model still counts as a call.
+func sumUsageByModel(usageByMessageID map[string]messageUsage, modelByMessageID map[string]string) *agent.TokenUsage {
+	byModel := make(map[string]map[string]messageUsage)
+	for msgID, u := range usageByMessageID {
+		model, named := modelByMessageID[msgID]
+		if u == (messageUsage{}) && !named {
+			continue
+		}
+		if byModel[model] == nil {
+			byModel[model] = make(map[string]messageUsage)
+		}
+		byModel[model][msgID] = u
+	}
+	total := &agent.TokenUsage{}
+	for model, usage := range byModel {
+		modelUsage := sumUsage(usage)
+		modelUsage.Model = model
+		total = types.AddTokenUsage(total, modelUsage)
+	}
+	return total
+}
+
+var _ agent.SubagentTokenCalculator = (*ClaudeCodeAgent)(nil)
+
+// CalculateSubagentTokenUsage returns a subagent transcript's usage split by
+// model (agent.SubagentTokenCalculator), for its task record.
+func (c *ClaudeCodeAgent) CalculateSubagentTokenUsage(transcriptData []byte) (*agent.TokenUsage, error) {
+	parsed, err := transcript.ParseFromBytes(transcriptData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse subagent transcript: %w", err)
+	}
+	usageByMessageID := make(map[string]messageUsage)
+	modelByMessageID := make(map[string]string)
+	addUsageByMessageID(usageByMessageID, parsed)
+	addModelsByMessageID(modelByMessageID, parsed)
+	return sumUsageByModel(usageByMessageID, modelByMessageID), nil
 }
 
 // ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.
@@ -579,7 +644,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	agentUsages := launchedSubagentUsage(transcriptData, fullParsed, subagentsDir)
+	agentUsages, subagentModelByMessageID := launchedSubagentUsage(transcriptData, fullParsed, subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
@@ -611,7 +676,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 		}
 	}
 	if foundSubagentUsage {
-		mainUsage.SubagentTokens = sumUsage(subagentByMessageID)
+		mainUsage.SubagentTokens = sumUsageByModel(subagentByMessageID, subagentModelByMessageID)
 	}
 
 	return mainUsage, nil
@@ -633,12 +698,16 @@ const maxSubagentLaunchDepth = 8
 // found, and reads only transcripts not read before, which also ends launch
 // cycles. A transcript that is missing or unreadable is skipped.
 //
+// It also returns each read message's model (addModelsByMessageID), for
+// splitting the subagents' usage by model.
+//
 // Nested subagents were not counted before, so the first Stop after upgrading
 // counts their usage to date in one checkpoint, rescoped against a baseline
 // that never included them.
-func launchedSubagentUsage(mainData []byte, mainParsed []TranscriptLine, subagentsDir string) map[string]map[string]messageUsage {
+func launchedSubagentUsage(mainData []byte, mainParsed []TranscriptLine, subagentsDir string) (map[string]map[string]messageUsage, map[string]string) {
 	agentIDs, runIDs := launchedBy(mainData, mainParsed)
 	read := make(map[string]map[string]messageUsage)
+	modelByMessageID := make(map[string]string)
 	for depth := 1; ; depth++ {
 		agentPaths := subagentTranscriptPaths(agentIDs, runIDs, subagentsDir)
 		found := false
@@ -658,6 +727,7 @@ func launchedSubagentUsage(mainData []byte, mainParsed []TranscriptLine, subagen
 			}
 			usageByMessageID := make(map[string]messageUsage)
 			addUsageByMessageID(usageByMessageID, lines)
+			addModelsByMessageID(modelByMessageID, lines)
 			read[agentPath] = usageByMessageID
 			launchedAgents, launchedRuns := launchedBySubagent(data, lines)
 			for agentID, toolUseID := range launchedAgents {
@@ -689,7 +759,7 @@ func launchedSubagentUsage(mainData []byte, mainParsed []TranscriptLine, subagen
 			usages[agentPath] = usageByMessageID
 		}
 	}
-	return usages
+	return usages, modelByMessageID
 }
 
 // subagentTranscriptPaths maps every subagent the transcript launched to its

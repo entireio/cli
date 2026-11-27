@@ -268,5 +268,6 @@ type messageUsage struct {
 // Used for extracting token counts from Claude Code transcripts.
 type messageWithUsage struct {
 	ID    string       `json:"id"`
+	Model string       `json:"model"`
 	Usage messageUsage `json:"usage"`
 }

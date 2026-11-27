@@ -929,3 +929,50 @@ func TestExtractAllUserPrompts_SkipsInjectedBackgroundResult(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"Create red.md in the background", "Review @notes.md\nCalled the Read tool"}, prompts)
 }
+
+// A child session's task-record usage records the model of each assistant
+// message (modelID, the same form the plugin reports as the session model),
+// split when the child's messages ran on more than one model.
+func TestCalculateSubagentTokenUsage_RecordsModelPerMessage(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"info":{"id":"child"},"messages":[
+{"info":{"id":"u1","role":"user"}},
+{"info":{"id":"a1","role":"assistant","modelID":"claude-haiku-4-5","providerID":"anthropic","tokens":{"input":10,"output":4,"reasoning":0,"cache":{"read":2,"write":1}}}},
+{"info":{"id":"a2","role":"assistant","modelID":"claude-haiku-4-5","providerID":"anthropic","tokens":{"input":5,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}
+]}`)
+	ag := &OpenCodeAgent{}
+	usage, err := ag.CalculateSubagentTokenUsage(data)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 15, OutputTokens: 5, CacheReadTokens: 2, CacheCreationTokens: 1, APICallCount: 2, Model: "claude-haiku-4-5"}, usage)
+
+	main, err := ag.CalculateTokenUsage(data, 0)
+	require.NoError(t, err)
+	require.Empty(t, main.Model, "the session total stays unlabelled")
+
+	mixed := []byte(`{"info":{"id":"child"},"messages":[
+{"info":{"id":"a1","role":"assistant","modelID":"gpt-6-luna","tokens":{"input":10,"output":4,"cache":{"read":0,"write":0}}}},
+{"info":{"id":"a2","role":"assistant","modelID":"claude-haiku-4-5","tokens":{"input":5,"output":1,"cache":{"read":0,"write":0}}}}
+]}`)
+	usage, err = ag.CalculateSubagentTokenUsage(mixed)
+	require.NoError(t, err)
+	require.Empty(t, usage.Model)
+	require.Len(t, usage.ByModel, 2)
+	require.Equal(t, "claude-haiku-4-5", usage.ByModel[0].Model)
+	require.Equal(t, 5, usage.ByModel[0].InputTokens)
+	require.Equal(t, 15, usage.InputTokens)
+}
+
+// Buckets key on modelID alone: the same model reached through two providers
+// is one model for pricing, and stays one entry.
+func TestCalculateSubagentTokenUsage_SameModelAcrossProvidersMerges(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"info":{"id":"child"},"messages":[
+{"info":{"id":"a1","role":"assistant","modelID":"claude-haiku-4-5","providerID":"anthropic","tokens":{"input":10,"output":4,"cache":{"read":0,"write":0}}}},
+{"info":{"id":"a2","role":"assistant","modelID":"claude-haiku-4-5","providerID":"openrouter","tokens":{"input":5,"output":1,"cache":{"read":0,"write":0}}}}
+]}`)
+	usage, err := (&OpenCodeAgent{}).CalculateSubagentTokenUsage(data)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 15, OutputTokens: 5, APICallCount: 2, Model: "claude-haiku-4-5"}, usage)
+}
