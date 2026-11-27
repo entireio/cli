@@ -615,7 +615,7 @@ func gitActionFromRequest(req *http.Request) string {
 			return actionPush
 		}
 	case http.MethodPut:
-		if isBBXorbUpload(req) {
+		if isBBXorb(req) {
 			return actionPush
 		}
 	case http.MethodGet:
@@ -626,6 +626,11 @@ func gitActionFromRequest(req *http.Request) string {
 			case "git-upload-pack":
 				return actionPull
 			}
+		}
+		// The download of a xorb is a read of the repo, as for
+		// git-upload-pack.
+		if isBBXorb(req) {
+			return actionPull
 		}
 	}
 	return ""
@@ -638,10 +643,11 @@ func isBBDedup(req *http.Request) bool {
 	return ok && isPlainRepoPath(req, repo)
 }
 
-// isBBXorbUpload reports whether req addresses exactly
-// <repo path>/bb/xorbs/<xorb hash>, the BB xorb upload of entiredb's
-// client-chunked push.
-func isBBXorbUpload(req *http.Request) bool {
+// isBBXorb reports whether req addresses exactly
+// <repo path>/bb/xorbs/<xorb hash>: the BB xorb upload (PUT) of entiredb's
+// client-chunked push, or the xorb download (GET) of its client-chunked
+// fetch.
+func isBBXorb(req *http.Request) bool {
 	const infix = "/bb/xorbs/"
 	i := strings.LastIndex(req.URL.Path, infix)
 	return i >= 0 && isXetHashText(req.URL.Path[i+len(infix):]) && isPlainRepoPath(req, req.URL.Path[:i])

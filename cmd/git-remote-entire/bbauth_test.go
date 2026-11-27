@@ -59,6 +59,9 @@ func (s *bbAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusCreated)
 		encodeTestJSON(w, map[string]any{"xorb": s.x.Hash.String(), "state": "staged", "chunks": chunks})
+	case r.Method == http.MethodGet && r.URL.Path == "/et/alice/repo/bb/xorbs/"+s.x.Hash.String():
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(s.x.Complete()) //nolint:errcheck // test
 	case r.Method == http.MethodPost && r.URL.Path == "/et/alice/repo/bb/dedup":
 		encodeTestJSON(w, map[string]any{"anchors": []any{}, "xorbs": []any{}, "footers": map[string]any{}})
 	default:
@@ -103,8 +106,22 @@ func bbAuthXorb(t *testing.T) *bbchunk.Xorb {
 	return x
 }
 
-// The credential gate admits the BB upload and dedup requests, so the
-// bearer reaches the server on both.
+// memSink is a bbclient.XorbSink in memory.
+type memSink struct{ got []byte }
+
+func (m *memSink) HasComplete(xethash.Hash) bool { return false }
+
+func (m *memSink) PutComplete(_ xethash.Hash, fill func(io.Writer) (*bbchunk.Footer, error)) error {
+	var b strings.Builder
+	if _, err := fill(&b); err != nil {
+		return err
+	}
+	m.got = []byte(b.String())
+	return nil
+}
+
+// The credential gate admits the BB upload, dedup and download requests, so
+// the bearer reaches the server on each.
 func TestBBRequestsCarryTheCredential(t *testing.T) {
 	t.Parallel()
 	s := &bbAuthServer{accept: "jwt-a", x: bbAuthXorb(t)}
@@ -117,10 +134,14 @@ func TestBBRequestsCarryTheCredential(t *testing.T) {
 	require.Equal(t, bbclient.StateStaged, res.State)
 	_, err = client.Dedup(t.Context(), []xethash.Hash{s.x.Footer.ChunkHashes[0]}, nil)
 	require.NoError(t, err)
+	var sink memSink
+	require.NoError(t, client.Download(t.Context(), s.x.Hash, &sink))
+	require.Equal(t, s.x.Complete(), sink.got)
 
 	require.Equal(t, []string{
 		"PUT /et/alice/repo/bb/xorbs/" + s.x.Hash.String() + " Bearer jwt-a",
 		"POST /et/alice/repo/bb/dedup Bearer jwt-a",
+		"GET /et/alice/repo/bb/xorbs/" + s.x.Hash.String() + " Bearer jwt-a",
 	}, s.authorizations())
 }
 
