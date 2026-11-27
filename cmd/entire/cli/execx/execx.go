@@ -34,14 +34,23 @@ const KillWaitDelay = 10 * time.Second
 // TerminateOnCancel makes cmd and its descendants die when ctx is cancelled.
 // exec.Cmd's default Cancel only kills the direct child, leaving a grandchild
 // (e.g. a sandbox helper or transport helper) alive and holding the output pipe
-// open, which blocks Wait/Run indefinitely past the deadline. A new process
-// group lets Cancel SIGKILL the whole tree; WaitDelay is the backstop that
-// force-closes the pipes if a descendant escapes the group.
+// open, which blocks Wait/Run indefinitely past the deadline. On Unix a new
+// process group lets Cancel SIGKILL the whole tree; on Windows Cancel walks the
+// process table and terminates each descendant. WaitDelay is the backstop that
+// force-closes the pipes if a descendant escapes either.
 //
 // cmd must be created with exec.CommandContext so Cancel runs on ctx-done. Do
 // not combine with NonInteractive on the same cmd: NonInteractive sets Setsid,
 // which conflicts with the Setpgid this sets.
 func TerminateOnCancel(cmd *exec.Cmd) {
 	cmd.WaitDelay = KillWaitDelay
+	killProcessGroupOnCancel(cmd)
+}
+
+// KillTreeOnCancel is TerminateOnCancel without the WaitDelay, for callers
+// that choose their own backstop. Set cmd.WaitDelay too: Cancel can only reach
+// descendants it can find (on Windows, not one whose own parent has already
+// exited).
+func KillTreeOnCancel(cmd *exec.Cmd) {
 	killProcessGroupOnCancel(cmd)
 }
