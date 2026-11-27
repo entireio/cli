@@ -47,17 +47,20 @@ type NextCheckpointTaskRecord struct {
 // PreviewNextCheckpoint returns, for each session in the current worktree
 // that has pending work (State.HasPendingWork), what the next commit's
 // checkpoint would carry from it, most recent activity first. Fully condensed
-// ended sessions are left out: PostCommit skips them too. It reads session
-// state and the session's local metadata only; nothing is written.
+// ended sessions are left out: PostCommit skips them too, and so are a
+// sibling worktree's sessions idle beyond recentSessionWindow, which commit
+// linking drops (worktreeSessionsForCommit). It reads session state and the
+// session's local metadata only; nothing is written.
 func (s *ManualCommitStrategy) PreviewNextCheckpoint(ctx context.Context) ([]NextCheckpointPreview, error) {
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve worktree root: %w", err)
 	}
-	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
+	sessions, _, _ := s.worktreeSessionsForCommit(ctx, allStates, worktreePath)
 
 	previews := make([]NextCheckpointPreview, 0, len(sessions))
 	for _, state := range sessions {

@@ -152,6 +152,37 @@ func TestCommitLinking_FallbackKeepsTheOwnerOfAnExistingTarget(t *testing.T) {
 	assert.Empty(t, sessions, "with no existing target, the idle owner is a new link and is dropped")
 }
 
+// The `checkpoint list --pending` preview lists the sessions a commit here
+// would link: from a worktree with no session of its own, a sibling session
+// idle beyond the window has pending work but is left out, as commit linking
+// leaves it out.
+func TestPreviewNextCheckpoint_SkipsIdleSiblingSessions(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	dayAgo := time.Now().Add(-24 * time.Hour)
+	recent := time.Now().Add(-time.Minute)
+	saveSiblingSession(t, s, mainDir, "stale", session.PhaseIdle, &dayAgo)
+	saveSiblingSession(t, s, mainDir, "recent", session.PhaseIdle, &recent)
+	for _, id := range []string{"stale", "recent"} {
+		state, err := s.loadSessionState(ctx, id)
+		require.NoError(t, err)
+		state.StepCount = 1
+		require.NoError(t, s.saveSessionState(ctx, state))
+	}
+
+	t.Chdir(linkedDir)
+	clearSessionMatchCaches()
+	previews, err := s.PreviewNextCheckpoint(ctx)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(previews))
+	for _, preview := range previews {
+		ids = append(ids, preview.SessionID)
+	}
+	assert.Equal(t, []string{"recent"}, ids)
+	assert.ElementsMatch(t, ids, linkingIDs(t, linkedDir), "the preview matches what the commit links")
+}
+
 // An amend keeps the amended commit's trailer and stamps nothing, so
 // post-commit condenses the amended-in work into that existing checkpoint for
 // the session that owns it. From a worktree with no session of its own, the

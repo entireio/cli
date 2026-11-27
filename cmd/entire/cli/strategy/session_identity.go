@@ -41,10 +41,7 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		// rescue this; report it to the caller (hooks log and skip).
 		return nil, err
 	}
-	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
-	if fromFallback {
-		sessions = withoutIdleSessions(ctx, worktreePath, sessions)
-	}
+	sessions, ambiguous, fromFallback := s.worktreeSessionsForCommit(ctx, allStates, worktreePath)
 	guest := s.findSessionByCommitAncestry(ctx, allStates)
 	if guest != nil && fromFallback {
 		// No session is homed here and ancestry names the committer: the
@@ -86,6 +83,19 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 			"[entire] Agent sessions in several other worktrees could match this commit; none was linked. Run 'entire session adopt' in this worktree to link future commits to your session.")
 	}
 	return sessions, nil
+}
+
+// worktreeSessionsForCommit is findSessionsForWorktreeFromStates as commit
+// linking applies it: the fallback's matches lose the sessions idle beyond
+// recentSessionWindow (withoutIdleSessions). The `checkpoint list --pending`
+// preview selects through it too, so it lists the sessions a commit here
+// would link.
+func (s *ManualCommitStrategy) worktreeSessionsForCommit(ctx context.Context, allStates []*SessionState, worktreePath string) (sessions []*SessionState, ambiguous, fromFallback bool) {
+	sessions, ambiguous, fromFallback = s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	if fromFallback {
+		sessions = withoutIdleSessions(ctx, worktreePath, sessions)
+	}
+	return sessions, ambiguous, fromFallback
 }
 
 func linkingSetContains(states []*SessionState, id string) bool {
