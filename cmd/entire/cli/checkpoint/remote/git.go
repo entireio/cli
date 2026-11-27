@@ -375,6 +375,10 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
 	}
 
+	// Taken before the fetch starts, so a failure removes only the partial
+	// pack this fetch left (see packTemps).
+	temps := snapshotPackTemps(ctx, opts.Dir)
+
 	cmdCtx, cancelCmd := context.WithCancelCause(ctx)
 	defer cancelCmd(nil)
 	cmd := newCommand(cmdCtx, args...)
@@ -395,6 +399,7 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 
 	if err != nil {
+		temps.removeLeftovers(ctx)
 		if cause := context.Cause(cmdCtx); errors.Is(cause, ErrFetchStalled) {
 			err = cause
 		}
@@ -496,10 +501,13 @@ func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
 	args := []string{"fetch-pack", remote}
 	args = append(args, hashes...)
 
+	temps := snapshotPackTemps(ctx, "")
 	cmd := newCommand(ctx, args...)
 	disableTerminalPrompt(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// fetch-pack receives through the same index-pack as fetch.
+		temps.removeLeftovers(ctx)
 		redactedURL := RedactURL(remote)
 		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remote, redactedURL))
 		if msg != "" {
