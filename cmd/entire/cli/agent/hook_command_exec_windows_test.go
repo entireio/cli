@@ -481,6 +481,35 @@ func TestWindowsWrappers_IgnoreRepositoryPrograms(t *testing.T) {
 	}
 }
 
+// TestWindowsWrappers_PowerShellForwardsHookInput checks that the hook payload
+// an agent writes to its PowerShell hook shell reaches entire through the nested
+// cmd.exe. Copilot CLI's `powershell` command depends on it, as do the Cursor
+// and Codex hooks: without the payload a hook has no session to act on.
+func TestWindowsWrappers_PowerShellForwardsHookInput(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH") forbids it.
+	stubDir := t.TempDir()
+	stub := "@findstr \"^\" >\"%~dp0stdin-seen\"\r\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "entire.bat"), []byte(stub), 0o700); err != nil {
+		t.Fatalf("write entire stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+";"+system32Dir())
+
+	const payload = `{"sessionId":"b0ff98c0-8e01-4b73-bf92-9649b139931b","cwd":"C:\\repo"}`
+	cmd := powerShellShell(t.Context(), WrapWindowsProductionSilentHookCommand("entire hooks copilot-cli agent-stop"), t.TempDir())
+	cmd.Stdin = strings.NewReader(payload + "\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run hook shell: %v; output=%q", err, out)
+	}
+
+	seen, err := os.ReadFile(filepath.Join(stubDir, "stdin-seen"))
+	if err != nil {
+		t.Fatalf("entire did not run: %v", err)
+	}
+	if got := strings.TrimSpace(string(seen)); got != payload {
+		t.Fatalf("entire read %q on stdin, want %q", got, payload)
+	}
+}
+
 // TestWindowsSHHookWrapperProbe_IgnoresWorkingDirectory runs the real sh probe from a
 // directory holding decoys, as `entire enable` does from a repository. The sh
 // decoys and the cmd.exe decoy sit in separate directories: os/exec refuses a

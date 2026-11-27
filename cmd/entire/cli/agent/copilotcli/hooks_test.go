@@ -764,6 +764,135 @@ func TestInstallHooks_PreservesUserCommandInvokingEntire(t *testing.T) {
 	}
 }
 
+// readHookEntries returns the entries of every hook type in entire.json, keyed
+// by the hook's JSON name.
+func readHookEntries(t *testing.T, tempDir string) map[string][]CopilotHookEntry {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(tempDir, ".github", "hooks", HooksFileName))
+	require.NoError(t, err)
+	var file struct {
+		Hooks map[string][]CopilotHookEntry `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &file))
+	return file.Hooks
+}
+
+// Copilot CLI runs an entry's `powershell` command on Windows and its `bash`
+// command elsewhere. entire.json is committed, so one install has to serve
+// both: a bash-only entry runs inside WSL on a Windows machine that has WSL.
+func TestInstallHooks_WritesPowerShellCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ag := &CopilotCLIAgent{}
+
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+
+	hooks := readHookEntries(t, tempDir)
+	for _, hookName := range ag.HookNames() {
+		entries := hooks[hookConfigKey[hookName]]
+		require.Len(t, entries, 1, hookName)
+		command := "entire hooks copilot-cli " + hookName
+		require.Equal(t, agent.WrapProductionSilentHookCommand(command), entries[0].Bash, hookName)
+		require.Equal(t, agent.WrapWindowsProductionSilentHookCommand(command), entries[0].PowerShell, hookName)
+	}
+}
+
+func TestInstallHooks_AddsPowerShellToBashOnlyEntries(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &CopilotCLIAgent{}
+
+	_, err := ag.InstallHooks(ctx, false)
+	require.NoError(t, err)
+
+	// What a CLI from before the powershell key wrote, with a field the user set.
+	hooks := readHookEntries(t, tempDir)
+	for key := range hooks {
+		hooks[key][0].PowerShell = ""
+	}
+	hooks["agentStop"][0].TimeoutSec = 45
+	data, err := json.Marshal(map[string]any{"version": 1, "hooks": hooks})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".github", "hooks", HooksFileName), data, 0o600))
+
+	require.Equal(t, agent.HooksOutdated, ag.CheckHookConfig(ctx))
+
+	count, err := ag.InstallHooks(ctx, false)
+	require.NoError(t, err)
+	require.Equal(t, len(ag.HookNames()), count)
+
+	hooks = readHookEntries(t, tempDir)
+	for _, hookName := range ag.HookNames() {
+		entries := hooks[hookConfigKey[hookName]]
+		require.Len(t, entries, 1, hookName)
+		require.Equal(t, agent.WrapWindowsProductionSilentHookCommand("entire hooks copilot-cli "+hookName), entries[0].PowerShell, hookName)
+	}
+	require.Equal(t, 45, hooks["agentStop"][0].TimeoutSec)
+	require.Equal(t, agent.HooksCurrent, ag.CheckHookConfig(ctx))
+
+	count, err = ag.InstallHooks(ctx, false)
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestInstallHooks_ReplacesOutdatedPowerShellCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &CopilotCLIAgent{}
+
+	_, err := ag.InstallHooks(ctx, false)
+	require.NoError(t, err)
+
+	hooksFile := readHooksFile(t, tempDir)
+	hooksFile.Hooks.AgentStop[0].PowerShell = "entire hooks copilot-cli agent-stop"
+	writeHooksFile(t, tempDir, hooksFile)
+	require.Equal(t, agent.HooksOutdated, ag.CheckHookConfig(ctx))
+
+	_, err = ag.InstallHooks(ctx, false)
+	require.NoError(t, err)
+
+	entries := readHooksFile(t, tempDir).Hooks.AgentStop
+	require.Len(t, entries, 1)
+	require.Equal(t, agent.WrapWindowsProductionSilentHookCommand("entire hooks copilot-cli agent-stop"), entries[0].PowerShell)
+}
+
+func TestInstallHooks_KeepsUserPowerShellCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	user := CopilotHookEntry{Type: "command", Bash: "echo user hook", PowerShell: "Write-Output 'user hook'"}
+	writeHooksFile(t, tempDir, CopilotHooksFile{Version: 1, Hooks: CopilotHooks{AgentStop: []CopilotHookEntry{user}}})
+
+	_, err := (&CopilotCLIAgent{}).InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+
+	entries := readHooksFile(t, tempDir).Hooks.AgentStop
+	require.Len(t, entries, 2)
+	require.Equal(t, user, entries[0])
+}
+
+func TestUninstallHooks_RemovesPowerShellOnlyEntry(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &CopilotCLIAgent{}
+
+	user := CopilotHookEntry{Type: "command", PowerShell: "Write-Output 'user hook'"}
+	writeHooksFile(t, tempDir, CopilotHooksFile{Version: 1, Hooks: CopilotHooks{AgentStop: []CopilotHookEntry{
+		{Type: "command", PowerShell: agent.WrapWindowsProductionSilentHookCommand("entire hooks copilot-cli agent-stop")},
+		user,
+	}}})
+	require.True(t, hooksInstalledNow(t, ag))
+
+	require.NoError(t, ag.UninstallHooks(ctx))
+
+	require.Equal(t, []CopilotHookEntry{user}, readHooksFile(t, tempDir).Hooks.AgentStop)
+	require.False(t, hooksInstalledNow(t, ag))
+}
+
 // hooksInstalledNow reports whether the agent's hooks are installed, failing the
 // test if it could not tell. Built-in agents read a local config file where
 // absent means absent, so an error here is a bug, not a state to tolerate.

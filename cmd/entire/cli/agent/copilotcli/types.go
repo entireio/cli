@@ -26,12 +26,14 @@ type CopilotHooks struct {
 }
 
 // CopilotHookEntry represents a single hook command.
-// Copilot CLI hooks have a type field ("command") and a bash field for the command string.
+// Copilot CLI hooks have a type field ("command") and one command string per
+// shell: it runs powershell on Windows and bash elsewhere.
 // Optional fields (cwd, timeoutSec, env, comment) are preserved on round-trip.
 
 type CopilotHookEntry struct {
 	Type       string            `json:"type"`
-	Bash       string            `json:"bash"`
+	Bash       string            `json:"bash,omitempty"`
+	PowerShell string            `json:"powershell,omitempty"`
 	Comment    string            `json:"comment,omitempty"`
 	Cwd        string            `json:"cwd,omitempty"`
 	TimeoutSec int               `json:"timeoutSec,omitempty"`
