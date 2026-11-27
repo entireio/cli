@@ -69,6 +69,10 @@ func (f *fakeTransport) ServiceRPC(ctx context.Context, service string, body io.
 	return f.serviceRPCResp(service, buf)
 }
 
+func (f *fakeTransport) Do(context.Context, string, string, io.ReadSeeker, func(*http.Request)) (*http.Response, error) {
+	return nil, errors.New("fakeTransport: no Do handler")
+}
+
 func (f *fakeTransport) ErrorBaseURL() string { return "https://test.invalid/repo" }
 
 // stringRC wraps a string as a ReadCloser.

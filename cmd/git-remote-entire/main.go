@@ -233,44 +233,39 @@ type refreshableCredential interface {
 
 // refreshingProvider defers reactive refresh work until the transport rebuilds
 // a request after a 401, so the network call uses that request's context. The
-// observer itself only marks the last bearer stale.
-func refreshingProvider(credential refreshableCredential) (credentialProvider, func()) {
+// observer only records the bearer that the server rejected. The provider
+// force-refreshes while the credential still returns that bearer. Requests
+// run concurrently, so several can get a 401 for the same bearer: each of
+// their retries gets the refreshed token, and the token-conditional
+// ForceRefresh mints it once.
+func refreshingProvider(credential refreshableCredential) (credentialProvider, func(string)) {
 	var mu sync.Mutex
-	var lastToken, rejectedToken string
+	var rejectedToken string
 
 	provider := func(ctx context.Context) (string, error) {
-		mu.Lock()
-		stale := rejectedToken
-		rejectedToken = ""
-		mu.Unlock()
-
-		var token string
-		var err error
-		if stale != "" {
-			token, err = credential.ForceRefresh(ctx, stale)
-		} else {
-			token, err = credential.Token(ctx)
-		}
+		token, err := credential.Token(ctx)
 		if err != nil {
-			if stale != "" {
-				mu.Lock()
-				if rejectedToken == "" {
-					rejectedToken = stale
-				}
-				mu.Unlock()
-			}
 			return "", fmt.Errorf("resolve login credential: %w", err)
 		}
-
 		mu.Lock()
-		lastToken = token
+		rejected := rejectedToken
 		mu.Unlock()
+		if rejected == "" || token != rejected {
+			return token, nil
+		}
+		token, err = credential.ForceRefresh(ctx, rejected)
+		if err != nil {
+			return "", fmt.Errorf("resolve login credential: %w", err)
+		}
 		return token, nil
 	}
 
-	onUnauthorized := func() {
+	onUnauthorized := func(bearer string) {
+		if bearer == "" {
+			return
+		}
 		mu.Lock()
-		rejectedToken = lastToken
+		rejectedToken = bearer
 		mu.Unlock()
 		debuglog.Printf("data plane rejected login bearer; marked it stale for the transport's retry")
 	}
@@ -468,7 +463,7 @@ func parseProtocolVersion(raw string) int {
 //     never a silent fallback to context resolution.
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT.
-func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
+func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(string), error) {
 	// Fail before any network call.
 	if err := userconfig.Check(); err != nil {
 		return nil, nil, err //nolint:wrapcheck // already names the file
@@ -533,7 +528,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 // is no longer authenticated, so a MITM could advertise an attacker host as a
 // trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
 // CI / workload environments.
-func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(), error) {
+func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(string), error) {
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
 		return nil, nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
@@ -548,7 +543,7 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 	}
 	debuglog.Printf("auth: %s bearer (core=%s)", auth.EnvTokenVar, coreURL)
 	provider := func(context.Context) (string, error) { return envToken, nil }
-	onUnauthorized := func() {
+	onUnauthorized := func(string) {
 		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
 	}
 	return provider, onUnauthorized, nil
@@ -562,31 +557,23 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 // another process already replaced it. The trust gate in resolveEnvTokenCreds
 // already checked the exchange Core, and every re-exchange goes to that same
 // Core.
-func secretCreds(raw string, onUnauthorized func()) (credentialProvider, func(), error) {
+func secretCreds(raw string, onUnauthorized func(string)) (credentialProvider, func(string), error) {
 	source := auth.EnvTokenSource(raw)
 	if source == nil {
 		return nil, nil, fmt.Errorf("%s does not hold a service account secret", auth.EnvTokenVar)
 	}
-	var mu sync.Mutex
-	var served string
 	provider := func(ctx context.Context) (string, error) {
 		token, err := source.Token(ctx)
 		if err != nil {
 			return "", err //nolint:wrapcheck // ResolveEnvToken names ENTIRE_TOKEN
 		}
-		mu.Lock()
-		served = token
-		mu.Unlock()
 		return token, nil
 	}
-	evict := func() {
-		mu.Lock()
-		rejected := served
-		mu.Unlock()
+	evict := func(rejected string) {
 		if rejected != "" {
 			source.Unauthorized(rejected)
 		}
-		onUnauthorized()
+		onUnauthorized(rejected)
 	}
 	return provider, evict, nil
 }
@@ -604,31 +591,95 @@ func coreTrusted(coreURL string, trusted []string) bool {
 	return false
 }
 
+// Actions of gitActionFromRequest.
+const (
+	actionPull = "pull"
+	actionPush = "push"
+)
+
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push".
 // The bearer doesn't vary by action, but the classification still gates
 // which endpoints may carry credentials (and labels the timing logs).
-// Returns "" when the endpoint isn't a recognised git smart-HTTP route.
+// Returns "" when the endpoint isn't a recognised git smart-HTTP route or
+// BB endpoint.
 func gitActionFromRequest(req *http.Request) string {
 	path := req.URL.Path
 	switch req.Method {
 	case http.MethodPost:
 		switch {
 		case strings.HasSuffix(path, "/git-receive-pack"):
-			return "push"
+			return actionPush
 		case strings.HasSuffix(path, "/git-upload-pack"):
-			return "pull"
+			return actionPull
+		case isBBDedup(req):
+			return actionPush
+		}
+	case http.MethodPut:
+		if isBBXorbUpload(req) {
+			return actionPush
 		}
 	case http.MethodGet:
 		if strings.HasSuffix(path, "/info/refs") {
 			switch req.URL.Query().Get("service") {
 			case "git-receive-pack":
-				return "push"
+				return actionPush
 			case "git-upload-pack":
-				return "pull"
+				return actionPull
 			}
 		}
 	}
 	return ""
+}
+
+// isBBDedup reports whether req addresses exactly <repo path>/bb/dedup, the
+// BB dedup query of entiredb's client-chunked push.
+func isBBDedup(req *http.Request) bool {
+	repo, ok := strings.CutSuffix(req.URL.Path, "/bb/dedup")
+	return ok && isPlainRepoPath(req, repo)
+}
+
+// isBBXorbUpload reports whether req addresses exactly
+// <repo path>/bb/xorbs/<xorb hash>, the BB xorb upload of entiredb's
+// client-chunked push.
+func isBBXorbUpload(req *http.Request) bool {
+	const infix = "/bb/xorbs/"
+	i := strings.LastIndex(req.URL.Path, infix)
+	return i >= 0 && isXetHashText(req.URL.Path[i+len(infix):]) && isPlainRepoPath(req, req.URL.Path[:i])
+}
+
+// isPlainRepoPath reports whether repo, the part of req's path before a BB
+// endpoint, is a plain repo path. The credential gate needs an exact shape,
+// not a suffix match: req holds no escaped path bytes, no query and no
+// fragment, and repo is not empty and has no empty, "." or ".." segment.
+func isPlainRepoPath(req *http.Request, repo string) bool {
+	u := req.URL
+	if u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(repo, "/")
+	if !ok || rest == "" {
+		return false
+	}
+	for seg := range strings.SplitSeq(rest, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// isXetHashText reports whether s is a Xet hash in its text form: 64
+// lowercase hex digits.
+func isXetHashText(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // installSignals ties HTTP request lifetimes to the parent git process.

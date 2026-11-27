@@ -20,6 +20,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/entireio/cli/internal/entireclient/discovery"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
@@ -63,8 +65,11 @@ type Config struct {
 	// the dead credential until its recorded expiry. Deliberately NOT
 	// fired on 403: a 403 means the credential verified fine and
 	// authorization was denied — invalidating would churn valid tokens.
-	// Nil disables the hook.
-	OnUnauthorized func()
+	// The argument is the bearer token of the rejected request, or "" when
+	// it carried none. Requests run concurrently, so the hook must not
+	// assume that the last token it served is the one that failed. Nil
+	// disables the hook.
+	OnUnauthorized func(rejectedBearer string)
 	// UserAgent is stamped on every outbound HTTP request so the
 	// server can attribute git smart-HTTP traffic to the remote
 	// helper. Empty sends no User-Agent header at all, which is what
@@ -79,9 +84,12 @@ type Config struct {
 }
 
 // Proxy is the HTTP transport the helper protocol uses to talk to the
-// data plane. Methods are not safe for concurrent use — Git's helper
-// protocol is strictly serial.
+// data plane. Git's helper protocol is strictly serial, so the git methods
+// run one at a time. Do may run concurrently with itself and with the git
+// methods: mu guards the replica set and the sticky node, which every
+// request reads and a failover writes.
 type Proxy struct {
+	mu sync.Mutex
 	// nodes is the current replica set. Populated from
 	// X-Entire-Replicas headers and the on-disk cache; empty on a
 	// cold invocation, in which case InfoRefs uses entryURL instead.
@@ -114,7 +122,7 @@ type Proxy struct {
 	// then on even loopback-HTTP test replicas are refused, so neither a
 	// redirect nor manual replica failover can resume plaintext. Sticky for
 	// the proxy's lifetime.
-	requireHTTPS bool
+	requireHTTPS atomic.Bool
 	// Only direct test configurations use HTTP loopback entries. Production
 	// replicas.Resolve always supplies an HTTPS entry.
 	allowLoopbackHTTP bool
@@ -184,14 +192,15 @@ func New(cfg Config) *Proxy {
 // response through untouched. See Config.OnUnauthorized for the contract.
 type unauthorizedObserver struct {
 	next http.RoundTripper
-	fn   func()
+	fn   func(rejectedBearer string)
 }
 
 // RoundTrip implements http.RoundTripper.
 func (o *unauthorizedObserver) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := o.next.RoundTrip(req)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized {
-		o.fn()
+		bearer, _ := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+		o.fn(bearer)
 	}
 	//nolint:wrapcheck // passthrough - wrapping would change error semantics
 	return resp, err
@@ -200,6 +209,8 @@ func (o *unauthorizedObserver) RoundTrip(req *http.Request) (*http.Response, err
 // ErrorBaseURL returns a URL string suitable for embedding in error
 // messages, guarding against empty node lists.
 func (p *Proxy) ErrorBaseURL() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if len(p.nodes) > 0 {
 		return p.nodes[0] + p.path
 	}
@@ -270,7 +281,7 @@ func (p *Proxy) replicaInCluster(rawURL string) bool {
 // safeReplicaScheme requires HTTPS except for explicitly configured HTTP
 // loopback test entries. SkipTLS does not authorize plaintext transport.
 func (p *Proxy) safeReplicaScheme(u *url.URL) bool {
-	return u.Scheme == httpclient.SchemeHTTPS || (!p.requireHTTPS && p.allowLoopbackHTTP && loopbackHTTP(u))
+	return u.Scheme == httpclient.SchemeHTTPS || (!p.requireHTTPS.Load() && p.allowLoopbackHTTP && loopbackHTTP(u))
 }
 
 // validateAndRecordReplicaScheme rejects unsafe schemes and remembers HTTPS
@@ -280,7 +291,7 @@ func (p *Proxy) validateAndRecordReplicaScheme(u *url.URL) error {
 		return ErrInsecureReplica
 	}
 	if u.Scheme == httpclient.SchemeHTTPS {
-		p.requireHTTPS = true
+		p.requireHTTPS.Store(true)
 	}
 	return nil
 }
@@ -316,6 +327,7 @@ func shouldFailover(statusCode int) bool { return statusCode >= 500 }
 // the OnNodeFailed callback. Subsequent calls (in this invocation)
 // skip the removed node.
 func (p *Proxy) markNodeFailed(node string) {
+	p.mu.Lock()
 	filtered := make([]string, 0, len(p.nodes))
 	for _, n := range p.nodes {
 		if n != node {
@@ -323,6 +335,7 @@ func (p *Proxy) markNodeFailed(node string) {
 		}
 	}
 	p.nodes = filtered
+	p.mu.Unlock()
 
 	if p.onNodeFailed != nil {
 		p.onNodeFailed(node)
@@ -429,15 +442,17 @@ func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func(
 // cache expires. The error still matches httpclient.ErrRequestPolicy, which
 // stops the cold path from following the server's Location.
 func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method string, body io.ReadSeeker, setHeaders func(*http.Request)) (*http.Response, error) {
-	nodes := slices.Clone(p.nodes)
+	return p.failover(ctx, makeSuffix, method, body, setHeaders, false)
+}
+
+// failover is doWithFailover. With passServerErrors, every 5xx answer goes
+// back to the caller: the node answered, so it stays in the replica set and
+// the persisted set is not purged. The caller decides whether to retry. Only
+// a connection error or a refused redirect then fails over.
+func (p *Proxy) failover(ctx context.Context, makeSuffix string, method string, body io.ReadSeeker, setHeaders func(*http.Request), passServerErrors bool) (*http.Response, error) {
+	nodes, start := p.failoverOrder()
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("%w: no healthy nodes available", ErrUnreachable)
-	}
-	start := rand.IntN(len(nodes)) //nolint:gosec // load-spreading, not security
-	if p.stickyNode != "" {
-		if idx := slices.Index(nodes, p.stickyNode); idx >= 0 {
-			start = idx
-		}
 	}
 	var lastErr, policyErr error
 	attempted := 0
@@ -456,32 +471,7 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			continue
 		}
 		attempted++
-		reqURL := p.nodeURL(node, makeSuffix)
-
-		// build (re)constructs the request: rewind the body, mint/attach the
-		// Authorization header, and stamp the caller's headers. Reused by the
-		// 401 retry so the resend carries a rewound body and a fresh token
-		// rather than a replayed stale header.
-		build := func() (*http.Request, error) {
-			var bodyReader io.Reader
-			if body != nil {
-				if _, err := body.Seek(0, io.SeekStart); err != nil {
-					return nil, fmt.Errorf("resetting request body: %w", err)
-				}
-				bodyReader = body
-			}
-			req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
-			if err != nil {
-				return nil, fmt.Errorf("creating request: %w", err)
-			}
-			if err := p.setAuthOrError(req); err != nil {
-				return nil, err
-			}
-			if setHeaders != nil {
-				setHeaders(req)
-			}
-			return req, nil
-		}
+		build := p.requestBuilder(ctx, method, p.nodeURL(node, makeSuffix), body, setHeaders)
 
 		req, err := build()
 		if err != nil {
@@ -518,6 +508,12 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			}
 		}
 
+		if passServerErrors && resp.StatusCode >= 500 {
+			debuglog.Printf("node %s answered HTTP %d; returning the answer to the caller", node, resp.StatusCode)
+			p.startPast(node, nodes)
+			return resp, nil
+		}
+
 		// A node refusing for lack of disk is up: try the next replica, but
 		// do not mark it failed, which would purge the persisted replica set
 		// on every push while the node stays full.
@@ -536,16 +532,7 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			continue
 		}
 
-		// Record the actual responder for connection reuse on the next
-		// request. Use the post-redirect URL so a 307 to a different
-		// replica makes us stick to the redirect target, not the
-		// bouncer.
-		if resp.Request != nil && resp.Request.URL != nil {
-			resolved := resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
-			if slices.Contains(nodes, resolved) {
-				p.stickyNode = resolved
-			}
-		}
+		p.recordSticky(resp, nodes)
 		return resp, nil
 	}
 
@@ -565,6 +552,81 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		return nil, fmt.Errorf("%w: no eligible replicas available", ErrUnreachable)
 	}
 	return nil, fmt.Errorf("%w: all %d attempted nodes failed, last error: %w", ErrNoNodeSucceeded, attempted, lastErr)
+}
+
+// failoverOrder returns a copy of the replica set and the index to start
+// from: the sticky node when it is still in the set, else a random node.
+func (p *Proxy) failoverOrder() ([]string, int) {
+	p.mu.Lock()
+	nodes := slices.Clone(p.nodes)
+	sticky := p.stickyNode
+	p.mu.Unlock()
+	if len(nodes) == 0 {
+		return nil, 0
+	}
+	if idx := slices.Index(nodes, sticky); sticky != "" && idx >= 0 {
+		return nodes, idx
+	}
+	return nodes, rand.IntN(len(nodes)) //nolint:gosec // load-spreading, not security
+}
+
+// startPast makes the node after node the start of the next failover order,
+// unless another request already moved the sticky node. The caller of a 5xx
+// answer retries it. Without the move, every retry would start at the sticky
+// node that answered 5xx while the other replicas sit idle. The node stays in
+// the replica set.
+func (p *Proxy) startPast(node string, nodes []string) {
+	idx := slices.Index(nodes, node)
+	if idx < 0 || len(nodes) < 2 {
+		return
+	}
+	p.mu.Lock()
+	if p.stickyNode == "" || p.stickyNode == node {
+		p.stickyNode = nodes[(idx+1)%len(nodes)]
+	}
+	p.mu.Unlock()
+}
+
+// requestBuilder returns a function that (re)constructs the request: rewind
+// the body, mint/attach the Authorization header, and stamp the caller's
+// headers. The 401 retry reuses it, so the resend carries a rewound body and
+// a fresh token rather than a replayed stale header.
+func (p *Proxy) requestBuilder(ctx context.Context, method, reqURL string, body io.ReadSeeker, setHeaders func(*http.Request)) func() (*http.Request, error) {
+	return func() (*http.Request, error) {
+		var bodyReader io.Reader
+		if body != nil {
+			if _, err := body.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("resetting request body: %w", err)
+			}
+			bodyReader = body
+		}
+		req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		if err := p.setAuthOrError(req); err != nil {
+			return nil, err
+		}
+		if setHeaders != nil {
+			setHeaders(req)
+		}
+		return req, nil
+	}
+}
+
+// recordSticky records the actual responder for connection reuse on the
+// next request. It uses the post-redirect URL, so a 307 to a different
+// replica makes the proxy stick to the redirect target, not the bouncer.
+func (p *Proxy) recordSticky(resp *http.Response, nodes []string) {
+	if resp.Request == nil || resp.Request.URL == nil {
+		return
+	}
+	resolved := resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
+	if slices.Contains(nodes, resolved) {
+		p.mu.Lock()
+		p.stickyNode = resolved
+		p.mu.Unlock()
+	}
 }
 
 // noRedirectClient returns a one-shot client for the cold info/refs probe
@@ -618,7 +680,7 @@ func responseHost(resp *http.Response) string {
 func (p *Proxy) refreshReplicas(resp *http.Response) {
 	if rs := p.filterReplicas(discovery.ParseReplicas(resp.Header.Get("X-Entire-Replicas"))); len(rs) > 0 {
 		debuglog.Printf("X-Entire-Replicas from %s: refreshed replica set to %d nodes %v", responseHost(resp), len(rs), rs)
-		p.nodes = rs
+		p.setReplicaSet(rs)
 		if p.cacheHost != "" && p.repoPath != "" {
 			replicas.Persist(p.cacheHost, p.repoPath, rs)
 		}
@@ -627,7 +689,7 @@ func (p *Proxy) refreshReplicas(resp *http.Response) {
 
 	debuglog.Printf("info/refs response from %s missing X-Entire-Replicas; not refreshing cache", responseHost(resp))
 
-	if len(p.nodes) > 0 {
+	if len(p.replicaSet()) > 0 {
 		return
 	}
 	// Cold start with no header: adopt the host that answered as a single
@@ -636,6 +698,20 @@ func (p *Proxy) refreshReplicas(resp *http.Response) {
 	// pin an attacker URL as the node set.
 	if resp.Request != nil && resp.Request.URL != nil && p.replicaInCluster(resp.Request.URL.String()) {
 		u := &url.URL{Scheme: resp.Request.URL.Scheme, Host: resp.Request.URL.Host}
-		p.nodes = []string{u.String()}
+		p.setReplicaSet([]string{u.String()})
 	}
+}
+
+// replicaSet returns a copy of the replica set.
+func (p *Proxy) replicaSet() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.nodes)
+}
+
+// setReplicaSet replaces the replica set.
+func (p *Proxy) setReplicaSet(nodes []string) {
+	p.mu.Lock()
+	p.nodes = nodes
+	p.mu.Unlock()
 }
