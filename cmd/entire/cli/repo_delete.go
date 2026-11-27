@@ -65,6 +65,7 @@ func runRepoDelete(cmd *cobra.Command, rawRef string, opts repoDeleteOptions) er
 	ref := tr.canon
 	force := forceRequested(cmd)
 	out := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		resolved, err := resolveRepoDeleteRef(ctx, c, ref)
 		if err != nil {
@@ -83,7 +84,12 @@ func runRepoDelete(cmd *cobra.Command, rawRef string, opts repoDeleteOptions) er
 		if opts.cascade {
 			params.Cascade = coreapi.NewOptBool(true)
 		}
+		// The server can take tens of seconds to answer even a plain delete,
+		// so the request runs behind a spinner. It goes to stderr and is
+		// erased either way: the outcome lines below stay on stdout.
+		stop := startSpinner(errW, "Deleting "+label+mirrors)
 		res, err := c.DeleteRepo(ctx, params)
+		stop(false)
 		switch {
 		case isCoreNotFound(err):
 			fmt.Fprintf(out, "%s not found; nothing to delete\n", label)
@@ -102,8 +108,11 @@ func runRepoDelete(cmd *cobra.Command, rawRef string, opts repoDeleteOptions) er
 		fmt.Fprintf(out, "Deleting %s%s…\n", label, mirrors)
 		waitCtx, cancel := context.WithTimeout(ctx, opts.waitTimeout)
 		defer cancel()
-		if err := awaitRepoDeleted(waitCtx, c, resolved.ID); err != nil {
-			return reportUnfinishedDelete(cmd.ErrOrStderr(), label+mirrors, repoCheckCommand(resolved.Name), opts.waitTimeout, err)
+		stop = startSpinner(errW, "Waiting for the server to finish")
+		err = awaitRepoDeleted(waitCtx, c, resolved.ID)
+		stop(false)
+		if err != nil {
+			return reportUnfinishedDelete(errW, label+mirrors, repoCheckCommand(resolved.Name), opts.waitTimeout, err)
 		}
 		fmt.Fprintf(out, "✓ Deleted %s\n", label)
 		return nil
