@@ -49,9 +49,12 @@ func writeSymlinkedGlobalConfig(t *testing.T, contents string) (home string) {
 // pointHomeAt isolates global git config resolution onto home: it sets HOME,
 // disables system config, and forces XDG resolution onto ~/.config by clearing
 // XDG_CONFIG_HOME and unsetting GIT_CONFIG_GLOBAL (see gitenv.UnsetGlobalConfig).
+// On Windows, USERPROFILE is also redirected to home because os.UserHomeDir()
+// prioritizes USERPROFILE over HOME.
 func pointHomeAt(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	gitenv.UnsetGlobalConfig(t)
