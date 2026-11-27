@@ -145,6 +145,31 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 	}
 }
 
+// Codex on Windows runs, and hashes, a handler's commandWindows in place of its
+// command, under either spelling. Hashing command there would pre-trust a hook
+// Codex never runs and leave the one it does run untrusted, so it never fires.
+func TestCodexHookHandlers_SelectedCommandMirrorsCodex(t *testing.T) {
+	t.Parallel()
+	windows := "cmd.exe /d /s /c \"entire hooks codex stop\""
+	cases := []struct {
+		name    string
+		handler codexHookHandlers
+		goos    string
+		want    string
+	}{
+		{"no override on windows", codexHookHandlers{Command: "sh"}, "windows", "sh"},
+		{"override on windows", codexHookHandlers{Command: "sh", CommandWindows: &windows}, "windows", windows},
+		{"snake_case override on windows", codexHookHandlers{Command: "sh", CommandWindowsAlias: &windows}, "windows", windows},
+		{"override elsewhere", codexHookHandlers{Command: "sh", CommandWindows: &windows}, "linux", "sh"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, tc.handler.selectedCommand(tc.goos))
+		})
+	}
+}
+
 // TestCodexHookTrustState_MissingFileIsNoop returns empty trust state
 // (and no error) when there's no hooks.json yet — the e2e seed runs
 // before some tests' enable step.

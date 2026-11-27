@@ -12,7 +12,6 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -55,7 +54,7 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 	// loaded, so Entire's hooks are passed as session flags. Codex runs
 	// session-flag hooks only with persisted trust or this bypass; it does
 	// not load the checkout's hooks, which stay untrusted.
-	cfg.ExtraArgs = append(cfg.ExtraArgs, entireHookOverrides(agent.UseWindowsProductionHooks(ctx))...)
+	cfg.ExtraArgs = append(cfg.ExtraArgs, entireHookOverrides()...)
 	cfg.ExtraArgs = append(cfg.ExtraArgs, "--dangerously-bypass-hook-trust")
 	cfg.WorkDir = run.CheckoutRoot
 	return cfg, nil, nil
@@ -177,15 +176,20 @@ func refuseUserMCPServerClash(servers map[string]json.RawMessage) error {
 }
 
 // entireHookOverrides returns -c overrides that register Entire's managed
-// Codex hooks, the same commands `entire enable` writes to hooks.json.
-func entireHookOverrides(windows bool) []string {
+// Codex hooks, the same entries `entire enable` writes to hooks.json.
+func entireHookOverrides() []string {
 	var args []string
 	for _, h := range managedHooks {
-		command, err := json.Marshal(h.wrap("entire hooks codex "+h.verb, windows))
+		posix, windows := h.commands()
+		command, err := json.Marshal(posix)
 		if err != nil {
 			continue
 		}
-		args = append(args, "-c", fmt.Sprintf(`hooks.%s=[{hooks=[{type="command",command=%s,timeout=%d}]}]`, h.event, command, h.timeout))
+		commandWindows, err := json.Marshal(windows)
+		if err != nil {
+			continue
+		}
+		args = append(args, "-c", fmt.Sprintf(`hooks.%s=[{hooks=[{type="command",command=%s,commandWindows=%s,timeout=%d}]}]`, h.event, command, commandWindows, h.timeout))
 	}
 	return args
 }

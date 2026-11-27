@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -75,6 +76,64 @@ func TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout(t *testing.T)
 		}
 	}
 	require.True(t, foundPrimary, "hooks/list did not return the primary checkout hook")
+}
+
+// TestCodexAppServerHooksList_LoadsEntireHooks runs the hooks.json that
+// `entire enable --agent codex` writes through Codex's own discovery. Every
+// handler carries commandWindows, the command Codex runs on Windows (#2884);
+// this pins that the Codex release under test loads them all without a warning
+// or an error, and lists for each the command it selects on this host.
+func TestCodexAppServerHooksList_LoadsEntireHooks(t *testing.T) {
+	t.Parallel()
+
+	codexPath := requireCodexAppServer(t)
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("initial commit")
+	output, err := env.RunCLIWithError("enable", "--agent", "codex")
+	require.NoError(t, err, "enable --agent codex: %s", output)
+
+	hooksPath := filepath.Join(env.RepoDir, ".codex", codex.HooksFileName)
+	data, err := os.ReadFile(hooksPath)
+	require.NoError(t, err)
+	var file struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command        string `json:"command"`
+				CommandWindows string `json:"commandWindows"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &file))
+	var want []string
+	for _, groups := range file.Hooks {
+		for _, group := range groups {
+			for _, handler := range group.Hooks {
+				require.NotEmpty(t, handler.CommandWindows, "every managed handler carries commandWindows: %s", data)
+				selected := handler.Command
+				if runtime.GOOS == "windows" {
+					selected = handler.CommandWindows
+				}
+				want = append(want, selected)
+			}
+		}
+	}
+	require.NotEmpty(t, want)
+
+	result := listCodexHooks(t, codexPath, env.RepoDir)
+	require.Len(t, result.Data, 1)
+	entry := result.Data[0]
+	require.Empty(t, entry.Warnings)
+	require.Empty(t, entry.Errors)
+	var got []string
+	for _, hook := range entry.Hooks {
+		require.Equal(t, hooksPath, hook.SourcePath)
+		got = append(got, hook.Command)
+	}
+	require.ElementsMatch(t, want, got, "hooks/list result: %+v", result)
 }
 
 func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {

@@ -1,10 +1,8 @@
 package claudecode
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"maps"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -40,13 +38,13 @@ type claudeHookMatcherFields ClaudeHookMatcher
 
 func (m *ClaudeHookMatcher) UnmarshalJSON(data []byte) error {
 	*m = ClaudeHookMatcher{} // see ClaudeHookEntry.UnmarshalJSON
-	extra, _, err := unmarshalKeepingExtra(data, (*claudeHookMatcherFields)(m), "matcher", "hooks")
+	extra, _, err := jsonutil.UnmarshalKeepingExtra(data, (*claudeHookMatcherFields)(m), "matcher", "hooks")
 	m.extra = extra
-	return err
+	return err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
 }
 
 func (m ClaudeHookMatcher) MarshalJSON() ([]byte, error) {
-	return marshalWithExtra(claudeHookMatcherFields(m), m.extra)
+	return jsonutil.MarshalWithExtra(claudeHookMatcherFields(m), m.extra) //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
 }
 
 // ClaudeHookEntry represents a single hook command
@@ -71,7 +69,7 @@ func (e *ClaudeHookEntry) UnmarshalJSON(data []byte) error {
 	// encoding/json reuses slice elements without zeroing them, so bytes kept
 	// from a previous decode must not survive into this one.
 	*e = ClaudeHookEntry{}
-	extra, present, err := unmarshalKeepingExtra(data, (*claudeHookEntryFields)(e), "type", "command", "timeout")
+	extra, present, err := jsonutil.UnmarshalKeepingExtra(data, (*claudeHookEntryFields)(e), "type", "command", "timeout")
 	e.extra = extra
 	if typeErr := (*json.UnmarshalTypeError)(nil); errors.As(err, &typeErr) {
 		// The other modeled fields still decoded, so Entire can recognise its own
@@ -82,71 +80,14 @@ func (e *ClaudeHookEntry) UnmarshalJSON(data []byte) error {
 	if err == nil && e.Timeout == 0 && slices.Contains(present, "timeout") {
 		e.raw = slices.Clone(data)
 	}
-	return err
+	return err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
 }
 
 func (e ClaudeHookEntry) MarshalJSON() ([]byte, error) {
 	if e.raw != nil {
 		return e.raw, nil
 	}
-	return marshalWithExtra(claudeHookEntryFields(e), e.extra)
-}
-
-// unmarshalKeepingExtra decodes the knownKeys of data into known and returns
-// every other key, plus the knownKeys data contained. Entire rewrites
-// settings.json, which the user and Claude Code own, so every field it does not
-// model must survive the round trip.
-//
-// Only exact knownKeys are decoded: encoding/json matches field names
-// case-insensitively, so decoding data whole would read a key such as "Command",
-// which Claude Code ignores, into the live command field.
-func unmarshalKeepingExtra(data []byte, known any, knownKeys ...string) (extra map[string]json.RawMessage, present []string, err error) {
-	if err := json.Unmarshal(data, &extra); err != nil {
-		return nil, nil, err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
-	}
-	modeled := make(map[string]json.RawMessage, len(knownKeys))
-	for _, k := range knownKeys {
-		if v, ok := extra[k]; ok {
-			modeled[k] = v
-			present = append(present, k)
-			delete(extra, k)
-		}
-	}
-	modeledJSON, err := json.Marshal(modeled)
-	if err != nil {
-		return nil, nil, err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
-	}
-	if err := json.Unmarshal(modeledJSON, known); err != nil {
-		return nil, nil, err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
-	}
-	return extra, present, nil
-}
-
-// marshalWithExtra encodes known, then appends extra in key order, so modeled
-// fields keep their usual position and output stays deterministic.
-func marshalWithExtra(known any, extra map[string]json.RawMessage) ([]byte, error) {
-	data, err := jsonutil.MarshalWithNoHTMLEscape(known)
-	if err != nil || len(extra) == 0 {
-		return data, err //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
-	}
-	var buf bytes.Buffer
-	buf.Write(data[:len(data)-1])
-	needComma := len(data) > len("{}")
-	for _, k := range slices.Sorted(maps.Keys(extra)) {
-		key, err := jsonutil.MarshalWithNoHTMLEscape(k)
-		if err != nil {
-			return nil, err //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
-		}
-		if needComma {
-			buf.WriteByte(',')
-		}
-		needComma = true
-		buf.Write(key)
-		buf.WriteByte(':')
-		buf.Write(extra[k])
-	}
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
+	return jsonutil.MarshalWithExtra(claudeHookEntryFields(e), e.extra) //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
 }
 
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.

@@ -451,25 +451,35 @@ The sh-based wrappers carry `>` and `&`. On Windows, an agent that hands the
 stored command to `cmd.exe` has those read as its own redirection and separator,
 so the command is cut apart and `entire` never runs — at **exit code 0**, so
 nothing reports a problem. Never install an unconditional
-`WrapProductionSilentHookCommand`; choose per host with the `*ForOS` selectors
-(`WrapProductionSilentHookCommandForOS`,
+`WrapProductionSilentHookCommand` as a hook's only command; choose per host
+with the `*ForOS` selectors (`WrapProductionSilentHookCommandForOS`,
 `WrapProductionJSONWarningHookCommandForOS`,
 `WrapProductionPlainTextWarningHookCommandForOS`), passing one of two gates:
 
 | Gate | Use it when | Adopters |
 | --- | --- | --- |
-| `agent.UseWindowsProductionHooks(ctx)` | The agent may genuinely reach a POSIX sh on Windows. Probes whether `sh -c 'exit 0'` runs and keeps the sh wrapper if it does. | codex, cursor |
+| `agent.UseWindowsProductionHooks(ctx)` | The agent may genuinely reach a POSIX sh on Windows. Probes whether `sh -c 'exit 0'` runs and keeps the sh wrapper if it does. | cursor |
 | `agent.HookHostIsWindows()` | The agent hands every hook to `cmd.exe` on Windows whatever else is installed. No probe. | factoryai-droid |
+
+Prefer neither when the agent's config can hold a separate Windows command and
+the agent picks between the two itself. Codex is one: each hook takes a
+`commandWindows` that Codex runs instead of `command` on native Windows, so
+Entire writes the sh wrapper to `command` and a Windows wrapper to
+`commandWindows`, and the file is the same on every host. Codex may run that
+Windows command through PowerShell or `cmd.exe`, so it uses the bare nested
+forms (`WrapWindowsProductionSilentHookCommand`,
+`WrapWindowsProductionNestedPlainTextWarningHookCommand`), whose whole `cmd.exe`
+line is one double-quoted string both shells pass through untouched.
 
 **Establish which by reading the agent's runner, not by assuming.** The probe is
 not the safe default: it only proves that a command carrying *no* cmd.exe
 metacharacters runs, so a Windows host with Git Bash reports success while the
 real wrapper is still cut apart. That is exactly how droid shipped broken on
 Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
-read out of the shipped binaries, and for why codex and cursor are on the other
-gate for reasons of evidence rather than mechanism.
+read out of the shipped binaries, and for why cursor is on the other gate for
+reasons of evidence rather than mechanism.
 
-Pick the silent selector by how the agent runs the line on Windows: factoryai-droid uses `WrapProductionSilentHookCommandForCmdHostOS`, codex and cursor use `WrapProductionSilentHookCommandForOS`, and antigravity uses `WrapWindowsProductionSilentHookCommandDirect`. The rules are in the comment above `WrapWindowsProductionSilentHookCommand`, and why every Windows wrapper sets `NoDefaultCurrentDirectoryInExePath` is in "Hook Commands Resolve Programs from PATH" in [Git and subprocess safety](../development/git-safety.md).
+Pick the silent selector by how the agent runs the line on Windows: factoryai-droid uses `WrapProductionSilentHookCommandForCmdHostOS`, cursor uses `WrapProductionSilentHookCommandForOS`, codex writes `WrapWindowsProductionSilentHookCommand` as its `commandWindows`, and antigravity uses `WrapWindowsProductionSilentHookCommandDirect`. The rules are in the comment above `WrapWindowsProductionSilentHookCommand`, and why every Windows wrapper sets `NoDefaultCurrentDirectoryInExePath` is in "Hook Commands Resolve Programs from PATH" in [Git and subprocess safety](../development/git-safety.md).
 
 Put a warning wrapper on one hook that fires every session (usually session
 start) so a broken install is visible. The sh-based warning wrappers warn both
@@ -477,7 +487,8 @@ when `entire` is missing from PATH and when it is on PATH but `entire --version`
 fails, such as a version-manager shim with no version selected, and exit 0
 either way. Otherwise they `exec` the hook, so an agent's timeout signal reaches
 `entire` itself and the hook's exit code and output pass through unchanged. The
-silent and Windows wrappers still check only that `entire` is on PATH.
+silent wrappers, and every Windows warning wrapper except Codex's nested one,
+still check only that `entire` is on PATH.
 
 Both gates are overridable in tests via `agent.SetWindowsHookProbeForTesting`;
 key install-test expectations to the host rather than hardcoding one wrapper, or

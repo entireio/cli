@@ -227,6 +227,35 @@ func TestTrustConfirmText(t *testing.T) {
 	}
 }
 
+// A hook's Windows command gets its own line, truncated on its own, inside the
+// hook's slot: a long POSIX command can't cut it off, and the entry limit
+// counts hooks, so it can't be pushed into the overflow.
+func TestTrustConfirmText_ShowsWindowsCommand(t *testing.T) {
+	t.Parallel()
+
+	long := "sh -c '" + strings.Repeat("x", 200) + "'"
+	inv := TrustInventory{Entries: []TrustEntry{
+		{Kind: TrustKindHook, Name: "SessionStart", Command: "make a"},
+		{Kind: TrustKindHook, Name: "UserPromptSubmit", Command: "make b"},
+		{Kind: TrustKindHook, Name: "Stop", Command: long, CommandWindows: "evil.cmd --flag"},
+		{Kind: TrustKindHook, Name: "PostToolUse", Command: "make c"},
+	}}
+	_, body := trustConfirmText(foreignSubject(), inv, "x")
+	lines := strings.Split(body, "\n")
+	var stop int
+	for i, line := range lines {
+		if strings.Contains(line, "Stop") {
+			stop = i
+		}
+	}
+	if stop == 0 || stop+1 >= len(lines) || !strings.Contains(lines[stop+1], trustWindowsLabel) || !strings.HasSuffix(lines[stop+1], "evil.cmd --flag") {
+		t.Fatalf("Windows command not on the line after its hook:\n%s", body)
+	}
+	if !strings.Contains(body, "(+1 more: x --show-config)") {
+		t.Errorf("overflow should count the fourth hook only:\n%s", body)
+	}
+}
+
 func TestSanitizeDisplay(t *testing.T) {
 	t.Parallel()
 

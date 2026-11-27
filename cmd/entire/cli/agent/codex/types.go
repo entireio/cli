@@ -1,6 +1,12 @@
 package codex
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"maps"
+	"slices"
+
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+)
 
 // HooksFile represents the .codex/hooks.json structure.
 type HooksFile struct {
@@ -23,13 +29,109 @@ type HookEvents struct {
 type MatcherGroup struct {
 	Matcher *string     `json:"matcher"`
 	Hooks   []HookEntry `json:"hooks"`
+	// extra keeps the fields Entire does not model, so rewriting hooks.json
+	// leaves the rest of the user's group as they wrote it.
+	extra map[string]json.RawMessage
 }
 
-// HookEntry represents a single hook command in the config.
+// matcherGroupFields is MatcherGroup without its JSON methods.
+type matcherGroupFields MatcherGroup
+
+func (g *MatcherGroup) UnmarshalJSON(data []byte) error {
+	*g = MatcherGroup{} // see HookEntry.UnmarshalJSON
+	extra, _, err := jsonutil.UnmarshalKeepingExtra(data, (*matcherGroupFields)(g), "matcher", "hooks")
+	g.extra = extra
+	return err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
+}
+
+func (g MatcherGroup) MarshalJSON() ([]byte, error) {
+	return jsonutil.MarshalWithExtra(matcherGroupFields(g), g.extra) //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
+}
+
+// HookEntry represents a single hook handler in the config.
+//
+// Command is what Codex runs on macOS and Linux. CommandWindows replaces it on
+// native Windows: Codex picks between the two by the platform it was built for
+// (codex-rs/hooks/src/engine/discovery.rs), so a hooks.json carrying both runs
+// the right one wherever it is checked out, whichever shell wrote it.
 type HookEntry struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
+	Type           string `json:"type"`
+	Command        string `json:"command,omitempty"`
+	CommandWindows string `json:"commandWindows,omitempty"`
+	Timeout        int    `json:"timeout,omitempty"`
+	// extra keeps every field Entire does not model (statusMessage, async,
+	// additionalContextLimit, a command_windows spelling, mcp_tool's server and
+	// tool, and anything Codex adds later), so a user's own hook survives
+	// `entire enable` unchanged.
+	extra map[string]json.RawMessage
+	// raw holds the entry as written when it sets a modeled field to its zero
+	// value, which would otherwise read and re-encode as the field being absent:
+	// Codex clamps a timeout of 0 to 1 second but treats an absent one as its
+	// 600-second default, and skips a command hook whose command is "" but
+	// refuses to load one with no command at all.
+	raw json.RawMessage
+}
+
+// hookEntryFields is HookEntry without its JSON methods.
+type hookEntryFields HookEntry
+
+func (e *HookEntry) UnmarshalJSON(data []byte) error {
+	// encoding/json reuses slice elements without zeroing them, so fields kept
+	// from a previous decode must not survive into this one.
+	*e = HookEntry{}
+	extra, present, err := jsonutil.UnmarshalKeepingExtra(data, (*hookEntryFields)(e), "type", "command", "commandWindows", "timeout")
+	e.extra = extra
+	if err == nil && setsZeroValue(e, present) {
+		e.raw = slices.Clone(data)
+	}
+	return err //nolint:wrapcheck // returned from UnmarshalJSON; encoding/json adds context
+}
+
+// withManagedSettings returns e running want's commands with want's type and
+// timeout, keeping every other field e carries. command_windows is dropped:
+// Codex rejects a handler that sets both spellings, and commandWindows is
+// written.
+func (e HookEntry) withManagedSettings(want HookEntry) HookEntry {
+	e.Type, e.Command, e.CommandWindows, e.Timeout = want.Type, want.Command, want.CommandWindows, want.Timeout
+	e.raw = nil
+	if _, ok := e.extra["command_windows"]; ok {
+		e.extra = maps.Clone(e.extra)
+		delete(e.extra, "command_windows")
+	}
+	return e
+}
+
+// setsZeroValue reports whether one of the present modeled keys of e decoded to
+// its zero value, which omitempty would drop on the way back out.
+func setsZeroValue(e *HookEntry, present []string) bool {
+	for _, key := range present {
+		switch key {
+		case "type":
+			if e.Type == "" {
+				return true
+			}
+		case "command":
+			if e.Command == "" {
+				return true
+			}
+		case "commandWindows":
+			if e.CommandWindows == "" {
+				return true
+			}
+		case "timeout":
+			if e.Timeout == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e HookEntry) MarshalJSON() ([]byte, error) {
+	if e.raw != nil {
+		return e.raw, nil
+	}
+	return jsonutil.MarshalWithExtra(hookEntryFields(e), e.extra) //nolint:wrapcheck // returned from MarshalJSON; encoding/json adds context
 }
 
 // sessionInfoRaw is the JSON structure shared by the session-scoped hooks,

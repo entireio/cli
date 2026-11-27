@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -131,13 +133,43 @@ func TestPrepareCodexReviewConfigRefusesUserMCPServerName(t *testing.T) {
 }
 
 // Entire's hooks are passed as session flags, since the untrusted checkout's
-// hooks.json isn't loaded, and run without persisted trust.
+// hooks.json isn't loaded, and run without persisted trust. Each override must
+// carry the same entry hooks.json gets, Windows command included, or a review
+// on Windows would run the POSIX wrapper through PowerShell.
 func TestEntireHookOverrides(t *testing.T) {
 	t.Parallel()
-	args := strings.Join(entireHookOverrides(false), "\n")
-	for _, want := range []string{`hooks.SessionStart=[{hooks=[{type="command",command=`, "entire hooks codex session-start", "hooks.Stop="} {
-		if !strings.Contains(args, want) {
-			t.Errorf("overrides missing %q:\n%s", want, args)
+	args := entireHookOverrides()
+	if len(args) != 2*len(managedHooks) {
+		t.Fatalf("got %d args, want a -c pair per managed hook (%d): %v", len(args), 2*len(managedHooks), args)
+	}
+	for i, h := range managedHooks {
+		if args[2*i] != "-c" {
+			t.Fatalf("args[%d] = %q, want -c", 2*i, args[2*i])
+		}
+		key, value, ok := strings.Cut(args[2*i+1], "=")
+		if !ok || key != "hooks."+h.event {
+			t.Fatalf("override %q does not set hooks.%s", args[2*i+1], h.event)
+		}
+		var parsed struct {
+			V []struct {
+				Hooks []struct {
+					Type           string `toml:"type"`
+					Command        string `toml:"command"`
+					CommandWindows string `toml:"commandWindows"`
+					Timeout        int    `toml:"timeout"`
+				} `toml:"hooks"`
+			} `toml:"v"`
+		}
+		if err := toml.Unmarshal([]byte("v = "+value), &parsed); err != nil {
+			t.Fatalf("override for %s is not TOML: %v\n%s", h.event, err, value)
+		}
+		if len(parsed.V) != 1 || len(parsed.V[0].Hooks) != 1 {
+			t.Fatalf("override for %s should hold one group with one hook: %s", h.event, value)
+		}
+		got := parsed.V[0].Hooks[0]
+		want := managedEntry(h)
+		if got.Type != want.Type || got.Command != want.Command || got.CommandWindows != want.CommandWindows || got.Timeout != want.Timeout {
+			t.Errorf("override for %s = %+v, want %+v", h.event, got, want)
 		}
 	}
 }
