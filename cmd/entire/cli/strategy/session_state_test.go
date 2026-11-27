@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -278,6 +279,67 @@ func TestClearSessionState_PreservesLockFile(t *testing.T) {
 
 	_, statErr = os.Stat(lockPath)
 	require.NoError(t, statErr, "ClearSessionState must not unlink the lock file (would break flock semantics)")
+}
+
+// TestSessionStateAndLockHonorExportedGitDir pins that CWD-scoped session
+// state and its lock resolve the same common dir when the caller exports Git
+// repository selectors. A split would let two writers of one state file hold
+// different locks.
+func TestSessionStateAndLockHonorExportedGitDir(t *testing.T) {
+	// CWD, Git environment, and resolver caches are process-global.
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, tmp string) (cwd, commonDir string)
+	}{
+		{
+			name: "foreign_git_dir",
+			setup: func(t *testing.T, tmp string) (string, string) {
+				t.Helper()
+				root := filepath.Join(tmp, "root")
+				other := filepath.Join(tmp, "other")
+				testutil.InitRepo(t, root)
+				testutil.InitRepo(t, other)
+				t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+				return root, filepath.Join(other, ".git")
+			},
+		},
+		{
+			name: "split_work_tree",
+			setup: func(t *testing.T, tmp string) (string, string) {
+				t.Helper()
+				store := filepath.Join(tmp, "store.git")
+				workTree := filepath.Join(tmp, "work")
+				testutil.RunGit(t, tmp, "init", "--bare", store)
+				require.NoError(t, os.Mkdir(workTree, 0o750))
+				t.Setenv("GIT_DIR", store)
+				t.Setenv("GIT_WORK_TREE", workTree)
+				return workTree, store
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd, commonDir := tc.setup(t, t.TempDir())
+			t.Chdir(cwd)
+			paths.ClearWorktreeRootCache()
+			session.ClearGitCommonDirCache()
+			t.Cleanup(paths.ClearWorktreeRootCache)
+			t.Cleanup(session.ClearGitCommonDirCache)
+			ctx := context.Background()
+
+			sessionID := "exported-git-dir"
+			require.NoError(t, SaveSessionState(ctx, &SessionState{SessionID: sessionID, StartedAt: time.Now()}))
+			require.FileExists(t, filepath.Join(commonDir, session.SessionStateDirName, sessionID+".json"))
+
+			lockPath, err := stateLockPath(ctx, sessionID)
+			require.NoError(t, err)
+			lockCommonDir, err := os.Stat(filepath.Dir(filepath.Dir(lockPath)))
+			require.NoError(t, err)
+			wantCommonDir, err := os.Stat(commonDir)
+			require.NoError(t, err)
+			require.True(t, os.SameFile(wantCommonDir, lockCommonDir),
+				"lock %s must live in the state's common dir %s", lockPath, commonDir)
+		})
+	}
 }
 
 // TestMutateSessionState_DoesNotClobberRicherStateUnderRace simulates the

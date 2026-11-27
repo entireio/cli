@@ -148,10 +148,7 @@ func adoptFromExternalSessionStore(
 	sessionID string,
 	opts adoptOptions,
 ) (*session.State, adoptChanges, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
-	}
+	sourceWorktreeID := bestEffortAdoptWorktreeID(sourceWorktree)
 
 	var adopted *session.State
 	var changes adoptChanges
@@ -242,10 +239,7 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 		return nil, adoptChanges{}, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
 	}
 
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
-	}
+	sourceWorktreeID := bestEffortAdoptWorktreeID(sourceWorktree)
 
 	var adopted *session.State
 	var changes adoptChanges
@@ -528,10 +522,7 @@ func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.S
 }
 
 func selectAdoptSourceSession(ctx context.Context, store *session.StateStore, sourceWorktree, sessionID string) (*session.State, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
-	}
+	sourceWorktreeID := bestEffortAdoptWorktreeID(sourceWorktree)
 	if sessionID != "" {
 		sourceState, err := store.Load(ctx, sessionID)
 		if err != nil {
@@ -590,6 +581,14 @@ func sessionBelongsToSourceWorktree(state *session.State, sourceWorktree, source
 		return sameAdoptPath(state.WorktreePath, sourceWorktree)
 	}
 	return false
+}
+
+func bestEffortAdoptWorktreeID(worktree string) string {
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktree)
+	if err != nil {
+		return ""
+	}
+	return metadata.WorktreeID
 }
 
 func adoptSessionWorktreeLabel(state *session.State) string {
@@ -657,7 +656,11 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	if err != nil {
 		return nil, adoptChanges{}, fmt.Errorf("resolve current worktree root: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreeRoot)
+	// Hook paths still derive WorktreeID with paths.GetWorktreeID, which only
+	// recognizes registrations under .git/ or .bare/. Both yield the same ID for
+	// main and linked worktrees in those layouts; only this resolver also
+	// accepts a bare repository with any other name.
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, adoptChanges{}, fmt.Errorf("resolve current worktree ID: %w", err)
 	}
@@ -702,7 +705,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	cleared := dropInvalidAdoptTaskTranscripts(ctx, &adopted, home, sourceWorktree)
 	adopted.BaseCommit = head.Hash().String()
 	adopted.WorktreePath = worktreeRoot
-	adopted.WorktreeID = worktreeID
+	adopted.WorktreeID = metadata.WorktreeID
 	adopted.AdoptedIntoWorktreePath = ""
 	adopted.AdoptedIntoWorktreeID = ""
 	adopted.Branch = branch
