@@ -809,8 +809,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
-	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
-		return skipped, nil
+	if sessionData.CaptureStatus == "" {
+		if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
+			return skipped, nil
+		}
 	}
 
 	filterFilesTouched(sessionData, committedFiles, state)
@@ -823,8 +825,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if err != nil {
 		return nil, err
 	}
-	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
-		return skipped, nil
+	if sessionData.CaptureStatus == "" {
+		if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
+			return skipped, nil
+		}
 	}
 
 	// Telemetry-only search probe, computed exactly once for every result this
@@ -910,6 +914,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 		NewSkillEvents:         newSkillEvents,
 		SearchProbe:            sessionData.SearchProbe,
+		CaptureUnavailable:     sessionData.CaptureStatus == "unavailable",
 	}, nil
 }
 
@@ -994,6 +999,8 @@ func buildCondensationWriteOptions(
 		HasInvestigation:            state.Kind.IsInvestigate(),
 		InvestigateRunID:            state.InvestigateRunID,
 		InvestigateTopic:            state.InvestigateTopic,
+		TranscriptCaptureStatus:     sessionData.CaptureStatus,
+		TranscriptCaptureReason:     sessionData.CaptureReason,
 	}, newSkillEvents
 }
 
@@ -1530,6 +1537,26 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 	return result
 }
 
+const devinAgentType = types.AgentType("Devin")
+
+type captureUnavailableError struct {
+	Reason string
+	Err    error
+}
+
+func (e *captureUnavailableError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "transcript capture unavailable: " + e.Reason
+}
+
+func (e *captureUnavailableError) Unwrap() error { return e.Err }
+
+func captureUnavailable(reason string, err error) *captureUnavailableError {
+	return &captureUnavailableError{Reason: reason, Err: err}
+}
+
 // condensationTranscript returns the transcript a condensation stores and the
 // path it was read from: the agent's live transcript when it is readable and
 // non-empty, else the sanitized copy the last Stop stored under
@@ -1545,21 +1572,49 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 //
 // storedRoot is the .entire root holding the stored copy (storedSessionRoot),
 // resolved once per condensation; nil means there is none to read.
-func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (data []byte, path string) {
+func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (data []byte, path string, err error) {
+	if state.AgentType == devinAgentType {
+		return devinCondensationTranscript(ctx, ag, state)
+	}
 	if state.TranscriptPath != "" {
 		if state.Phase.IsActive() {
 			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
 		}
-		if transcriptPath, err := resolveTranscriptPath(state); err == nil {
+		if transcriptPath, resolveErr := resolveTranscriptPath(state); resolveErr == nil {
 			if live, readErr := agent.ReadTranscriptFile(transcriptPath); readErr == nil && len(live) > 0 {
-				return live, transcriptPath
+				return live, transcriptPath, nil
 			}
 		}
 	}
 	if storedRoot == nil {
-		return nil, ""
+		return nil, "", nil
 	}
-	return readStoredTranscriptIn(storedRoot, state.SessionID), ""
+	return readStoredTranscriptIn(storedRoot, state.SessionID), "", nil
+}
+
+func devinCondensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState) (data []byte, path string, err error) {
+	if state.TranscriptPath == "" {
+		return nil, "", captureUnavailable("no_transcript_path", errors.New("devin session has no transcript path"))
+	}
+	preparer, ok := agent.AsTranscriptPreparer(ag)
+	if !ok {
+		return nil, "", captureUnavailable("no_preparer", errors.New("devin agent cannot prepare its transcript"))
+	}
+	if prepErr := preparer.PrepareTranscript(ctx, state.TranscriptPath); prepErr != nil {
+		return nil, "", captureUnavailable("prepare_failed", prepErr)
+	}
+	transcriptPath, resolveErr := resolveTranscriptPath(state)
+	if resolveErr != nil {
+		return nil, "", captureUnavailable("snapshot_unreadable", fmt.Errorf("resolve devin transcript path: %w", resolveErr))
+	}
+	live, readErr := agent.ReadTranscriptFile(transcriptPath)
+	if readErr != nil {
+		return nil, "", captureUnavailable("snapshot_unreadable", fmt.Errorf("read devin transcript: %w", readErr))
+	}
+	if len(live) == 0 {
+		return nil, "", captureUnavailable("snapshot_empty", errors.New("devin transcript is empty"))
+	}
+	return live, transcriptPath, nil
 }
 
 // extractSessionData extracts what a condensation stores for a session: its
@@ -1595,7 +1650,22 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.
 // already resolved (see condensationTranscript).
 func (s *ManualCommitStrategy) extractSessionDataFrom(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (*ExtractedSessionData, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	transcript, transcriptPath := condensationTranscript(ctx, ag, state, storedRoot)
+	transcript, transcriptPath, transcriptErr := condensationTranscript(ctx, ag, state, storedRoot)
+	if transcriptErr != nil {
+		var capErr *captureUnavailableError
+		if errors.As(transcriptErr, &capErr) {
+			data := &ExtractedSessionData{
+				FilesTouched:  s.resolveFilesTouched(ctx, state),
+				CaptureStatus: "unavailable",
+				CaptureReason: capErr.Reason,
+			}
+			if storedRoot != nil {
+				data.Prompts = readPromptsIn(storedRoot, state.SessionID)
+			}
+			return data, nil
+		}
+		return nil, transcriptErr
+	}
 
 	if len(transcript) == 0 {
 		_, lateWriter := agent.AsLateTranscriptWriter(ag)
@@ -2269,6 +2339,9 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 // sessions or marks empty ENDED sessions fully condensed. File-bearing sessions
 // remain eligible for PostCommit.
 func PrepareSessionEndCondensation(ctx context.Context, state *SessionState) error {
+	if state.AgentType == devinAgentType {
+		NewManualCommitStrategy().repairUnavailableCaptures(ctx, state)
+	}
 	if state.Phase != session.PhaseEnded || state.HasPendingFiles() {
 		return nil
 	}

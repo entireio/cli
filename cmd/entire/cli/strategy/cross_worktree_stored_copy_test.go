@@ -182,7 +182,8 @@ func TestStoredSessionRoot_RefusesUntrustedWorktreePaths(t *testing.T) { //nolin
 	// Control: the same registered worktree named absolutely IS read, so the
 	// relative case above was refused for how it was named, not for its copy.
 	state := &SessionState{SessionID: sessionID, WorktreePath: linked}
-	transcript, _ := condensationTranscript(context.Background(), nil, state, storedSessionRootOrNil(context.Background(), state))
+	transcript, _, err := condensationTranscript(context.Background(), nil, state, storedSessionRootOrNil(context.Background(), state))
+	require.NoError(t, err)
 	assert.Contains(t, string(transcript), "linked-copy")
 }
 
@@ -217,7 +218,8 @@ func TestStoredSessionRoot_RefusesSymlinkedEntireInRegisteredWorktree(t *testing
 // copy fell back to the current (main) worktree's copy.
 func assertReadsMainCopy(t *testing.T, state *SessionState) {
 	t.Helper()
-	transcript, path := condensationTranscript(t.Context(), nil, state, storedSessionRootOrNil(t.Context(), state))
+	transcript, path, err := condensationTranscript(t.Context(), nil, state, storedSessionRootOrNil(t.Context(), state))
+	require.NoError(t, err)
 	assert.Empty(t, path)
 	assert.Contains(t, string(transcript), "main-worktree-copy")
 

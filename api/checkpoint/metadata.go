@@ -282,6 +282,16 @@ type WriteOptions struct {
 	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
 	// session — the session package imports checkpoint, creating a cycle.
 	HasInvestigation bool
+
+	// TranscriptCaptureStatus records whether the session transcript was
+	// captured for this checkpoint: "" (default, captured), "unavailable"
+	// (capture failed; the checkpoint was still written without a transcript),
+	// or "repaired" (a later update wrote the transcript in place).
+	TranscriptCaptureStatus string
+
+	// TranscriptCaptureReason is a fixed, path-free reason string explaining
+	// an "unavailable" TranscriptCaptureStatus (e.g. "prepare_failed").
+	TranscriptCaptureReason string
 }
 
 // UpdateOptions contains options for updating an existing persistent checkpoint.
@@ -329,6 +339,12 @@ type UpdateOptions struct {
 	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
 	// re-compressing identical content N times.
 	PrecomputedBlobs *PrecomputedTranscriptBlobs
+
+	// TranscriptCaptureStatus and TranscriptCaptureReason are written to the
+	// session metadata exactly as carried: an update with "" clears a status
+	// a prior write recorded (e.g. finalize replacing an unavailable capture).
+	TranscriptCaptureStatus string
+	TranscriptCaptureReason string
 }
 
 // PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
@@ -543,6 +559,16 @@ type Metadata struct {
 	// InvestigateTopic is the human-readable topic the investigation was
 	// asked to investigate. Only set when Kind is an investigate kind.
 	InvestigateTopic string `json:"investigate_topic,omitempty"`
+
+	// TranscriptCaptureStatus records whether the session transcript was
+	// captured for this checkpoint: "" (default, captured), "unavailable"
+	// (capture failed; checkpoint written without a transcript), or
+	// "repaired" (a later update wrote the transcript in place).
+	TranscriptCaptureStatus string `json:"transcript_capture_status,omitempty"`
+
+	// TranscriptCaptureReason is a fixed, path-free reason string explaining
+	// an "unavailable" TranscriptCaptureStatus.
+	TranscriptCaptureReason string `json:"transcript_capture_reason,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.

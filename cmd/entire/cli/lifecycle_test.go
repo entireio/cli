@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
@@ -1158,6 +1159,281 @@ func TestHandleLifecycleTurnEnd_PreparerCreatesFile(t *testing.T) {
 	if err != nil && strings.Contains(err.Error(), "transcript file not found") {
 		t.Errorf("handler failed with 'transcript file not found' — PrepareTranscript was not called before fileExists check: %v", err)
 	}
+}
+
+type mockTurnEndPreparerAgent struct {
+	mockLifecycleAgent
+
+	prepareErr   error
+	prepareCalls int
+	readCalls    int
+}
+
+var _ agent.TranscriptPreparer = (*mockTurnEndPreparerAgent)(nil)
+
+func (m *mockTurnEndPreparerAgent) PrepareTranscript(_ context.Context, _ string) error {
+	m.prepareCalls++
+	return m.prepareErr
+}
+
+func (m *mockTurnEndPreparerAgent) ReadTranscript(_ string) ([]byte, error) {
+	m.readCalls++
+	return m.transcriptData, nil
+}
+
+type mockTurnEndNoPreparerAgent struct {
+	mockLifecycleAgent
+
+	readCalls int
+}
+
+func (m *mockTurnEndNoPreparerAgent) ReadTranscript(_ string) ([]byte, error) {
+	m.readCalls++
+	return m.transcriptData, nil
+}
+
+func setupTurnEndLifecycleRepo(t *testing.T, sessionID string) (string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Cleanup(osroot.ResetShared)
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	testutil.WriteFile(t, tmpDir, "init.txt", "init\nmodified by agent\n")
+
+	transcriptPath := filepath.Join(tmpDir, "turnend-transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	repo, err := strategy.OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: head.Hash().String(),
+		StartedAt:  time.Now(),
+	}))
+
+	return tmpDir, transcriptPath
+}
+
+func storedTranscriptCopied(root string) bool {
+	found := false
+	walkErr := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() && info.Name() == paths.TranscriptFileName {
+			found = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return false
+	}
+	return found
+}
+
+func TestHandleLifecycleTurnEnd_DevinMissingPreparerFailsClosed(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-devin-noprep")
+
+	ag := &mockTurnEndNoPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "devin",
+			agentType:      "Devin",
+			transcriptData: []byte(`{"type":"user","message":"stale"}` + "\n"),
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-devin-noprep",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+
+	require.Error(t, err)
+	assert.Zero(t, ag.readCalls, "transcript must not be read when the Devin agent cannot prepare it")
+	assert.False(t, storedTranscriptCopied(tmpDir), "transcript must not be copied without a Devin preparer")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-devin-noprep")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Zero(t, state.StepCount, "no step may be saved without a Devin preparer")
+}
+
+func TestHandleLifecycleTurnEnd_DevinEmptyTranscriptFailsClosed(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-devin-empty")
+
+	ag := &mockTurnEndPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "devin",
+			agentType:      "Devin",
+			transcriptData: []byte{},
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-devin-empty",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, ag.prepareCalls)
+	assert.Equal(t, 1, ag.readCalls, "the empty read must happen before the failure")
+	assert.False(t, storedTranscriptCopied(tmpDir), "an empty Devin transcript must not be copied")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-devin-empty")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Zero(t, state.StepCount, "no step may be saved for an empty Devin transcript")
+}
+
+func TestHandleLifecycleTurnEnd_NonDevinMissingPreparerProceeds(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-mock-noprep")
+
+	ag := &mockTurnEndNoPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-no-preparer",
+			agentType:      "Mock No Preparer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}` + "\n"),
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-mock-noprep",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+	assert.NotZero(t, ag.readCalls)
+	assert.True(t, storedTranscriptCopied(tmpDir), "non-Devin agents without a preparer keep the existing path")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-mock-noprep")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount)
+}
+
+func TestHandleLifecycleTurnEnd_NonDevinEmptyTranscriptProceeds(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-mock-empty")
+
+	ag := &mockTurnEndPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer",
+			agentType:      "Mock Preparer Agent",
+			transcriptData: []byte{},
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-mock-empty",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+	assert.Equal(t, 1, ag.prepareCalls)
+	assert.Equal(t, 1, ag.readCalls)
+	assert.True(t, storedTranscriptCopied(tmpDir), "non-Devin agents keep the existing empty-transcript path")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-mock-empty")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount)
+}
+
+func TestHandleLifecycleTurnEnd_DevinPrepareErrorFailsClosed(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-devin-fail")
+
+	prepareErr := errors.New("devin transcript store unavailable")
+	ag := &mockTurnEndPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "devin",
+			agentType:      "Devin",
+			transcriptData: []byte(`{"type":"user","message":"stale"}` + "\n"),
+		},
+		prepareErr: prepareErr,
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-devin-fail",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, prepareErr)
+	assert.Equal(t, 1, ag.prepareCalls)
+	assert.Zero(t, ag.readCalls, "transcript must not be read after a Devin prepare failure")
+	assert.False(t, storedTranscriptCopied(tmpDir), "transcript must not be copied after a Devin prepare failure")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-devin-fail")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Zero(t, state.StepCount, "no step may be saved after a Devin prepare failure")
+}
+
+func TestHandleLifecycleTurnEnd_DevinPrepareSuccessProceeds(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-devin-ok")
+
+	ag := &mockTurnEndPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "devin",
+			agentType:      "Devin",
+			transcriptData: []byte(`{"type":"user","message":"test"}` + "\n"),
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-devin-ok",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+	assert.Equal(t, 1, ag.prepareCalls)
+	assert.NotZero(t, ag.readCalls, "transcript must be read for the session copy")
+	assert.True(t, storedTranscriptCopied(tmpDir), "transcript copy must be stored under .entire")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-devin-ok")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount, "the turn's step must be saved")
+	assert.Contains(t, state.FilesTouched, "init.txt")
+}
+
+func TestHandleLifecycleTurnEnd_NonDevinPrepareErrorStaysBestEffort(t *testing.T) {
+	tmpDir, transcriptPath := setupTurnEndLifecycleRepo(t, "sess-mock-fail")
+
+	prepareErr := errors.New("transient fetch failure")
+	ag := &mockTurnEndPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer",
+			agentType:      "Mock Preparer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}` + "\n"),
+		},
+		prepareErr: prepareErr,
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-mock-fail",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+	assert.Equal(t, 1, ag.prepareCalls)
+	assert.NotZero(t, ag.readCalls, "transcript must still be read for the session copy")
+	assert.True(t, storedTranscriptCopied(tmpDir), "transcript copy must still be stored under .entire")
+	state, stateErr := strategy.LoadSessionState(context.Background(), "sess-mock-fail")
+	require.NoError(t, stateErr)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount, "the turn's step must still be saved")
+	assert.Contains(t, state.FilesTouched, "init.txt")
 }
 
 func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
