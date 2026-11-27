@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // errAttachDeclined is returned when the user answers no; nothing was changed
@@ -33,7 +34,7 @@ var errAttachDeclined = errors.New("attach declined")
 func confirmAttach(w, errW io.Writer, warning []string, force bool) error {
 	fmt.Fprintln(errW)
 	for _, line := range warning {
-		fmt.Fprintln(errW, line)
+		tuiutil.FprintfTerminalText(errW, "%s\n", line)
 	}
 	if force {
 		return nil

@@ -5,6 +5,7 @@ package tuiutil
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -80,6 +81,17 @@ func SanitizeTerminalText(s string) string {
 		}
 	}
 	return result.String()
+}
+
+// FprintfTerminalText formats like fmt.Fprintf and writes the result through
+// SanitizeTerminalText. It is for messages a command prints itself in place of
+// an error it would otherwise have returned to main.go, which sanitizes those:
+// a self-printed message naming a stored session ID, a path or server text
+// needs the same filter. Line breaks and tabs survive; escape sequences, other
+// control runes and bidi controls do not. Styled output must not go through
+// it, since the styling escapes would be stripped too.
+func FprintfTerminalText(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, SanitizeTerminalText(fmt.Sprintf(format, args...)))
 }
 
 // SanitizeTerminalLabel is SanitizeTerminalText for width-aligned list labels:

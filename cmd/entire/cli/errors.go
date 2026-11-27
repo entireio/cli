@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"io"
+
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -68,7 +70,27 @@ func (e *SilentError) AlreadyPrinted() bool {
 
 // NewSilentError creates a SilentError wrapping the given error.
 // Use this when you've already printed a user-friendly error message
-// and don't want main.go to print the error again.
+// and don't want main.go to print the error again. When that message carries
+// anything not written in the source (an error, a session ID, a branch, a
+// path, server text), print it with printSilentError or printSilentErrorf
+// instead, so it passes the same terminal filter as an error main.go prints.
 func NewSilentError(err error) *SilentError {
 	return &SilentError{Err: err}
+}
+
+// printSilentError writes err's message on its own line to w and returns err
+// as a SilentError. It is the self-printed counterpart of returning err to
+// main.go: the message gets the RenderUserFacingError terminal filter.
+func printSilentError(w io.Writer, err error) error {
+	return printSilentErrorf(w, err, "%s\n", err.Error())
+}
+
+// printSilentErrorf writes a formatted message to w and returns err as a
+// SilentError. Use it when the printed text differs from the error the
+// command returns. The whole formatted message is filtered, so a message
+// with deliberate styling must not go through it: the filter would strip the
+// color escapes too. Sanitize such a message's values before styling them.
+func printSilentErrorf(w io.Writer, err error, format string, args ...any) error {
+	tuiutil.FprintfTerminalText(w, format, args...)
+	return NewSilentError(err)
 }

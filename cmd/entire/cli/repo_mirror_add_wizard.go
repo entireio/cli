@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -445,8 +446,7 @@ func ensureMirrorWizardAuth(ctx context.Context, errW io.Writer, insecure bool) 
 	profile, err := defaultFetchProfile(ctx, target.coreURL, target.token)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(errW, "Login for %s is no longer valid. Run 'entire login' to re-authenticate.\n", target.coreURL)
-			return "", NewSilentError(errors.New("login no longer valid"))
+			return "", printSilentErrorf(errW, errors.New("login no longer valid"), "Login for %s is no longer valid. Run 'entire login' to re-authenticate.\n", target.coreURL)
 		}
 		return "", fmt.Errorf("validate auth: %w", err)
 	}
@@ -845,7 +845,7 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 	if failures > 0 {
 		for _, r := range results {
 			if r.err != nil {
-				fmt.Fprintf(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
+				tuiutil.FprintfTerminalText(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
 			}
 		}
 		return NewSilentError(fmt.Errorf("%d mirror(s) failed", failures))

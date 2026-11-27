@@ -136,8 +136,7 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 		// Fetch and checkout the remote branch
 		fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branchName)
 		if err := FetchAndCheckoutRemoteBranch(ctx, branchName); err != nil {
-			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-			return false, NewSilentError(errors.New("failed to checkout branch"))
+			return false, printSilentErrorf(errW, errors.New("failed to checkout branch"), "Error: failed to checkout branch: %v\n", err)
 		}
 		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
 		return true, nil
@@ -154,8 +153,7 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 
 	// Checkout the branch
 	if err := CheckoutBranch(ctx, branchName); err != nil {
-		fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-		return false, NewSilentError(errors.New("failed to checkout branch"))
+		return false, printSilentErrorf(errW, errors.New("failed to checkout branch"), "Error: failed to checkout branch: %v\n", err)
 	}
 	fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
 	return true, nil

@@ -214,9 +214,9 @@ func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client
 			finish, req.visibility)
 	}
 	if visErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "The repository was created, but setting its visibility to %s failed: %v\nSet it with: entire repo edit %s --visibility %s\n",
+		return printSilentErrorf(cmd.ErrOrStderr(), errors.Join(visErr, reportErr),
+			"The repository was created, but setting its visibility to %s failed: %v\nSet it with: entire repo edit %s --visibility %s\n",
 			req.visibility, renderCoreError(visErr), finish, req.visibility)
-		return NewSilentError(errors.Join(visErr, reportErr))
 	}
 	if reportErr == nil && !jsonRequested(cmd) {
 		printRepoCreateNextSteps(cmd.OutOrStdout(), ref)
