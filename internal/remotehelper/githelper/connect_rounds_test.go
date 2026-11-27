@@ -67,6 +67,14 @@ func (e *execTransport) InfoRefsV2(context.Context) (io.ReadCloser, error) {
 	return nil, errors.New("execTransport speaks v0 only")
 }
 
+func (e *execTransport) InfoRefsV2ForFetch(ctx context.Context) (io.ReadCloser, error) {
+	return e.InfoRefsV2(ctx)
+}
+
+func (e *execTransport) UploadPackChunked(context.Context, io.ReadSeeker, ...func(*http.Request)) (io.ReadCloser, error) {
+	return nil, errors.New("execTransport speaks v0 only")
+}
+
 func (e *execTransport) ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, _ ...func(*http.Request)) (io.ReadCloser, error) {
 	req, err := io.ReadAll(body)
 	if err != nil {

@@ -186,17 +186,7 @@ func readErrorMessage(resp *http.Response) string {
 // response. The extraHeaders callbacks are invoked on each request to
 // set additional headers (e.g. Git-Protocol, X-Entire-Push-Size).
 func (p *Proxy) ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error) {
-	suffix := "/" + service
-
-	setHeaders := func(req *http.Request) {
-		req.Header.Set("Content-Type", fmt.Sprintf("application/x-%s-request", service))
-		req.Header.Set("Accept", fmt.Sprintf("application/x-%s-result", service))
-		for _, fn := range extraHeaders {
-			fn(req)
-		}
-	}
-
-	resp, err := p.doWithFailover(ctx, suffix, http.MethodPost, body, setHeaders)
+	resp, err := p.doWithFailover(ctx, "/"+service, http.MethodPost, body, serviceHeaders(service, extraHeaders))
 	if err != nil {
 		return nil, fmt.Errorf("calling %s: %w", service, err)
 	}
@@ -211,6 +201,18 @@ func (p *Proxy) ServiceRPC(ctx context.Context, service string, body io.ReadSeek
 	}
 
 	return resp.Body, nil
+}
+
+// serviceHeaders returns the function that sets the headers of a request
+// to a git service, then runs extraHeaders.
+func serviceHeaders(service string, extraHeaders []func(*http.Request)) func(*http.Request) {
+	return func(req *http.Request) {
+		req.Header.Set("Content-Type", "application/x-"+service+"-request")
+		req.Header.Set("Accept", "application/x-"+service+"-result")
+		for _, fn := range extraHeaders {
+			fn(req)
+		}
+	}
 }
 
 const serviceReceivePack = "git-receive-pack"

@@ -9,8 +9,13 @@
 // server URL and the repo path. Deduplication on the server is per repo, so a
 // record or xorb of one repo is never used for another. Every file is a
 // cache: a missing, short or stale file only costs a new upload or download,
-// so eviction and `entire clean` are always safe. A push trims the store to
-// its size cap once, when it ends.
+// so eviction and `entire clean` are always safe. A push, and a fetch
+// session that opted in to chunked recipes, trims the store to its size cap
+// once, when it ends.
+//
+// The fetch fallback record of a repo is not in the store. FallbackRecord
+// keeps it in the per-user cache under the same repo key, so it outlives a
+// clone that failed.
 package bbcache
 
 import (

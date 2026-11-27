@@ -26,9 +26,18 @@ type Transport interface {
 	InfoRefsForPush(ctx context.Context) (io.ReadCloser, error)
 	// InfoRefsV2 fetches the v2 capability advertisement.
 	InfoRefsV2(ctx context.Context) (io.ReadCloser, error)
+	// InfoRefsV2ForFetch fetches the v2 capability advertisement and asks
+	// the server to advertise entire-bb-fetch, for a fetch that may get
+	// chunked recipes.
+	InfoRefsV2ForFetch(ctx context.Context) (io.ReadCloser, error)
 	// ServiceRPC sends a request to /<service> and returns the
 	// response. extraHeaders runs on each request before send.
 	ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error)
+	// UploadPackChunked is ServiceRPC for a git-upload-pack request with the
+	// entire-bb-fetch argument. An HTTP 500 answer, a refusal of the argument
+	// by an older server, comes back as a *transport.HTTPStatusError. No 5xx
+	// answer marks a node failed.
+	UploadPackChunked(ctx context.Context, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error)
 	// Do sends a request that is not a git request, such as a BB xorb
 	// upload, to suffix under the repo path. It returns the response for
 	// the caller to read and close. It is safe for concurrent use.
