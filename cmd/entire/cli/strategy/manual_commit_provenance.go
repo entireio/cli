@@ -102,10 +102,16 @@ func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git
 
 type preexistingTargetKey struct{}
 
-// withPreexistingTarget marks a post-commit whose condensation target already
-// had a checkpoint when the hook began.
-func withPreexistingTarget(ctx context.Context) context.Context {
-	return context.WithValue(ctx, preexistingTargetKey{}, true)
+// withPreexistingTarget marks a post-commit whose condensation target,
+// checkpointID, already had a checkpoint when the hook began.
+func withPreexistingTarget(ctx context.Context, checkpointID id.CheckpointID) context.Context {
+	return context.WithValue(ctx, preexistingTargetKey{}, checkpointID)
+}
+
+// preexistingTarget returns the target withPreexistingTarget marked on ctx.
+func preexistingTarget(ctx context.Context) (id.CheckpointID, bool) {
+	checkpointID, ok := ctx.Value(preexistingTargetKey{}).(id.CheckpointID)
+	return checkpointID, ok
 }
 
 // stampedByAnotherCommit reports whether checkpointID is a preexisting
@@ -113,10 +119,20 @@ func withPreexistingTarget(ctx context.Context) context.Context {
 // amending (LastCheckpointID) nor its pending reservation. Writing there would
 // fold new work into another commit's record.
 func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, state *SessionState) bool {
-	if ctx.Value(preexistingTargetKey{}) != true {
+	if _, ok := preexistingTarget(ctx); !ok {
 		return false
 	}
 	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
+}
+
+// ownsPreexistingTarget reports whether post-commit is condensing into a
+// checkpoint that already existed and state is the session allowed to write
+// there (stampedByAnotherCommit). That is an amend keeping or restoring the
+// amended commit's trailer: the trailer already links the session to the
+// commit, so it is not a new link for withoutIdleSessions to judge.
+func ownsPreexistingTarget(ctx context.Context, state *SessionState) bool {
+	target, ok := preexistingTarget(ctx)
+	return ok && !stampedByAnotherCommit(ctx, target, state)
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
@@ -273,8 +289,85 @@ func recordStampedTrailer(ctx context.Context, cpID id.CheckpointID) bool {
 		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the stamped trailer, leaving the commit unlinked",
 			slog.String("checkpoint_id", cpID.String()),
 			slog.String("error", err.Error()))
+		return false
 	}
-	return err == nil
+	recordStampedSessions(ctx, cpID)
+	return true
+}
+
+// stampedSessionsFile records, for each trailer prepare-commit-msg stamped,
+// the sessions it linked the commit to (withLinkedSessions). Post-commit keeps
+// those sessions in its own matching, so it condenses into the trailer the
+// sessions prepare linked. It sits beside stampedTrailersFile, not in it, so a
+// binary that reads that file as a list of IDs is unaffected. Prepare writes
+// it after the stamp and post-commit takes it before the stamps, so a
+// post-commit that finds its stamp finds the entry too, even with another
+// commit's prepare racing it. With no entry for its trailer, post-commit
+// matches afresh, as before.
+const stampedSessionsFile = "entire-stamped-sessions.json"
+
+type stampedSessions struct {
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionIDs   []string        `json:"session_ids"`
+}
+
+// recordStampedSessions records the sessions ctx marks as linked for cpID,
+// replacing an earlier entry for it (a reservation stamped again by a later
+// prepare). Best effort: without the entry post-commit matches afresh.
+func recordStampedSessions(ctx context.Context, cpID id.CheckpointID) {
+	sessionIDs := linkedSessions(ctx)
+	if len(sessionIDs) == 0 {
+		return
+	}
+	if err := writeStampedSessions(ctx, stampedSessions{CheckpointID: cpID, SessionIDs: sessionIDs}); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record the sessions linked to the trailer",
+			slog.String("checkpoint_id", cpID.String()),
+			slog.String("error", err.Error()))
+	}
+}
+
+func writeStampedSessions(ctx context.Context, entry stampedSessions) error {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return err
+	}
+	entries := slices.DeleteFunc(readStampedSessionsIn(root), func(e stampedSessions) bool {
+		return e.CheckpointID == entry.CheckpointID
+	})
+	data, err := json.Marshal(append(entries, entry))
+	if err != nil {
+		return fmt.Errorf("encode stamped sessions: %w", err)
+	}
+	return jsonutil.WriteFileAtomicIn(root, stampedSessionsFile, data, 0o600) //nolint:wrapcheck // recordStampedSessions logs it with context
+}
+
+// takeStampedSessions returns the sessions prepare-commit-msg linked to each
+// trailer it stamped since the last post-commit, by checkpoint ID, and
+// consumes the record.
+func takeStampedSessions(ctx context.Context) map[id.CheckpointID][]string {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return nil
+	}
+	entries := readStampedSessionsIn(root)
+	_ = osroot.RemoveNoSymlinks(root, stampedSessionsFile) //nolint:errcheck // absent when prepare stamped nothing
+	linked := make(map[id.CheckpointID][]string, len(entries))
+	for _, e := range entries {
+		linked[e.CheckpointID] = e.SessionIDs
+	}
+	return linked
+}
+
+func readStampedSessionsIn(root *os.Root) []stampedSessions {
+	data, err := osroot.ReadFileNoFollow(root, stampedSessionsFile)
+	if err != nil {
+		return nil
+	}
+	var entries []stampedSessions
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	return entries
 }
 
 func writeStampedTrailer(ctx context.Context, cpID id.CheckpointID) error {

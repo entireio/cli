@@ -322,9 +322,14 @@ commit.
   (`stampedTrailer`) only when prepare recorded stamping it: each ID it stamps
   (one it generates, or a session's reserved one) goes into
   `entire-stamped-trailers.json` in the per-worktree git dir until the next
-  post-commit, which consumes it. The trailer an amend restores names an
+  post-commit, which consumes it. Beside it, `entire-stamped-sessions.json`
+  records the sessions prepare linked for each stamped ID, and post-commit
+  keeps them when it matches sessions again (`withLinkedSessions`): one that
+  looks idle by then, after a long prompt or editor wait, is still condensed
+  into the trailer prepare wrote. The trailer an amend restores names an
   existing checkpoint and is not recorded: post-commit condenses into it for
-  its owner without a stamp, and a record a cancelled amend left would let a
+  its owner without a stamp, keeping that owner however idle it looks
+  (`ownsPreexistingTarget`), and a record a cancelled amend left would let a
   later commit naming it skip its own trailer. Prepare writes a trailer only once
   its stamp is recorded (`recordStampedTrailer`). A draft that already names
   another ID (pasted into `-m`, `-F` or a template) gets prepare's own trailer
@@ -1225,7 +1230,7 @@ Strategies determine checkpoint timing and type:
 
 Each `PendingCheckpoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
 
-`checkpoint list --pending` lists work that is not a checkpoint yet, plus resume points. Turn-end work has no identity until a commit condenses it, so the listing leads with a **preview of the next checkpoint** (`ManualCommitStrategy.PreviewNextCheckpoint`): one entry per session in this worktree with pending work (`State.HasPendingWork`; fully condensed ended sessions are left out, as PostCommit skips them), showing the turns since the last checkpoint (`StepCount`), the files touched, its task records, and the prompts since the last checkpoint (prompt.txt, then the agent's transcript extractor from `CheckpointTranscriptStart`). The preview reads session state and local metadata only; it never prepares a transcript. In `--json` a preview is an id-less element with `"is_next_checkpoint": true` and a `next_checkpoint` object; the command help documents the shape.
+`checkpoint list --pending` lists work that is not a checkpoint yet, plus resume points. Turn-end work has no identity until a commit condenses it, so the listing leads with a **preview of the next checkpoint** (`ManualCommitStrategy.PreviewNextCheckpoint`): one entry per session in this worktree with pending work (`State.HasPendingWork`; fully condensed ended sessions are left out, as PostCommit skips them, and so are a sibling worktree's sessions idle beyond `recentSessionWindow` that recorded no edits here, which commit linking drops), showing the turns since the last checkpoint (`StepCount`), the files touched, its task records, and the prompts since the last checkpoint (prompt.txt, then the agent's transcript extractor from `CheckpointTranscriptStart`). The preview reads session state and local metadata only; it never prepares a transcript. In `--json` a preview is an id-less element with `"is_next_checkpoint": true` and a `next_checkpoint` object; the command help documents the shape.
 
 After the preview, a `PendingCheckpoint` row is one of two things:
 

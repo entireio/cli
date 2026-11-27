@@ -41,7 +41,7 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		// rescue this; report it to the caller (hooks log and skip).
 		return nil, err
 	}
-	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	sessions, ambiguous, fromFallback := s.worktreeSessionsForCommit(ctx, allStates, worktreePath)
 	guest := s.findSessionByCommitAncestry(ctx, allStates)
 	if guest != nil && fromFallback {
 		// No session is homed here and ancestry names the committer: the
@@ -62,17 +62,11 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 			state.LinkedByWorktreeEntry = true
 		}
 	}
-	// A session that edited this worktree from elsewhere (an agent launched
-	// in another worktree writing here by path) recorded those edits for it;
-	// it may link this commit, but only one containing them.
-	for _, state := range allStates {
-		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || linkingSetContains(sessions, state.SessionID) {
-			continue
-		}
-		if hasWorktreeEntry(ctx, state, worktreePath) {
-			state.LinkedByWorktreeEntry = true
-			sessions = append(sessions, state)
-		}
+	// A session that edited this worktree from elsewhere may link this
+	// commit, but only one containing those edits.
+	for _, state := range sessionsThatEditedWorktree(ctx, allStates, sessions, worktreePath) {
+		state.LinkedByWorktreeEntry = true
+		sessions = append(sessions, state)
 	}
 	// Every session judges this commit by what it recorded for this worktree.
 	for _, state := range sessions {
@@ -83,6 +77,36 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 			"[entire] Agent sessions in several other worktrees could match this commit; none was linked. Run 'entire session adopt' in this worktree to link future commits to your session.")
 	}
 	return sessions, nil
+}
+
+// worktreeSessionsForCommit is findSessionsForWorktreeFromStates as commit
+// linking applies it: the fallback's matches lose the sessions idle beyond
+// recentSessionWindow (withoutIdleSessions). The `checkpoint list --pending`
+// preview selects through it and sessionsThatEditedWorktree too, so it lists
+// the sessions a commit here would link.
+func (s *ManualCommitStrategy) worktreeSessionsForCommit(ctx context.Context, allStates []*SessionState, worktreePath string) (sessions []*SessionState, ambiguous, fromFallback bool) {
+	sessions, ambiguous, fromFallback = s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	if fromFallback {
+		sessions = withoutIdleSessions(ctx, worktreePath, sessions)
+	}
+	return sessions, ambiguous, fromFallback
+}
+
+// sessionsThatEditedWorktree returns the sessions of allStates, other than
+// those in matched, that recorded edits in worktreePath from elsewhere (an
+// agent launched in another worktree writing here by path). However idle,
+// they join a commit here, held to those edits.
+func sessionsThatEditedWorktree(ctx context.Context, allStates, matched []*SessionState, worktreePath string) []*SessionState {
+	var edited []*SessionState
+	for _, state := range allStates {
+		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || linkingSetContains(matched, state.SessionID) {
+			continue
+		}
+		if hasWorktreeEntry(ctx, state, worktreePath) {
+			edited = append(edited, state)
+		}
+	}
+	return edited
 }
 
 func linkingSetContains(states []*SessionState, id string) bool {
