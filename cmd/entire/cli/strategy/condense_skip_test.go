@@ -189,7 +189,7 @@ func TestFilterFilesTouched_AppliesFallbackForMidTurnCommit(t *testing.T) {
 		"app/bar.go":       {},
 	}
 
-	filterFilesTouched(sessionData, committedFiles, state)
+	filterFilesTouched(sessionData, committedFiles, state, false)
 
 	require.ElementsMatch(t, []string{"app/foo.go", "app/bar.go"}, sessionData.FilesTouched,
 		"should fall back to committed files (excluding .entire/) when session has SaveStep evidence")
@@ -212,7 +212,7 @@ func TestFilterFilesTouched_AppliesFallbackWithTranscriptEvidence(t *testing.T) 
 	}
 	committedFiles := map[string]struct{}{"app/foo.go": {}}
 
-	filterFilesTouched(sessionData, committedFiles, state)
+	filterFilesTouched(sessionData, committedFiles, state, false)
 
 	require.Equal(t, []string{"app/foo.go"}, sessionData.FilesTouched,
 		"should fall back when transcript is non-empty even without StepCount")
@@ -234,7 +234,7 @@ func TestFilterFilesTouched_SkipsFallbackWithoutEvidence(t *testing.T) {
 	}
 	committedFiles := map[string]struct{}{"app/foo.go": {}, "app/bar.go": {}}
 
-	filterFilesTouched(sessionData, committedFiles, state)
+	filterFilesTouched(sessionData, committedFiles, state, false)
 
 	assert.Empty(t, sessionData.FilesTouched,
 		"must not attribute committed files to a session with no evidence of work")
@@ -255,7 +255,7 @@ func TestFilterFilesTouched_IntersectsWhenFilesTouchedPopulated(t *testing.T) {
 	}
 	committedFiles := map[string]struct{}{"app/foo.go": {}, "app/bar.go": {}}
 
-	filterFilesTouched(sessionData, committedFiles, state)
+	filterFilesTouched(sessionData, committedFiles, state, false)
 
 	require.ElementsMatch(t, []string{"app/foo.go", "app/bar.go"}, sessionData.FilesTouched,
 		"should intersect existing FilesTouched with committedFiles")
@@ -616,10 +616,10 @@ func TestFilterFilesTouched_WorktreeRecordWithoutOverlapFallsBack(t *testing.T) 
 	committed := map[string]struct{}{"g.txt": {}}
 
 	inView := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
-	filterFilesTouched(inView, committed, &SessionState{SessionID: "view", InWorktreeView: true})
+	filterFilesTouched(inView, committed, &SessionState{SessionID: "view", InWorktreeView: true}, false)
 	require.Equal(t, []string{"g.txt"}, inView.FilesTouched)
 
 	atHome := &ExtractedSessionData{Transcript: []byte("x\n"), FilesTouched: []string{"f.txt"}}
-	filterFilesTouched(atHome, committed, &SessionState{SessionID: "home"})
+	filterFilesTouched(atHome, committed, &SessionState{SessionID: "home"}, false)
 	require.Empty(t, atHome.FilesTouched)
 }
