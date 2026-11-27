@@ -17,10 +17,12 @@ import (
 )
 
 // stubWebOpenURL replaces the webOpenURL seam for the test and returns the
-// URLs it was asked to open. openErr is what the stub answers. Callers must
-// not be parallel: the seam is package-level.
+// URLs it was asked to open. openErr is what the stub answers. It also clears
+// the agent-caller environment, so the browser is opened whatever agent runs
+// the test suite. Callers must not be parallel: the seam is package-level.
 func stubWebOpenURL(t *testing.T, openErr error) *[]string {
 	t.Helper()
+	clearAgentCallerEnv(t)
 	var opened []string
 	prev := webOpenURL
 	webOpenURL = func(_ context.Context, url string) error {
@@ -372,4 +374,32 @@ func TestOpenInWeb_LoopbackDataHost(t *testing.T) {
 			require.Equal(t, []string{tc.target}, *opened)
 		})
 	}
+}
+
+// An agent gets the URL and no browser: opening windows is for the person at
+// the keyboard.
+func TestOpenInWeb_AgentCallerOnlyPrints(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
+	for _, env := range []string{"CLAUDECODE", "CODEX_SESSION_ID", "CURSOR_AGENT", "AI_AGENT"} {
+		t.Run(env, func(t *testing.T) {
+			opened := stubWebOpenURL(t, nil)
+			t.Setenv(env, "1")
+			cmd, stdout, stderr := newWebOpenTestCmd("https://web.example/gh/acme/web")
+			cmd.SetArgs([]string{"--web"})
+			require.NoError(t, cmd.ExecuteContext(t.Context()))
+			require.Equal(t, "https://web.example/gh/acme/web\n", stdout.String())
+			require.Empty(t, stderr.String())
+			require.Empty(t, *opened)
+		})
+	}
+
+	t.Run("an unsafe URL is still refused", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		t.Setenv("CLAUDECODE", "1")
+		cmd, stdout, _ := newWebOpenTestCmd("https://evil.example/x")
+		cmd.SetArgs([]string{"--web"})
+		require.ErrorContains(t, cmd.ExecuteContext(t.Context()), "not on the Entire web app origin")
+		require.Empty(t, stdout.String())
+		require.Empty(t, *opened)
+	})
 }

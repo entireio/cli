@@ -998,7 +998,10 @@ A `view` / `show` command that has a page in the Entire web app takes
 - `webRequested(cmd)` reads it, mirroring `jsonRequested`.
 - `openInWeb(cmd, url)` prints the URL on its own line to stdout, then opens
   the browser. A browser that cannot be launched is a stderr note and exit 0,
-  since the URL was delivered; an empty URL is an error.
+  since the URL was delivered; an empty URL is an error. When an agent runs
+  the command (`review.DetectAgentSession`), only the URL is printed: the
+  browser is opened only for a person. Tests that expect an open use
+  `stubWebOpenURL`, which clears the agent-caller environment.
   Before printing or opening anything it requires valid UTF-8 with only
   printable runes (no control or bidi-control runes) and an http(s) URL on the
   `auth.WebBaseURL()` origin, both sides compared through

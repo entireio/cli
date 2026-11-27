@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
@@ -50,6 +51,11 @@ func webRequested(cmd *cobra.Command) bool {
 // that cannot be launched (headless host, SSH session) is a stderr note, not a
 // failure. An empty rawURL means the resource has no web page and is an error.
 //
+// A browser is for the person at the keyboard: when an agent runs the command
+// (review.DetectAgentSession, the check that guards trail comment writes), the
+// URL is printed and nothing is opened, so an agent cannot pop windows on the
+// user's desktop and gets the link as its result.
+//
 // rawURL may be server-supplied, so nothing is printed or opened until it has
 // been checked: it must be valid UTF-8 with only printable runes (no control
 // or Bidi_Control runes), and an http(s) URL on the active login's web origin
@@ -66,6 +72,10 @@ func openInWeb(cmd *cobra.Command, rawURL string) error {
 		return err
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), target)
+	if caller := review.DetectAgentSession(); caller != "" {
+		logging.Debug(cmd.Context(), "not opening a browser for an agent caller", "caller", caller)
+		return nil
+	}
 	if err := webOpenURL(cmd.Context(), target); err != nil {
 		logging.Debug(cmd.Context(), "open browser failed", "error", err)
 		fmt.Fprintln(cmd.ErrOrStderr(), "Note: could not open a browser; open the URL above manually.")
