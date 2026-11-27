@@ -69,6 +69,9 @@ func withNumberedTrail(cmd *cobra.Command, fn func(ctx context.Context, client *
 		if err != nil {
 			return err
 		}
+		// Older servers omit the trail's url; fill in the same fallback
+		// 'trail show' uses so every callback sees one browser URL.
+		found.URL = trailDisplayURL(*found, forge, owner, repo)
 		return fn(ctx, client, found, basePath)
 	})
 }
@@ -257,9 +260,7 @@ discussion. A discussion has no page of its own, so this is the trail's page.`,
 					return fmt.Errorf("failed to decode discussion response: %w", err)
 				}
 				if webRequested(cmd) {
-					// Server-supplied: this callback has no forge/owner/repo
-					// to build a fallback from.
-					return openInWeb(cmd, strings.TrimSpace(found.URL))
+					return openInWeb(cmd, found.URL)
 				}
 				return printTrailDiscussionDetail(cmd.OutOrStdout(), out, jsonOut)
 			})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,7 @@ func newProjectTrailShowCmd() *cobra.Command {
 // change the trail was reached through when that change can be named as
 // <repo>/<number>, otherwise the trail's own page.
 func projectTrailWebURL(item api.ProjectTrail, current *projectTrailCurrentChange) string {
+	item.URL = strings.TrimSpace(item.URL)
 	if current == nil {
 		return item.URL
 	}
@@ -180,13 +182,21 @@ type projectTrailChangeJSON struct {
 
 // projectTrailChangeURL is a change's page under its trail's server-supplied
 // URL, <trail URL>/changes/<repo>/<number>; empty when either is unknown.
-// The selector is validated, so it is safe as path segments.
+// The selector is validated, so it is safe as path segments. The path is
+// appended to the parsed URL, so a query on the trail URL stays a query
+// rather than swallowing the change's path; a fragment belongs to the trail's
+// page and is dropped.
 func projectTrailChangeURL(trailURL, selector string) string {
-	trailURL = strings.TrimRight(strings.TrimSpace(trailURL), "/")
+	trailURL = strings.TrimSpace(trailURL)
 	if trailURL == "" || selector == "" {
 		return ""
 	}
-	return trailURL + "/changes/" + selector
+	u, err := url.Parse(trailURL)
+	if err != nil {
+		return ""
+	}
+	u.Fragment, u.RawFragment = "", ""
+	return u.JoinPath("changes", selector).String()
 }
 
 // printProjectTrail renders a project trail. current is the change the trail

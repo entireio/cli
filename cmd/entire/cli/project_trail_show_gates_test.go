@@ -391,3 +391,22 @@ func TestProjectTrailWebURL(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectTrailChangeURL(t *testing.T) {
+	t.Parallel()
+	const want = "https://entire.io/gh/acme/-/trails/42/changes/widget/7"
+	for name, tc := range map[string]struct{ trailURL, selector, want string }{
+		"plain":            {"https://entire.io/gh/acme/-/trails/42", "widget/7", want},
+		"trailing slash":   {" https://entire.io/gh/acme/-/trails/42/ ", "widget/7", want},
+		"query is kept":    {"https://entire.io/gh/acme/-/trails/42?view=intent", "widget/7", want + "?view=intent"},
+		"fragment dropped": {"https://entire.io/gh/acme/-/trails/42#top", "widget/7", want},
+		"no trail URL":     {"", "widget/7", ""},
+		"no selector":      {"https://entire.io/gh/acme/-/trails/42", "", ""},
+		"unparseable":      {"https://entire.io/%zz", "widget/7", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, projectTrailChangeURL(tc.trailURL, tc.selector))
+		})
+	}
+}

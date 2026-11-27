@@ -430,10 +430,13 @@ func trailDescriptionForDisplay(bodyText string, loaded bool) string {
 // trailDisplayURL returns the trail's browser URL. It prefers the canonical URL
 // the server now returns, so the CLI tracks any route change without being
 // updated in lockstep, and falls back to a locally constructed URL only for
-// older servers that omit the field.
+// older servers that omit the field, and only when the repo is known.
 func trailDisplayURL(t api.TrailResource, forge, owner, repo string) string {
-	if strings.TrimSpace(t.URL) != "" {
-		return t.URL
+	if u := strings.TrimSpace(t.URL); u != "" {
+		return u
+	}
+	if forge == "" || owner == "" || repo == "" {
+		return ""
 	}
 	base, err := auth.WebBaseURL()
 	if t.Number > 0 && err == nil {

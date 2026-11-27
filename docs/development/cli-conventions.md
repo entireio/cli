@@ -1004,13 +1004,23 @@ A `view` / `show` command that has a page in the Entire web app takes
   `auth.WebBaseURL()` origin, both sides compared through
   `api.NormalizeOriginURL`, so a server-supplied link cannot reach the terminal
   or the browser unchecked. The base is validated as an http(s) origin first;
-  `ENTIRE_WEB_BASE_URL` is the way to point the CLI at another web origin. The
-  query is re-encoded (`a b` becomes `a+b`, keys sorted), so assert the
-  encoded form in tests. An opener failure is logged at debug level without
-  the URL.
+  `ENTIRE_WEB_BASE_URL` is the way to point the CLI at another web origin.
+  One exception covers local dev, where the API and the web app run on
+  different ports: when the origin is a loopback data host used as-is (no
+  `ENTIRE_WEB_BASE_URL`), a loopback URL of the same scheme on any port is
+  accepted. A self-hosted setup with separate API and web hosts still needs
+  `ENTIRE_WEB_BASE_URL`. The query is kept as the server wrote it, so the page
+  opened is the page linked; only a raw space is percent-encoded. An opener
+  failure is logged at debug level without the URL.
 
 Build the URL from `auth.WebBaseURL()` with path-escaped segments, and prefer
 resolving it without an API call when the reference already names the page.
+When the server supplies a URL, open that and fall back to the built one only
+for servers that omit it; the trail commands share `trailDisplayURL` for this,
+so `trail show`, `trail comment show` and `trail finding show` open the same
+page. Extend a server URL by parsing it (`url.JoinPath`), never by string
+concatenation, as `projectTrailChangeURL` does. Under a project trail,
+`trail finding show --web` opens the change's page, as `trail show --web` does.
 Tests stub the package-level `webOpenURL` seam and so must not be parallel.
 `--web` is for people: do not add it to `agentHelpGuidance`.
 

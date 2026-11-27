@@ -148,7 +148,7 @@ func TestOpenInWeb_AcceptsTheWebOrigin(t *testing.T) {
 	cmd, stdout, _ := newWebOpenTestCmd("HTTPS://WEB.example:8443/gh/acme/web/trails/7?tab=a b")
 	cmd.SetArgs([]string{"--web"})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
-	const want = "https://WEB.example:8443/gh/acme/web/trails/7?tab=a+b"
+	const want = "https://WEB.example:8443/gh/acme/web/trails/7?tab=a%20b"
 	require.Equal(t, want+"\n", stdout.String())
 	require.Equal(t, []string{want}, *opened)
 }
@@ -324,4 +324,52 @@ func TestRepoView_Web(t *testing.T) {
 		require.Empty(t, stdout)
 		require.Empty(t, *opened)
 	})
+}
+
+// The query is the server's: nothing is dropped, reordered or rewritten, so
+// the page opened is the page linked.
+func TestOpenInWeb_KeepsTheQuery(t *testing.T) {
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
+	stubWebOpenURL(t, nil)
+	for _, query := range []string{"view=a;b&tab=changes", "flag", "runId=01H%zz", "b=2&a=1", "q=a+b%20c"} {
+		target := "https://web.example/et/p/-/trails/3?" + query
+		cmd, stdout, _ := newWebOpenTestCmd(target)
+		cmd.SetArgs([]string{"--web"})
+		require.NoError(t, cmd.ExecuteContext(t.Context()), query)
+		require.Equal(t, target+"\n", stdout.String())
+	}
+}
+
+// Local dev serves the API and the web app from different loopback ports, and
+// without ENTIRE_WEB_BASE_URL the web origin is only the data host as-is.
+func TestOpenInWeb_LoopbackDataHost(t *testing.T) {
+	const page = "http://localhost:3000/gh/o/r/trails/4"
+	for name, tc := range map[string]struct {
+		webBase, target string
+		refused         bool
+	}{
+		"another loopback port":       {"", page, false},
+		"another loopback address":    {"", "http://127.0.0.1:3000/gh/o/r/trails/4", false},
+		"another scheme":              {"", "https://localhost:3000/gh/o/r/trails/4", true},
+		"a foreign host":              {"", "http://evil.example:3000/gh/o/r/trails/4", true},
+		"a lookalike host":            {"", "http://localhost.evil.example/gh/o/r/trails/4", true},
+		"an explicit web base is law": {"http://localhost:8080", page, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(api.BaseURLEnvVar, "http://localhost:8080")
+			t.Setenv(api.WebBaseURLEnvVar, tc.webBase)
+			opened := stubWebOpenURL(t, nil)
+			cmd, stdout, _ := newWebOpenTestCmd(tc.target)
+			cmd.SetArgs([]string{"--web"})
+			err := cmd.ExecuteContext(t.Context())
+			if tc.refused {
+				require.ErrorContains(t, err, "not on the Entire web app origin http://localhost:8080")
+				require.Empty(t, stdout.String())
+				require.Empty(t, *opened)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []string{tc.target}, *opened)
+		})
+	}
 }

@@ -225,6 +225,16 @@ func TestTrailDisplayURL(t *testing.T) {
 		t.Fatalf("expected constructed fallback URL on the web origin, got %q", got)
 	}
 
+	// The server URL is returned trimmed, so --web opens what show prints.
+	if got := trailDisplayURL(api.TrailResource{URL: " https://server/url\n"}, "gh", "acme", "repo"); got != "https://server/url" {
+		t.Fatalf("expected trimmed server URL, got %q", got)
+	}
+
+	// No fallback is built from an unknown repo.
+	if got := trailDisplayURL(api.TrailResource{Number: 5}, "", "acme", "repo"); got != "" {
+		t.Fatalf("expected empty URL without a forge, got %q", got)
+	}
+
 	// Nothing to show when neither is available.
 	if got := trailDisplayURL(api.TrailResource{}, "gh", "acme", "repo"); got != "" {
 		t.Fatalf("expected empty URL, got %q", got)

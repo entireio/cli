@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"unicode"
@@ -54,8 +55,8 @@ func webRequested(cmd *cobra.Command) bool {
 // or Bidi_Control runes), and an http(s) URL on the active login's web origin
 // (auth.WebBaseURL). That keeps a response from writing escape sequences or
 // reordering text on the terminal, or sending the browser to a foreign host.
-// What is printed and opened is the parsed URL re-serialized with its query
-// re-encoded, not the input.
+// What is printed and opened is the parsed URL re-serialized, not the input;
+// its query is the server's own, with only raw spaces percent-encoded.
 func openInWeb(cmd *cobra.Command, rawURL string) error {
 	if rawURL == "" {
 		return errors.New("no web page is available for this resource")
@@ -76,7 +77,7 @@ func openInWeb(cmd *cobra.Command, rawURL string) error {
 // print and open; see openInWeb for the rules. Any URL text in an error goes
 // through webErrorText, since the input is untrusted.
 func validatedWebURL(rawURL string) (string, error) {
-	origin, err := webAppOrigin()
+	origin, overridden, err := webAppOrigin()
 	if err != nil {
 		return "", err
 	}
@@ -98,34 +99,61 @@ func validatedWebURL(rawURL string) (string, error) {
 	}
 	// Both sides are normalized, so host case and an explicit default port
 	// (https://entire.com:443) do not make the same origin compare unequal.
-	if api.NormalizeOriginURL(u.Scheme+"://"+u.Host) != origin {
+	localDev := !overridden && sameLoopbackSite(u, origin)
+	if api.NormalizeOriginURL(u.Scheme+"://"+u.Host) != origin && !localDev {
 		return "", fmt.Errorf("refusing to open %s: it is not on the Entire web app origin %s (set %s to use another web origin)",
 			shown, webErrorText(origin), api.WebBaseURLEnvVar)
 	}
-	// Re-encode the query so what is printed and opened carries no raw spaces
-	// or other characters a terminal or launcher could split on.
-	u.RawQuery = u.Query().Encode()
+	// The query is kept as the server wrote it: re-encoding through
+	// url.Values would silently drop pairs it cannot parse, reorder keys and
+	// turn a bare ?flag into ?flag=, opening a different page. The raw string
+	// already passed the rune check above; only a raw space, which a terminal
+	// or launcher could split the URL on, is percent-encoded.
+	u.RawQuery = strings.ReplaceAll(u.RawQuery, " ", "%20")
 	return u.String(), nil
+}
+
+// sameLoopbackSite reports whether u is a loopback page of the same scheme as
+// the loopback origin. Local dev serves the API and the web app from different
+// ports, so when the web origin is only the loopback data host used as-is (no
+// ENTIRE_WEB_BASE_URL) a server URL on another loopback port is still the
+// local web app.
+func sameLoopbackSite(u *url.URL, origin string) bool {
+	o, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == o.Scheme && isLoopbackHostname(u.Hostname()) && isLoopbackHostname(o.Hostname())
+}
+
+func isLoopbackHostname(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // webAppOrigin returns the normalized origin of the active login's web app,
 // refusing a base that is not an http(s) origin before any URL is compared
 // against it. The error names where the bad value came from: the
 // ENTIRE_WEB_BASE_URL override when it is set, otherwise the login's data host.
-func webAppOrigin() (string, error) {
+// overridden reports whether the origin came from that override.
+func webAppOrigin() (origin string, overridden bool, err error) {
 	base, err := auth.WebBaseURL()
 	if err != nil {
-		return "", fmt.Errorf("resolve the Entire web app URL: %w", err)
+		return "", false, fmt.Errorf("resolve the Entire web app URL: %w", err)
 	}
+	_, overridden = api.WebBaseURLOverride()
 	b, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || (b.Scheme != schemeHTTPS && b.Scheme != schemeHTTP) || b.Host == "" || b.User != nil {
 		shown := webErrorText(base)
-		if _, overridden := api.WebBaseURLOverride(); overridden {
-			return "", fmt.Errorf("%s is not a valid http(s) origin: %s", api.WebBaseURLEnvVar, shown)
+		if overridden {
+			return "", false, fmt.Errorf("%s is not a valid http(s) origin: %s", api.WebBaseURLEnvVar, shown)
 		}
-		return "", fmt.Errorf("the Entire web app URL is not a valid http(s) origin: %s (set %s to a valid origin)", shown, api.WebBaseURLEnvVar)
+		return "", false, fmt.Errorf("the Entire web app URL is not a valid http(s) origin: %s (set %s to a valid origin)", shown, api.WebBaseURLEnvVar)
 	}
-	return api.NormalizeOriginURL(base), nil
+	return api.NormalizeOriginURL(base), overridden, nil
 }
 
 // webErrorText makes untrusted URL text safe to quote in a one-line error.

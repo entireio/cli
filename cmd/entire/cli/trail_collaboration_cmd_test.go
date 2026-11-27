@@ -118,10 +118,11 @@ func TestTrailCommentShow_Web(t *testing.T) {
 	// openInWeb only opens pages on the web origin; match the fixture's URL.
 	t.Setenv(api.WebBaseURLEnvVar, "https://entire.io")
 	discussions := 0
+	serverURL := page
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/repos/repo-id/changes/7":
-			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, URL: page, Branch: "feature/work"}))
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, URL: serverURL, Branch: "feature/work"}))
 		case "/api/v1/repos/repo-id/changes/7/discussions/discussion-one":
 			discussions++
 			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailDiscussionDetailResponse{}))
@@ -142,6 +143,16 @@ func TestTrailCommentShow_Web(t *testing.T) {
 		assert.Empty(t, stderr)
 		assert.Equal(t, []string{page}, *opened)
 		assert.Equal(t, 1, discussions, "the discussion is still looked up, so a bad ID errors")
+	})
+
+	t.Run("an older server without a trail url opens the built page", func(t *testing.T) {
+		serverURL = ""
+		t.Cleanup(func() { serverURL = page })
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, append(args, "--web")...)
+		require.NoError(t, err)
+		assert.Equal(t, page+"\n", stdout)
+		assert.Equal(t, []string{page}, *opened)
 	})
 
 	t.Run("json is refused", func(t *testing.T) {
