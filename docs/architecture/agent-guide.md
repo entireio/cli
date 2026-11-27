@@ -145,6 +145,7 @@ var FileModificationTools = []string{ToolWrite, ToolEdit}
 package youragent
 
 import (
+    "context"
     "errors"
     "fmt"
     "io"
@@ -173,8 +174,8 @@ func (a *YourAgent) Type() agent.AgentType     { return "Your Agent" }
 func (a *YourAgent) Description() string       { return "Your Agent - description here" }
 func (a *YourAgent) ProtectedDirs() []string   { return []string{".youragent"} }
 
-func (a *YourAgent) DetectPresence() (bool, error) {
-    repoRoot, err := paths.RepoRoot()
+func (a *YourAgent) DetectPresence(ctx context.Context) (bool, error) {
+    repoRoot, err := paths.WorktreeRoot(ctx)
     if err != nil {
         repoRoot = "."
     }
@@ -195,7 +196,7 @@ func (a *YourAgent) ReadTranscript(sessionRef string) ([]byte, error) {
     return data, nil
 }
 
-func (a *YourAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
+func (a *YourAgent) ChunkTranscript(_ context.Context, content []byte, maxSize int) ([][]byte, error) {
     // Use JSONL chunking for line-based formats
     return agent.ChunkJSONL(content, maxSize)
     // Or implement format-specific chunking (see opencode for a JSON example)
@@ -717,7 +718,7 @@ The `agent` package provides format-agnostic entry points:
 
 ```go
 // These dispatch to the agent's ChunkTranscript/ReassembleTranscript methods
-agent.ChunkTranscript(content, agentType)     // agentType → agent lookup → format-aware chunking
+agent.ChunkTranscript(ctx, content, agentType) // agentType → agent lookup → format-aware chunking
 agent.ReassembleTranscript(chunks, agentType)  // agentType → agent lookup → format-aware reassembly
 
 // Direct JSONL helpers (usable without an agent)
@@ -996,13 +997,13 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 ## Common Pitfalls
 
-### go-git v5 Bugs
+### go-git Checkout and Hard Reset
 
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.** go-git v5 has a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when listed in `.gitignore`. This would destroy `.entire/` and agent config directories. Use the git CLI instead. See [Git and subprocess safety](../development/git-safety.md) for details.
+**Do NOT use go-git for `checkout` or `reset --hard` operations.** Historically, go-git v5 had a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` deleted untracked directories even when listed in `.gitignore` (which would destroy `.entire/` and agent config directories). Although the repository now uses `go-git/v6`, direct go-git `Reset` and `Checkout` remain forbidden by `.golangci.yaml` (`forbidigo`) - use the git CLI instead. See [Git and subprocess safety](../development/git-safety.md) for details.
 
 ### Repo Root vs Current Working Directory
 
-Git commands return paths relative to the **repository root**, not the current working directory. When your code runs from a subdirectory, `os.Getwd()` gives wrong results for path construction. Always use `paths.RepoRoot()`:
+Git commands return paths relative to the **repository root**, not the current working directory. When your code runs from a subdirectory, `os.Getwd()` gives wrong results for path construction. Always use `paths.WorktreeRoot(ctx)`:
 
 ```go
 // WRONG
@@ -1010,7 +1011,7 @@ cwd, _ := os.Getwd()
 absPath := filepath.Join(cwd, file) // Breaks from subdirectory
 
 // CORRECT
-repoRoot, _ := paths.RepoRoot()
+repoRoot, _ := paths.WorktreeRoot(ctx)
 absPath := filepath.Join(repoRoot, file)
 ```
 
@@ -1120,6 +1121,7 @@ type promptInputRaw struct {
 package youragent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -1144,8 +1146,8 @@ func (a *YourAgent) Type() agent.AgentType   { return "Your Agent" }
 func (a *YourAgent) Description() string     { return "Your Agent - brief description" }
 func (a *YourAgent) ProtectedDirs() []string { return []string{".youragent"} }
 
-func (a *YourAgent) DetectPresence() (bool, error) {
-	repoRoot, err := paths.RepoRoot()
+func (a *YourAgent) DetectPresence(ctx context.Context) (bool, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot = "."
 	}
@@ -1163,7 +1165,7 @@ func (a *YourAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
-func (a *YourAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
+func (a *YourAgent) ChunkTranscript(_ context.Context, content []byte, maxSize int) ([][]byte, error) {
 	return agent.ChunkJSONL(content, maxSize)
 }
 

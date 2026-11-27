@@ -2,9 +2,9 @@
 
 ## Repository Overview
 
-Entire CLI is a Go CLI tool that captures AI coding agent sessions (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) as searchable metadata stored separately from code commits. It uses a strategy pattern for session/checkpoint management with minimal impact on commit history.
+Entire CLI is a Go CLI tool that captures AI coding agent sessions (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) as searchable metadata stored separately from code commits. It uses `*strategy.ManualCommitStrategy` (the only strategy; there is no strategy interface or worktree restore path) to track session state and write checkpoint metadata on commit with minimal impact on commit history.
 
-**Tech Stack**: Go (version in `mise.toml`), Cobra (CLI), charmbracelet/huh (interactive prompts), go-git/v5 (with caveats)
+**Tech Stack**: Go (version in `mise.toml`), Cobra (CLI), charm.land/huh/v2 (interactive prompts), go-git/v6 (with caveats)
 
 ## Build & Validation Commands
 
@@ -12,7 +12,7 @@ All commands use `mise` as the task runner. Always run these in order before com
 
 ```bash
 mise run fmt           # Format with gofmt (required - CI will fail otherwise)
-mise run lint          # Lint with golangci-lint (only new issues)
+mise run lint          # Lint entire codebase (golangci-lint, gofmt, go.mod, mise, secretpatterns, shellcheck)
 mise run test          # Unit tests
 mise run test:ci       # Full tests with race detection (same as CI)
 ```
@@ -40,16 +40,16 @@ return fmt.Errorf("failed to do X: %w", err)
 
 ### Forbidden go-git Operations
 
-**NEVER use go-git v5's Reset or Checkout directly** - they delete `.gitignore`d directories.
+**NEVER use go-git's `Reset` or `Checkout` directly** - `.golangci.yaml` forbids them (historically go-git v5 deleted `.gitignore`d directories such as `.entire/` and `.worktrees/`). Use the git CLI or CLI wrappers instead (see [Git and subprocess safety](../docs/development/git-safety.md)).
 
 ```go
-// WRONG - deletes .entire/ and .worktrees/
+// WRONG - forbidden by forbidigo; use the git CLI instead
 worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: hash})
 worktree.Checkout(&git.CheckoutOptions{Branch: ref})
 
-// CORRECT - use CLI wrappers from strategy/common.go and git_operations.go
-HardResetWithProtection(hash)
-CheckoutBranch(branch)
+// CORRECT - use git CLI wrappers (e.g., CheckoutBranch in git_operations.go) or exec.CommandContext
+CheckoutBranch(ctx, branch)
+cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
 ### Path Handling
@@ -61,8 +61,8 @@ CheckoutBranch(branch)
 cwd, _ := os.Getwd()
 absPath := filepath.Join(cwd, gitRelativePath)
 
-// CORRECT - always use repo root
-repoRoot, _ := paths.RepoRoot()
+// CORRECT - always use worktree root
+repoRoot, _ := paths.WorktreeRoot(ctx)
 absPath := filepath.Join(repoRoot, gitRelativePath)
 ```
 
@@ -98,11 +98,11 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 cmd/entire/
 ├── main.go           # Entry point
 └── cli/              # Main CLI package
-    ├── strategy/     # Session checkpoint strategies (strategy pattern)
+    ├── strategy/     # Manual-commit strategy and lifecycle/git hooks
     ├── checkpoint/   # Low-level storage operations
     ├── session/      # Session state management (.git/entire-sessions/)
     ├── agent/        # AI agent abstraction layer
-    ├── paths/        # Path utilities (RepoRoot)
+    ├── paths/        # Path utilities (WorktreeRoot)
     └── integration_test/  # Integration tests (//go:build integration)
 ```
 
@@ -135,7 +135,7 @@ The linter is strict (many linters enabled). Key rules:
 - `wrapcheck` requires wrapping errors from external packages
 - Test files are exempt from some linters (gosec, wrapcheck, forbidigo)
 
-Run `mise run lint:full` to check all code (not just new issues).
+Run `mise run lint` to run all linters across the entire codebase.
 
 ## When Adding New Commands
 

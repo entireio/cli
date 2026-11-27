@@ -294,9 +294,8 @@ Before implementing Go code, search nearby packages and utilities for reusable p
 
 ```bash
 mise run dup           # Comprehensive check (threshold 50) with summary
-mise run dup:staged    # Check only staged files
-mise run lint          # Normal lint includes dupl at threshold 75 (new issues only)
-mise run lint:full     # All issues at threshold 75
+mise run dup:staged    # Check only staged files (threshold 75)
+mise run lint          # Full lint suite across the codebase (golangci-lint, gofmt, go.mod, etc.)
 ```
 
 **Tiered thresholds:**
