@@ -172,7 +172,7 @@ func TestSubcommandHelp_OmitsPluginSection(t *testing.T) { //nolint:paralleltest
 func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
 	srv := pluginReleaseServer(t, "0.1.0")
-	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\nagent_help: true\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
 	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
 
 	res, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{})
@@ -188,6 +188,9 @@ func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:parall
 	}
 	if saved.Description != "Demo plugin for tests" {
 		t.Errorf("saved manifest description = %q, want it copied from %s", saved.Description, pluginMetadataFileName)
+	}
+	if !saved.AgentHelp {
+		t.Errorf("saved manifest agent_help = false, want it copied from %s", pluginMetadataFileName)
 	}
 }
 

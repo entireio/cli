@@ -112,6 +112,10 @@ type PluginManifest struct {
 	// pluginHelpEntries), so it is recorded here to keep `entire --help`
 	// offline and free of plugin execution.
 	Description string `yaml:"description,omitempty"`
+	// AgentHelp records entire-plugin.yml's agent_help at the installed tag:
+	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
+	// points agents at it.
+	AgentHelp bool `yaml:"agent_help,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between
@@ -150,6 +154,10 @@ type PluginMetadata struct {
 	// Description is a one-line summary shown by info/search, and in root
 	// help once installed (copied into PluginManifest.Description).
 	Description string `yaml:"description,omitempty"`
+	// AgentHelp declares that the plugin answers `entire-<name> agent-help`,
+	// so `entire agent-help` points agents at it. Opt-in, since that command
+	// runs the plugin.
+	AgentHelp lenientBool `yaml:"agent_help,omitempty"`
 	// DownloadURL overrides the per-forge release-asset URL convention.
 	// Template placeholders: {name} {tag} {version} {os} {arch} {asset}.
 	// When {asset} is present, candidate asset filenames are substituted;
@@ -157,6 +165,17 @@ type PluginMetadata struct {
 	DownloadURL string `yaml:"download_url,omitempty"`
 	// Requires lists plugins this plugin needs at runtime.
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
+}
+
+// lenientBool is a YAML boolean that reads anything but a boolean true as
+// false (a string such as "yes" included), so a malformed optional flag can't
+// fail the whole entire-plugin.yml, and with it the install.
+type lenientBool bool
+
+func (b *lenientBool) UnmarshalYAML(node *yaml.Node) error { //nolint:unparam // yaml.Unmarshaler's signature; leniency means never failing
+	var v bool
+	*b = lenientBool(node.ShortTag() == "!!bool" && node.Decode(&v) == nil && v)
+	return nil
 }
 
 // pluginMetadataFileName is the well-known path of the author-side metadata
