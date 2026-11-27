@@ -36,6 +36,20 @@ const crossRepoLinkTimeout = 30 * time.Second
 // idempotent (the install is, and the sweep dedups under its lock).
 const crossRepoSyncBudget = 4 * time.Second
 
+// envCrossRepoSyncBudget overrides crossRepoSyncBudget for the integration
+// harness: under a loaded parallel run the foreground budget can expire and
+// hand the sweep to a detached child, which a test reading the links right
+// after turn end would race. A value that does not parse is ignored.
+const envCrossRepoSyncBudget = "ENTIRE_TEST_CROSS_REPO_SYNC_BUDGET"
+
+// syncBudget is crossRepoSyncBudget, or the harness's override.
+func syncBudget() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(envCrossRepoSyncBudget)); err == nil && d > 0 {
+		return d
+	}
+	return crossRepoSyncBudget
+}
+
 // crossRepoActivity is what a session did outside its repository, as its
 // hooks and transcript show: files its edit tools changed, directories its
 // shell commands worked in, and the commits `git commit` reported.
@@ -79,7 +93,7 @@ func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, ac
 		in := linkSessionArgs{sessionID: sessionID, from: hookRoot, since: since, edited: rels, commits: act.commits, sweep: sweep}
 		targets = append(targets, linkTarget{root: root, args: in.argv()})
 	}
-	linkRepos(ctx, targets, time.Now().Add(crossRepoSyncBudget), runLinkSession, spawnLinkSession)
+	linkRepos(ctx, targets, time.Now().Add(syncBudget()), runLinkSession, spawnLinkSession)
 }
 
 // linkTarget is one repository to run link-session in, and its arguments.

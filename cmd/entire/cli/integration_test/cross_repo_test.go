@@ -385,9 +385,15 @@ func (x *crossRepo) newPlainRepo(t *testing.T, dir string) *TestEnv {
 // before Entire's hooks were there.
 func commitUnhooked(d *TestEnv, file string) string {
 	d.T.Helper()
+	return commitUnhookedAt(d, file, time.Now())
+}
+
+// commitUnhookedAt is commitUnhooked with an explicit commit time.
+func commitUnhookedAt(d *TestEnv, file string, when time.Time) string {
+	d.T.Helper()
 	d.WriteFile(file, "committed: "+file)
 	d.GitAdd(file)
-	d.GitCommit("commit " + file)
+	d.GitCommitAt("commit "+file, when)
 	return d.GetHeadHash()
 }
 
@@ -653,12 +659,6 @@ func TestCrossRepo_SweepLinksLinkedWorktreeCommit(t *testing.T) {
 	assertRecordedLink(t, d, sess.ID, sha)
 }
 
-// waitNextSecond sleeps into the next wall-clock second, so the next commit's
-// committer time (whole seconds) is later than the previous one's.
-func waitNextSecond() {
-	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
-}
-
 // In the first turn that commits in D, D's hooks are not installed yet, so its
 // commits carry no trailer: the turn-end sweep links them after C's same-turn
 // commit condensed. The session's list still follows commit order, and the
@@ -670,14 +670,15 @@ func TestCrossRepo_SessionStateListsSweptCommitsInCommitOrder(t *testing.T) {
 	sess := x.c.NewSession()
 	x.startTurn(t, sess, "commit in d, then in c")
 
+	// Explicit, increasing commit times (git's are whole seconds), after
+	// the turn's start so the sweep's window includes them.
+	at := time.Now().Truncate(time.Second)
 	edit(t, sess, d, "d1.txt")
-	d1 := commitUnhooked(d, "d1.txt")
-	waitNextSecond()
+	d1 := commitUnhookedAt(d, "d1.txt", at.Add(time.Second))
 	edit(t, sess, d, "w1.txt")
-	w1 := commitUnhooked(d, "w1.txt")
-	waitNextSecond()
+	w1 := commitUnhookedAt(d, "w1.txt", at.Add(2*time.Second))
 	x.c.WriteFile("home.txt", "home work")
-	x.c.GitCommitWithHooksAsAgent("home commit", "home.txt")
+	x.c.GitCommitWithHooksAsAgentAt("home commit", at.Add(3*time.Second), "home.txt")
 	c2 := x.c.GetHeadHash()
 	x.endTurn(t, sess)
 
