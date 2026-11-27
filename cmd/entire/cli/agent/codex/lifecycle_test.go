@@ -178,6 +178,23 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, rolloutPath, event.SessionRef)
 	require.Equal(t, "gpt-4.1", event.Model)
+	require.False(t, event.CanContinueTurn, "a stop a hook already continued is not continued again")
+}
+
+func TestParseHookEvent_StopCanContinueRootTurn(t *testing.T) {
+	t.Parallel()
+	rolloutPath := writeRootRollout(t)
+	input := `{"session_id":"test-uuid","transcript_path":"` + rolloutPath + `","hook_event_name":"Stop","stop_hook_active":false}`
+	event, err := (&CodexAgent{RolloutRoots: []string{filepath.Dir(rolloutPath)}}).ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.True(t, event.CanContinueTurn, "a confirmed root rollout's stop can be continued")
+
+	// Without its rollout root the rollout is unverified: recorded, not continued.
+	event, err = (&CodexAgent{}).ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.False(t, event.CanContinueTurn)
 }
 
 func TestParseHookEvent_TurnHooksIgnoreChildRollout(t *testing.T) {

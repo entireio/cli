@@ -74,3 +74,36 @@ func RenderAdditionalContextHookOutput(hookEventName, text string) ([]byte, erro
 	}
 	return append(b, '\n'), nil
 }
+
+// TurnContinuer is implemented by agents whose stop hook can keep the turn
+// going: answering the hook with a continuation makes the agent carry on
+// with the given reason as its next instruction instead of ending the turn.
+// Entire uses it only on a TurnEnd with CanContinueTurn set.
+type TurnContinuer interface {
+	Agent
+
+	// RenderTurnContinuation returns the bytes to write to the stop hook's
+	// stdout to continue the turn with reason.
+	RenderTurnContinuation(reason string) ([]byte, error)
+}
+
+// AsTurnContinuer returns ag as a TurnContinuer when it implements the
+// interface. External agents never do: their stop hooks' answers are theirs.
+func AsTurnContinuer(ag Agent) (TurnContinuer, bool) {
+	return nonDeclarerCapability[TurnContinuer](ag)
+}
+
+// RenderStopBlockHookOutput renders the stop-hook answer Claude Code and
+// Codex both read as "keep going":
+//
+//	{"decision":"block","reason":<reason>}
+func RenderStopBlockHookOutput(reason string) ([]byte, error) {
+	out, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: reason})
+	if err != nil {
+		return nil, fmt.Errorf("render stop continuation: %w", err)
+	}
+	return out, nil
+}

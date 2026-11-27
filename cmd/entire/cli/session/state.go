@@ -214,6 +214,13 @@ type State struct {
 	//   - Cleared when session is reset (ResetSession deletes the state file entirely)
 	TurnCheckpointIDs []string `json:"turn_checkpoint_ids,omitempty"`
 
+	// TrailFindingsHead is the commit Entire last continued a turn for so the
+	// agent would report the trail's findings on it (see the CLI's
+	// turn_end_findings.go). A push the local tracking ref did not record
+	// (a sandboxed agent's) is found on the server instead, and would be found
+	// again on every later stop without it.
+	TrailFindingsHead string `json:"trail_findings_head,omitempty"`
+
 	// LastInteractionTime is updated on agent-interaction events (TurnStart,
 	// TurnEnd, SessionStop, Compaction) but NOT on git commit hooks.
 	// Used for stale session detection in "entire doctor".

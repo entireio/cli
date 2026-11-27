@@ -155,6 +155,9 @@ type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model,omitempty"`
+	// StopHookActive is set on a Stop when a Stop hook already continued
+	// this turn.
+	StopHookActive bool `json:"stop_hook_active,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

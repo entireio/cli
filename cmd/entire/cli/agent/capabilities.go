@@ -55,6 +55,7 @@ type CapabilityDeclarer interface {
 //   - ToolInvocationScanner
 //   - TranscriptFetcher
 //   - TranscriptSanitizer
+//   - TurnContinuer (refuses CapabilityDeclarer agents)
 //   - TurnEndHookTimeouter
 //   - UsageCounterSource (refuses CapabilityDeclarer agents)
 //
