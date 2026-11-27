@@ -16,7 +16,10 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
@@ -161,6 +164,7 @@ func TestCrossRepoInstallBlocker_MainWorktreeWithoutHooksPath(t *testing.T) {
 	for name, sub := range map[string]string{"root": "", "subdirectory": "pkg"} {
 		t.Run(name, func(t *testing.T) {
 			dir := plainRepo(t)
+			t.Setenv("HOME", filepath.Dir(dir))
 			cwd := filepath.Join(dir, sub)
 			if err := os.MkdirAll(cwd, 0o755); err != nil {
 				t.Fatal(err)
@@ -177,6 +181,7 @@ func TestCrossRepoInstallBlocker_MainWorktreeWithoutHooksPath(t *testing.T) {
 
 func TestCrossRepoInstallBlocker_SharedHooksPathBlocks(t *testing.T) {
 	dir := plainRepo(t)
+	t.Setenv("HOME", filepath.Dir(dir))
 	testutil.RunGit(t, dir, "config", "core.hooksPath", t.TempDir())
 	t.Chdir(dir)
 	ClearHooksDirCache()
@@ -391,5 +396,44 @@ func TestWithLinkedRepos_LeavesTheCursorToTheCaller(t *testing.T) {
 	}
 	if len(opts.LinkedRepos) != 2 || opts.LinkedRepos[0].SHA != "bbb" || len(opts.SessionLinkedRepos) != 3 {
 		t.Fatalf("delta %+v, all %+v", opts.LinkedRepos, opts.SessionLinkedRepos)
+	}
+}
+
+// A lazy install never goes outside the home directory unasked; the
+// developer lifts that floor per repository with `entire track allow <path>`
+// or by enabling it there.
+func TestCrossRepoInstallBlocker_HomeFloor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		userSettings func(dir string) string
+		local        string
+		blocked      bool
+	}{
+		"outside home":       {userSettings: func(string) string { return `{"global_enable": true}` }, blocked: true},
+		"allowed by path":    {userSettings: func(dir string) string { return `{"global_enable": true, "track": {"repos": ["` + dir + `"]}}` }},
+		"enabled there":      {userSettings: func(string) string { return `{"global_enable": true}` }, local: `{"enabled": true}`},
+		"denied, not lifted": {userSettings: func(dir string) string { return `{"global_enable": true, "track": {"deny": ["` + dir + `"]}}` }, blocked: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := plainRepo(t)
+			t.Setenv("HOME", t.TempDir())
+			configDir := t.TempDir()
+			t.Setenv(userdirs.EnvConfigDir, configDir)
+			if err := os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(tc.userSettings(dir)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.local != "" {
+				testutil.WriteFile(t, dir, ".gitignore", ".entire/settings.local.json\n")
+				testutil.WriteFile(t, dir, ".entire/settings.local.json", tc.local)
+			}
+			t.Chdir(dir)
+			ClearHooksDirCache()
+			t.Cleanup(ClearHooksDirCache)
+			settings.ClearTrackCache()
+			t.Cleanup(settings.ClearTrackCache)
+			reason := crossRepoInstallBlocker(context.Background())
+			if tc.blocked != strings.Contains(reason, "outside the home directory") {
+				t.Fatalf("reason %q, want blocked by the home floor: %v", reason, tc.blocked)
+			}
+		})
 	}
 }

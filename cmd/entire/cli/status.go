@@ -110,6 +110,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, s)
 	writeCommittedKeysIgnoredForGlobalEnable(w, s)
+	writeTrackStatus(ctx, w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 		writeCrossRepoStatus(ctx, w)
@@ -204,6 +205,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	writeRefusedAgentHomes(w)
 	writeUserSettingsRejections(w, effectiveSettings)
 	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
+	writeTrackStatus(ctx, w)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -276,14 +278,21 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
 	var b strings.Builder
 
-	if s.Enabled {
+	untracked := untrackedReason(ctx, s)
+	switch {
+	case untracked != "":
+		b.WriteString(sty.render(sty.red, "○"))
+		b.WriteString(" ")
+		b.WriteString(sty.render(sty.bold, "Not tracked"))
+		b.WriteString(" (" + tuiutil.SanitizeDisplayText(untracked) + ")")
+	case s.Enabled:
 		b.WriteString(sty.render(sty.green, "●"))
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Enabled"))
 		if s.EnabledOnlyByGlobal() {
 			b.WriteString(" (global enable)")
 		}
-	} else {
+	default:
 		b.WriteString(sty.render(sty.red, "○"))
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Disabled"))
@@ -299,7 +308,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	}
 
 	// Show enabled agents
-	if s.Enabled {
+	if s.Enabled && untracked == "" {
 		agents := resolveStatusAgents(ctx)
 		if len(agents.project) > 0 {
 			b.WriteString("\n")
@@ -1257,6 +1266,10 @@ type statusJSON struct {
 	// EnabledBy is "global" when the repository is on only through global
 	// enable (`entire enable` was never run here).
 	EnabledBy string `json:"enabled_by,omitempty"`
+	// Tracked and TrackReason are the tracking rule's answer for this
+	// repository (`entire track`); set only while global enable is on.
+	Tracked     *bool  `json:"tracked,omitempty"`
+	TrackReason string `json:"track_reason,omitempty"`
 	// UserHooks lists the agents whose Entire hooks are installed in their
 	// user-level config (global enable on).
 	UserHooks []string `json:"user_hooks,omitempty"`
@@ -1517,6 +1530,47 @@ func fillStatusAgentsJSON(ctx context.Context, s *EntireSettings, result *status
 	result.UserHooksShadowed = agents.shadowed
 	if s.EnabledOnlyByGlobal() {
 		result.EnabledBy = enabledByGlobal
+	}
+	if state := globalTrackState(ctx); state != nil {
+		result.Tracked = &state.Tracked
+		result.TrackReason = state.Reason
+	}
+	// Agent hooks treat an untracked repository as not enabled, so the JSON
+	// does too; enabled_by and tracked:false say why.
+	if untrackedReason(ctx, s) != "" {
+		result.Enabled = false
+	}
+}
+
+// untrackedReason is why the tracking rule (`entire track`) excludes a
+// repository that is on only through global enable, or "". A repository the
+// developer enabled itself is excluded only by track.deny, which
+// settings.RepoTrackable already applies to it, so its answer is used as is.
+func untrackedReason(ctx context.Context, s *EntireSettings) string {
+	if !s.Enabled {
+		return ""
+	}
+	state := globalTrackState(ctx)
+	if state == nil || state.Tracked {
+		return ""
+	}
+	return state.Reason
+}
+
+// globalTrackState is currentTrackState while global enable is on, else nil:
+// the tracking rule only narrows global enable.
+func globalTrackState(ctx context.Context) *trackRepoState {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return nil
+	}
+	return currentTrackState(ctx)
+}
+
+// writeTrackStatus prints which tracking rule applies here under global
+// enable.
+func writeTrackStatus(ctx context.Context, w io.Writer) {
+	if line := trackRuleSummary(globalTrackState(ctx)); line != "" {
+		fmt.Fprintln(w, tuiutil.SanitizeDisplayText(line))
 	}
 }
 

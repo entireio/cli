@@ -197,6 +197,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"project":   {agentHelpAudienceUserOwned, false},
 	"repo":      {agentHelpAudienceUserOwned, false},
 	"review":    {agentHelpAudienceUserOwned, false},
+	"track":     {agentHelpAudienceUserOwned, false}, // decides which repositories record sessions
 	// Mints credentials and grants access.
 	"service-account":     {agentHelpAudienceUserOwned, false},
 	"project agent setup": {agentHelpAudienceUserOwned, false},

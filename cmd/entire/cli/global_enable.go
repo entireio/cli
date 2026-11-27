@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -27,13 +28,16 @@ import (
 // flagGlobal is `entire enable --global` / `entire disable --global`.
 const flagGlobal = "global"
 
+// flagTrackOrg is `entire enable --global --track-org <host/org>`.
+const flagTrackOrg = "track-org"
+
 // runEnableGlobal turns Entire on in every repository: it sets
 // `global_enable: true` in the user settings file and installs every in-use
 // agent's user-level hooks now rather than on the next command. It does not
 // set up the repository it runs in; the hooks do that the first time an agent
 // runs there.
 func runEnableGlobal(cmd *cobra.Command, yes bool) error {
-	if err := rejectFlagsWithGlobal(cmd, "yes"); err != nil {
+	if err := rejectFlagsWithGlobal(cmd, "yes", flagTrackOrg); err != nil {
 		return err
 	}
 	// Before the already-on short-circuit: an agent re-running it is answering
@@ -49,6 +53,12 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 	// being agreed to.
 	if err := userSettingsWritable(cmd); err != nil {
 		return err
+	}
+	// Before global_enable is written: a bad org must not leave it on with no
+	// tracking rule and no user-level hooks.
+	if org, _ := cmd.Flags().GetString(flagTrackOrg); org != "" && settings.NormalizeTrackOrg(org) == "" { //nolint:errcheck // defined on this command
+		cmd.SilenceUsage = true
+		return fmt.Errorf("--track-org %q does not name an org; use host/org, e.g. github.com/entireio", org)
 	}
 	// Turning it on again adds nothing to agree to.
 	alreadyOn := settings.UserTierEnablesEverywhere(ctx)
@@ -68,10 +78,76 @@ func runEnableGlobal(cmd *cobra.Command, yes bool) error {
 		fmt.Fprintf(w, "Entire is now enabled in every repository you work in (global_enable in %s).\n", path)
 	}
 
+	// The hooks go in even when the rule could not be saved: global_enable is
+	// already on, and without them it would record nothing until the next
+	// command re-checked them.
+	trackErr := chooseGlobalTrackRule(cmd, yes || alreadyOn)
 	installUserHooks(ctx, func(installer agent.UserHookInstaller, result userHookInstallResult) {
 		reportUserHookInstall(cmd, installer, result)
 	})
+	return trackErr
+}
+
+// Choices of the tracking prompt `entire enable --global` shows.
+const (
+	trackChoiceAll    = "all"
+	trackChoiceOrg    = "org"
+	trackChoiceSelect = "select"
+)
+
+// chooseGlobalTrackRule sets which repositories global enable tracks:
+// --track-org sets the org rule; otherwise, when a terminal can be asked and
+// skipPrompt is false, the developer picks every repository (the default),
+// the current repository's org, or repositories one by one. --yes, no
+// terminal, or a repeat run keeps the rule as it is (allow-all when unset).
+func chooseGlobalTrackRule(cmd *cobra.Command, skipPrompt bool) error {
+	ctx := cmd.Context()
+	if org, _ := cmd.Flags().GetString(flagTrackOrg); org != "" { //nolint:errcheck // defined on this command
+		return setTrackOrg(ctx, cmd.OutOrStdout(), org, true)
+	}
+	if skipPrompt || !interactive.CanPromptInteractively() {
+		return nil
+	}
+	org := currentRepoOrg(ctx)
+	choice := trackChoiceAll
+	options := []huh.Option[string]{huh.NewOption("Track every repository (default)", trackChoiceAll)}
+	if org != "" {
+		options = append(options, huh.NewOption("Only repositories in "+tuiutil.SanitizeDisplayText(org), trackChoiceOrg))
+	}
+	options = append(options, huh.NewOption("Pick repositories now", trackChoiceSelect))
+	form := NewAccessibleForm(huh.NewGroup(huh.NewSelect[string]().
+		Title("Which repositories should Entire track?").
+		Description("Change it any time with `entire track`.").
+		Options(options...).
+		Value(&choice)))
+	if err := form.RunWithContext(ctx); err != nil {
+		// Global enable is already on; a skipped choice keeps allow-all.
+		return handleFormCancellation(cmd.ErrOrStderr(), "Tracking choice", err)
+	}
+	switch choice {
+	case trackChoiceOrg:
+		return setTrackOrg(ctx, cmd.OutOrStdout(), org, true)
+	case trackChoiceSelect:
+		return runTrackSelect(cmd)
+	}
 	return nil
+}
+
+// currentRepoOrg is the org of the repository the command runs in
+// ("gh/entireio" for gh/entireio/cli), or "" outside one or without an origin.
+func currentRepoOrg(ctx context.Context) string {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return ""
+	}
+	key, err := settings.RepoKey(ctx, root)
+	if err != nil || filepath.IsAbs(filepath.FromSlash(key)) || strings.HasPrefix(key, "/") {
+		return ""
+	}
+	if i := strings.LastIndex(key, "/"); i > 0 {
+		return key[:i]
+	}
+	return ""
 }
 
 // userHookInstallResult is one agent's EnsureUserHooks outcome.

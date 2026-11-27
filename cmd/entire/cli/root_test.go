@@ -263,6 +263,7 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"agent":      groupSetup,
 		"plugin":     groupSetup,
 		"status":     groupSetup,
+		"track":      groupSetup,
 		"doctor":     groupSetup,
 		"clean":      groupSetup,
 		"session":    groupSessions,

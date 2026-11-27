@@ -82,7 +82,7 @@ func linkSessionInOtherRepos(ctx context.Context, sessionID, hookRoot string, ac
 	logCtx := logging.WithComponent(ctx, "cross-repo")
 	var targets []linkTarget
 	for root, rels := range activityByOtherRepo(ctx, hereCommon, act) {
-		if reason := crossRepoSkipReason(root, hookRoot, crossRepoProtectedDirs()); reason != "" {
+		if reason := crossRepoSkipReason(ctx, root, hookRoot, crossRepoProtectedDirs()); reason != "" {
 			logging.Info(logCtx, "not linking a repository the session worked in",
 				slog.String("repo", root), slog.String("skipped_reason", reason))
 			continue
@@ -378,19 +378,22 @@ func sameResolvedDir(a, b string) bool {
 	return resolvedPath(a) == resolvedPath(b)
 }
 
-// crossRepoProtectedDirs are trees Entire never installs hooks in unasked:
-// the home directory bounds where it may (index 0), and the rest are package
-// caches, Homebrew, and Entire's own per-user directories.
+// crossRepoProtectedDirs are trees Entire never installs hooks in, whatever
+// the tracking rule says: module caches, Homebrew, and Entire's own per-user
+// directories. They hold checkouts nobody works in as a project, so this is a
+// safety floor under the allowlist, not policy.
 func crossRepoProtectedDirs() []string {
-	home, err := userdirs.Home()
-	if err != nil {
-		return nil
-	}
+	var dirs []string
 	gopath := os.Getenv("GOPATH")
 	if gopath == "" {
-		gopath = filepath.Join(home, "go")
+		if home, err := userdirs.Home(); err == nil {
+			gopath = filepath.Join(home, "go")
+		}
 	}
-	dirs := []string{home, filepath.Join(gopath, "pkg", "mod"), "/opt/homebrew", "/usr/local/Homebrew", "/usr/local/Cellar", "/home/linuxbrew"}
+	if gopath != "" {
+		dirs = append(dirs, filepath.Join(gopath, "pkg", "mod"))
+	}
+	dirs = append(dirs, "/opt/homebrew", "/usr/local/Homebrew", "/usr/local/Cellar", "/home/linuxbrew")
 	if dir, err := userdirs.ConfigDirChecked(); err == nil {
 		dirs = append(dirs, dir)
 	}
@@ -401,20 +404,21 @@ func crossRepoProtectedDirs() []string {
 }
 
 // crossRepoSkipReason reports why Entire must not link the repository at
-// root, or "". protected is crossRepoProtectedDirs: root must lie under the
-// first and under none of the rest. A repository inside the session's own
-// worktree is a submodule or a nested checkout of it.
-func crossRepoSkipReason(root, hookRoot string, protected []string) string {
-	switch {
-	case len(protected) == 0 || !within(protected[0], root):
-		return "outside the home directory"
-	case within(hookRoot, root):
+// root, or "". A repository inside the session's own worktree is a submodule
+// or a nested checkout of it; one under protected is a cache or tool
+// directory; otherwise the developer's tracking rule (settings.RepoTrackable)
+// decides.
+func crossRepoSkipReason(ctx context.Context, root, hookRoot string, protected []string) string {
+	if within(hookRoot, root) {
 		return "inside the session's repository"
 	}
-	for _, dir := range protected[1:] {
+	for _, dir := range protected {
 		if within(dir, root) {
 			return "in a package cache or tool directory"
 		}
+	}
+	if ok, reason := settings.RepoTrackable(ctx, root); !ok {
+		return reason
 	}
 	return ""
 }
@@ -436,7 +440,7 @@ func newHooksGitLinkSessionCmd() *cobra.Command {
 		Short: "Link this repository's commits to an agent session started in another repository",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if gitHooksDisabled || !settings.UserTierEnablesEverywhere(cmd.Context()) {
+			if gitHooksDisabled || !settings.UserTierEnablesEverywhere(cmd.Context()) || !repoTrackableHere(cmd.Context()) {
 				return nil
 			}
 			if err := validation.ValidateSessionID(sessionID); err != nil {
@@ -454,6 +458,20 @@ func newHooksGitLinkSessionCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&commits, "commit", nil, "an abbreviated commit SHA the agent's tool output reported")
 	cmd.Flags().BoolVar(&noSweep, "no-sweep", false, "only install the git hooks")
 	return cmd
+}
+
+// repoTrackableHere is settings.RepoTrackable for this worktree.
+func repoTrackableHere(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	ok, reason := settings.RepoTrackable(ctx, root)
+	if !ok {
+		logging.Info(logging.WithComponent(ctx, "cross-repo"), "not linking: the tracking rule excludes this repository",
+			slog.String("repo", root), slog.String("reason", reason))
+	}
+	return ok
 }
 
 // linkSessionFlags are link-session's flags.

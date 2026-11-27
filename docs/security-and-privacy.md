@@ -606,6 +606,52 @@ and pointing at `entire disable`; it does not hold or prompt.
   other's user-level copies, each to its own version; the copy matches
   whichever ran last.
 
+### Which repositories are tracked
+
+With global enable on, every repository is tracked unless you exclude it. The
+`track` block in the user settings file (`entire track`) narrows that:
+
+- `entire track deny <repo|path>` stops tracking one repository (by origin,
+  e.g. `github.com/owner/repo`, or by path when it has no remote);
+  `entire track allow` undoes it.
+- `entire track org add github.com/entireio` tracks only repositories whose
+  origin is in an allowed org, plus those allowed by name (`entire track allow`)
+  and those you enabled yourself. `entire enable --global` offers
+  this for the current repository's org; `--track-org <host/org>` sets it
+  without a prompt, and `--yes` or no terminal keeps every repository.
+- `entire track select` lists known repositories (this one, those Entire
+  installed hooks in, those in `repos`), each pre-selected when the rule tracks
+  it; a deselected one is denied, and a selected one outside the org rule is
+  allowed by name. `entire track list [--json]` and `entire status` show the rule that
+  applies here; `entire track reset` tracks everything again.
+
+First match wins: a `repos` entry or an untracked
+`.entire/settings.local.json` with `"enabled": false`; a committed
+`"enabled": false` that neither of those overrides; a deny; a
+repository you enabled yourself (`entire enable` here, a `repos` entry or an
+untracked local settings file with `"enabled": true`) is tracked, since a
+project install overrides global enable; an org rule the repository is
+outside and not allowed by name; otherwise tracked. So the org rule narrows
+only repositories that are on solely through global enable, while a deny
+applies to every repository. A committed `"enabled": true` (`entire enable
+--project`) is the repository's setting, not your own choice, so it does not
+count as enabling it yourself. An excluded repository behaves as not enabled:
+its agent hooks record nothing, its git hooks (already installed ones
+included) do nothing, so earlier sessions are neither condensed nor pushed
+there, no git hooks are installed there, and `entire status` reports it as not
+tracked (`"enabled": false` in `--json`).
+
+**Home-directory floor.** Whatever the rule says, Entire installs its git
+hooks unasked (the lazy install when a session's agent works in another
+repository) only in repositories under your home directory, never in `/tmp`,
+`/srv`, mounted volumes or other users' checkouts. `entire track allow <path>`
+lifts this for one repository, as does `entire enable` run there. Linking
+into a repository that already has Entire's hooks, or that you enabled, is
+unaffected; elsewhere the commits are still linked by the turn-end sweep
+without installing anything.
+The rule is read only from the user settings file, so nothing a repository
+commits can widen or narrow it, and an invalid `track` block tracks nothing.
+
 ### Commits in other repositories
 
 With global enable on, a session started in one repository (its home) also
@@ -624,12 +670,15 @@ session's log stays in its home: the other repository gets only a marker.
   `git` command run there or with `-C`, a redirection, or a file-writing
   command such as `touch`, `cp` or `sed -i`. Reads such as `cat` or `git log`
   do not count, nor does text in tool results), Entire installs its git hooks there, including pre-push, and prints one line
-  on stderr. It skips repositories outside your home directory, Go's module
-  cache, Homebrew, Entire's own directories, submodules or nested checkouts of
-  the home, repositories whose hooks directory is outside their git directory
-  (`core.hooksPath` naming a shared one), repositories with git hooks Entire did
-  not write, and any repository that is disabled (`enabled: false` committed,
-  or `entire disable` there).
+  on stderr. Which repositories qualify is your [tracking rule](#which-repositories-are-tracked):
+  it skips any repository the rule excludes (denied, outside the org rule, or
+  disabled with a committed `enabled: false` or `entire disable` there). Under
+  that rule, as a safety floor, it never touches Go's module cache, Homebrew,
+  Entire's own directories, submodules or nested checkouts of the home,
+  repositories whose hooks directory is outside their git directory
+  (`core.hooksPath` naming a shared one), or repositories with git hooks Entire
+  did not write. A commit hook in an excluded repository links nothing, even
+  where Entire's hooks are already installed.
 - **What the other repository stores.** Its checkpoint ref gets a marker
   checkpoint: the commit SHA (also in its `linked_commits` when the commit
   has no trailer, i.e. a recorded link), the repository,

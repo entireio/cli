@@ -94,11 +94,15 @@ func getHookType(hookName string) string {
 // anything else attached to it (Antigravity's title-tee) is not stamped either.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
-	if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
+	root, err := paths.WorktreeRoot(cmd.Context())
+	if err != nil {
 		return nil
 	}
 
-	setUp := settings.IsSetUpAndEnabled(cmd.Context())
+	// Under global enable a repository the developer's tracking rule excludes
+	// behaves as not enabled (settings.HookRepoTrackable; cached, no git
+	// subprocess beyond the origin lookup settings already memoizes).
+	setUp := settings.IsSetUpAndEnabled(cmd.Context()) && settings.HookRepoTrackable(cmd.Context(), root)
 	// Before the set-up gate: an unreadable user settings file is what makes
 	// a repository on only through global enable read as not set up.
 	if hookName == hookNameSessionStart {
@@ -212,7 +216,7 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 			// and loads redactors, so it must not run in a repo that never
 			// enabled Entire. Same fail-closed gate the git-hook tree applies
 			// before its own call.
-			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+			if !settings.IsSetUpAndEnabled(cmd.Context()) || !hookRepoTrackableHere(cmd.Context()) {
 				return
 			}
 			if userScopeStepsAside(cmd, agentName) {
@@ -283,4 +287,10 @@ func withUserScopeHook(ctx context.Context, user bool) context.Context {
 func isUserScopeHook(ctx context.Context) bool {
 	user, _ := ctx.Value(userScopeHookKey{}).(bool) //nolint:errcheck // absent means project scope
 	return user
+}
+
+// hookRepoTrackableHere is settings.HookRepoTrackable for this worktree.
+func hookRepoTrackableHere(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	return err == nil && settings.HookRepoTrackable(ctx, root)
 }

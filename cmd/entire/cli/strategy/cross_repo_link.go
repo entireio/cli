@@ -20,7 +20,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -313,11 +315,40 @@ func crossRepoInstallOwner(ctx context.Context) (string, error) {
 	return commonDir, nil
 }
 
+// crossRepoHomeFloor is the safety floor for a lazy install: Entire installs
+// its hooks unasked only in repositories under the home directory, unless the
+// developer allowed this one by name (`entire track allow <path>`) or enabled
+// it (`entire enable` there). Linking needs no install, so it is unaffected,
+// as is a repository whose hooks are already installed.
+func crossRepoHomeFloor(ctx context.Context) string {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "the repository could not be resolved"
+	}
+	home, err := userdirs.Home()
+	if err != nil {
+		return "the home directory could not be resolved"
+	}
+	if pathWithin(home, root) || settings.InstallPastHomeFloor(ctx, root) {
+		return ""
+	}
+	return "outside the home directory; run `entire track allow " + root + "` to allow it"
+}
+
+// pathWithin reports whether path is dir or lies beneath it, both resolved.
+func pathWithin(dir, path string) bool {
+	rel, err := filepath.Rel(resolveExisting(dir), resolveExisting(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // crossRepoInstallBlocker reports why Entire must not install its git hooks
 // here unasked: a hooks directory outside this repository's git directory
 // (core.hooksPath naming a shared one another tool owns), or hooks Entire did
 // not write.
 func crossRepoInstallBlocker(ctx context.Context) string {
+	if reason := crossRepoHomeFloor(ctx); reason != "" {
+		return reason
+	}
 	hooksDir, err := worktreeHooksDir(ctx)
 	if err != nil {
 		return "the hooks directory could not be resolved"

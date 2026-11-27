@@ -291,6 +291,9 @@ func crossRepoCommitSession(ctx context.Context) *crossRepoHome {
 	if !settings.UserTierEnablesEverywhere(ctx) {
 		return nil
 	}
+	if root, err := paths.WorktreeRoot(ctx); err != nil || !settingsRepoTrackable(ctx, root) {
+		return nil
+	}
 	p := findCrossRepoPointer(ctx)
 	if p == nil {
 		return nil
@@ -305,6 +308,13 @@ func crossRepoCommitSession(ctx context.Context) *crossRepoHome {
 		return nil
 	}
 	return home
+}
+
+// settingsRepoTrackable is settings.RepoTrackable without the reason: a
+// commit in a repository the tracking rule excludes links nothing.
+func settingsRepoTrackable(ctx context.Context, root string) bool {
+	ok, _ := settings.RepoTrackable(ctx, root)
+	return ok
 }
 
 // editedOverlap reports whether the commit changed any path the session
