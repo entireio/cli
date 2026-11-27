@@ -1,0 +1,104 @@
+package transcript
+
+import (
+	"bytes"
+	"fmt"
+)
+
+// Native transcript formats Convert can be told to use through
+// Options.Format. Each is named after the agent whose transcript it reads.
+const (
+	FormatClaudeCode = "claude-code"     // Claude Code JSONL, with per-call usage
+	FormatCursor     = "cursor"          // Claude-style JSONL with per-message counts
+	FormatCodex      = "codex"           // Codex rollout JSONL
+	FormatCopilot    = "copilot-cli"     // Copilot CLI events JSONL
+	FormatDroid      = "factoryai-droid" // Factory AI Droid JSONL
+	FormatGemini     = "gemini"          // Gemini CLI session JSON
+	FormatOpenCode   = "opencode"        // OpenCode export
+	FormatPi         = "pi"              // Pi session JSONL
+)
+
+// KnownFormat reports whether Convert accepts format as Options.Format.
+func KnownFormat(format string) bool {
+	switch format {
+	case FormatClaudeCode, FormatCursor, FormatCodex, FormatCopilot,
+		FormatDroid, FormatGemini, FormatOpenCode, FormatPi:
+		return true
+	}
+	return false
+}
+
+// detectFormat picks the format of content when Options.Format is empty.
+// Single-object formats (OpenCode, Gemini), Pi and Codex are detected on the
+// whole transcript: slicing would cut a JSON object mid-value or drop the
+// header line they are recognized by, and they apply StartLine themselves.
+// The line formats are detected on the slice that will be converted.
+func detectFormat(content []byte, opts Options) string {
+	switch {
+	case isOpenCodeFormat(content):
+		return FormatOpenCode
+	case isGeminiFormat(content):
+		return FormatGemini
+	case isPiFormat(content):
+		return FormatPi
+	case isCodexFormat(content):
+		return FormatCodex
+	}
+	truncated := SliceFromLine(content, opts.StartLine)
+	switch {
+	case isCopilotFormat(truncated):
+		return FormatCopilot
+	case isDroidFormat(truncated):
+		return FormatDroid
+	}
+	return jsonlFormat(opts.Agent)
+}
+
+// jsonlFormat picks the accounting for undeclared Claude-style JSONL. Claude
+// Code and Cursor share a line format, so the agent name decides: Claude
+// Code's per-call usage for "claude-code", Cursor's per-message counts for
+// anything else.
+func jsonlFormat(agent string) string {
+	if agent == agentClaudeCode {
+		return FormatClaudeCode
+	}
+	return FormatCursor
+}
+
+// convertAs converts content with the converter for format.
+func convertAs(content []byte, format string, opts Options) ([]byte, error) {
+	switch format {
+	case FormatOpenCode, FormatGemini:
+		// An empty single-object transcript is not yet written, not malformed:
+		// convert it as detection does, to nothing.
+		if len(bytes.TrimSpace(content)) == 0 {
+			return convertAs(content, jsonlFormat(opts.Agent), opts)
+		}
+	}
+	switch format {
+	case FormatOpenCode:
+		return compactOpenCode(content, opts)
+	case FormatGemini:
+		return compactGemini(content, opts)
+	case FormatPi:
+		return compactPi(content, opts)
+	case FormatCodex:
+		return compactCodex(content, opts)
+	}
+
+	truncated := SliceFromLine(content, opts.StartLine)
+	if truncated == nil {
+		truncated = []byte{}
+	}
+	switch format {
+	case FormatCopilot:
+		return compactCopilot(truncated, opts)
+	case FormatDroid:
+		return compactDroid(truncated, opts)
+	case FormatClaudeCode:
+		return foldJSONL(truncated, opts, NewClaudeAdapter())
+	case FormatCursor:
+		return foldJSONL(truncated, opts, NewCursorAdapter())
+	}
+	return nil, fmt.Errorf("unknown transcript format %q", format)
+}

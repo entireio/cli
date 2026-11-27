@@ -227,3 +227,26 @@ func TestCompact_Pi_UserImageWithStartLine(t *testing.T) {
 	}
 	assertJSONLines(t, out, []string{`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"t2","content":[{"type":"image","data":"QUJD","mimeType":"image/png"}]}`})
 }
+
+// A content block that is not an object is skipped in a message, not the
+// whole message: the assistant text and tool call around one still convert.
+// A tool result with one is kept whole as JSON, so nothing in it is lost.
+func TestCompact_Pi_SkipsMalformedContentBlocks(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"type":"session","version":3,"id":"bad-blocks"}
+{"type":"message","id":"m1","timestamp":"2026-03-27T21:00:01.000Z","message":{"role":"user","content":"go"}}
+{"type":"message","id":"m2","timestamp":"2026-03-27T21:00:02.000Z","message":{"role":"assistant","content":["bad block",{"type":"toolCall","id":"t1","name":"read","arguments":{}}]}}
+{"type":"message","id":"m3","timestamp":"2026-03-27T21:00:03.000Z","message":{"role":"toolResult","toolCallId":"t1","toolName":"read","content":[7,{"type":"text","text":"ok"}],"isError":false}}
+{"type":"message","id":"m4","timestamp":"2026-03-27T21:00:04.000Z","message":{"role":"assistant","content":[42,{"type":"text","text":"done"}]}}
+`)
+	expected := []string{
+		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"2026-03-27T21:00:01.000Z","content":[{"text":"go"}]}`,
+		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:02.000Z","id":"m2","content":[{"type":"tool_use","id":"t1","name":"Read","input":{},"result":{"output":"[7,{\"text\":\"ok\",\"type\":\"text\"}]","status":"success"}}]}`,
+		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:04.000Z","id":"m4","content":[{"type":"text","text":"done"}]}`,
+	}
+	result, err := Convert(body, agentOpts("pi"))
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	assertJSONLines(t, result, expected)
+}
