@@ -1550,6 +1550,30 @@
         ],
         "type": "object"
       },
+      "CreateTeamInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateTeamInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "Lowercase letters, digits, and '-'. Unique in the organization.",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "CreatedOrg": {
         "additionalProperties": true,
         "properties": {
@@ -2512,7 +2536,8 @@
           "granteeType": {
             "default": "account",
             "enum": [
-              "account"
+              "account",
+              "team"
             ],
             "type": "string"
           },
@@ -2532,6 +2557,11 @@
               "writer",
               "admin"
             ],
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Entire team ULID to grant. Required when granteeType is team, and refused otherwise. Must not be combined with accountId, provider/providerUserId or allow_invitation. The team must belong to the organization that owns the resource; any other team answers 404.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
@@ -3598,6 +3628,62 @@
         },
         "required": [
           "serviceAccounts"
+        ],
+        "type": "object"
+      },
+      "ListTeamMembersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListTeamMembersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/TeamMember"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Present only when more members remain.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "members"
+        ],
+        "type": "object"
+      },
+      "ListTeamsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListTeamsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present only when more teams remain.",
+            "type": "string"
+          },
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/Team"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams"
         ],
         "type": "object"
       },
@@ -6279,6 +6365,85 @@
         ],
         "type": "object"
       },
+      "Team": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/Team.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "directory_managed": {
+            "description": "True when directory sync owns the team. Such a team is read-only here.",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "directory_managed",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "TeamMember": {
+        "additionalProperties": true,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "description": "Public avatar URL.",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "Account-level public display name.",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Membership status in the organization.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The member's Entire username. Omitted until claimed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "status"
+        ],
+        "type": "object"
+      },
       "TopologyCluster": {
         "additionalProperties": true,
         "properties": {
@@ -6413,6 +6578,27 @@
         "required": [
           "role"
         ],
+        "type": "object"
+      },
+      "UpdateTeamInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateTeamInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "Lowercase letters, digits, and '-'. Unique in the organization. Omitted keeps the name.",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "ValidatePluginInstallRedirectOutputBody": {
@@ -9241,6 +9427,529 @@
         "summary": "List projects owned by an organization",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams": {
+      "get": {
+        "description": "Requires organization view permission. Returns teams in name order, directory-sync teams included.",
+        "operationId": "listTeams",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Teams per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Teams per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTeamsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List teams of an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "post": {
+        "description": "Requires organization management permission. The name holds lowercase letters, digits, and '-', and is unique in the organization: a taken name answers 409 with type https://entire.com/errors/team/name-in-use.",
+        "operationId": "createTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Create a team in an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}": {
+      "delete": {
+        "description": "Requires organization management permission. Removes the team's members with the team. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "deleteTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "description": "Requires organization view permission. A team of another organization answers 404.",
+        "operationId": "getTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "patch": {
+        "description": "Requires organization management permission. The body is a JSON Merge Patch (RFC 7396) of name: an omitted or null field keeps its value, and an empty patch returns the team unchanged. The name holds lowercase letters, digits, and '-', and is unique in the organization: a taken name answers 409 with type https://entire.com/errors/team/name-in-use. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "updateTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTeamInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update a team",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}/members": {
+      "get": {
+        "description": "Requires organization view permission. Returns members with their global public profile. Each member carries the status of its organization membership: a pending or inactive member stays listed and can be removed.",
+        "operationId": "listTeamMembers",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Members per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Members per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTeamMembersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List members of a team",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}/members/{account_id}": {
+      "delete": {
+        "description": "Requires organization management permission. The removal is idempotent and answers 204. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "removeTeamMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's ID.",
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "description": "The account's ID.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Remove an account from a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "put": {
+        "description": "Requires organization management permission. The add is idempotent and answers 204. Only an active member of the organization can be added: any other account answers 409 with type https://entire.com/errors/invitation/required and nothing is written. A service account answers 403. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "addTeamMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's ID.",
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "description": "The account's ID.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Add an account to a team",
+        "tags": [
+          "orgs"
         ]
       }
     },

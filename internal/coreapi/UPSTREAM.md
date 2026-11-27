@@ -214,6 +214,15 @@ the older schema required one, so `org invite list` failed to decode them. The
 create operations on those two paths are not spliced; the CLI does not call
 them. A normal refresh carries all of it.
 
+The eight team operations under `/orgs/{orgId}/teams` (`createTeam`,
+`listTeams`, `getTeam`, `updateTeam`, `deleteTeam`, `listTeamMembers`,
+`addTeamMember`, `removeTeamMember`), their schemas (`Team`, `TeamMember`,
+`ListTeamsOutputBody`, `ListTeamMembersOutputBody`, `CreateTeamInputBody`,
+`UpdateTeamInputBody`) and `GrantAccessBody` (the `team` grantee type and
+`team_id`) are spliced verbatim from the published spec for `org team` and
+`team:<name>` grantees. `TeamMember.status` is in `readModelEnumFields`. A
+normal refresh carries all of it.
+
 The legacy Buildkite routes are spliced *out* the same way. Core no longer
 serves them (entiredb#4868, #4982). The splice removes the seven
 `/orgs/{orgId}/ci/buildkite/...` operations and

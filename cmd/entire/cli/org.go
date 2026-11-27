@@ -11,8 +11,8 @@ import (
 
 // newOrgCmd is the `entire org` command group: create, list, get, and
 // delete organizations on the Entire control plane, the `grant` subtree for
-// membership (see grant.go), and the `invite` subtree for inviting by email
-// (see org_invite.go).
+// membership (see grant.go), the `invite` subtree for inviting by email
+// (see org_invite.go), and the `team` subtree (see org_team.go).
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdOrg,
@@ -25,6 +25,7 @@ func newOrgCmd() *cobra.Command {
 	cmd.AddCommand(newOrgDeleteCmd())
 	cmd.AddCommand(newOrgGrantCmd())
 	cmd.AddCommand(newOrgInviteCmd())
+	cmd.AddCommand(newOrgTeamCmd())
 	return cmd
 }
 

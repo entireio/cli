@@ -961,7 +961,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 				t.Errorf("encode identity: %v", err)
 			}
 		})
-		provider, puid, err := resolveGranteeProvider(context.Background(), c, "github:alice")
+		provider, puid, err := resolveGranteeProvider(context.Background(), c, "github:alice", false)
 		if err != nil {
 			t.Fatalf("resolveGranteeProvider: %v", err)
 		}
@@ -987,7 +987,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 					t.Errorf("encode identity: %v", err)
 				}
 			})
-			provider, puid, err := resolveGranteeProvider(context.Background(), c, ref)
+			provider, puid, err := resolveGranteeProvider(context.Background(), c, ref, false)
 			if err != nil {
 				t.Fatalf("resolveGranteeProvider: %v", err)
 			}
@@ -1003,7 +1003,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 			t.Error("unexpected HTTP call for an invalid handle")
 			w.WriteHeader(http.StatusInternalServerError)
 		})
-		if _, _, err := resolveGranteeProvider(context.Background(), c, "alice"); err == nil {
+		if _, _, err := resolveGranteeProvider(context.Background(), c, "alice", false); err == nil {
 			t.Error("resolveGranteeProvider expected error for non-qualified handle")
 		}
 		if n := calls.Load(); n != 0 {
@@ -1017,7 +1017,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 			t.Error("unexpected HTTP call for a ULID grantee")
 			w.WriteHeader(http.StatusInternalServerError)
 		})
-		_, _, err := resolveGranteeProvider(context.Background(), c, wiringGranteeULID)
+		_, _, err := resolveGranteeProvider(context.Background(), c, wiringGranteeULID, false)
 		if err == nil {
 			t.Fatal("resolveGranteeProvider expected error for a ULID grantee")
 		}
@@ -1036,7 +1036,7 @@ func TestResolveGranteeProvider(t *testing.T) {
 				t.Errorf("encode identity: %v", err)
 			}
 		})
-		if _, _, err := resolveGranteeProvider(context.Background(), c, "github:alice"); err == nil {
+		if _, _, err := resolveGranteeProvider(context.Background(), c, "github:alice", false); err == nil {
 			t.Error("resolveGranteeProvider expected error for empty provider user id")
 		}
 	})

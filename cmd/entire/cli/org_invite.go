@@ -133,7 +133,7 @@ func sendEmailInvitation(ctx context.Context, c *coreapi.Client, orgRef, orgID, 
 // reported as the grant it is.
 func sendAccountInvitation(ctx context.Context, c *coreapi.Client, orgRef, orgID, account, role string) (string, any, error) {
 	pt := grantPickerTarget{noun: cmdOrg, ref: orgRef}
-	provider, providerUserID, err := resolveGranteeProvider(ctx, c, account)
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, account, false)
 	if err != nil {
 		return "", nil, err
 	}
