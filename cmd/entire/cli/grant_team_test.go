@@ -107,6 +107,8 @@ func TestOrgGrant_RefusesATeamGrantee(t *testing.T) {
 		require.ErrorContains(t, err, "team:platform is a team; a team cannot hold org access")
 		_, _, err = runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "Team:platform")
 		require.ErrorContains(t, err, "Team:platform is a team; a team cannot hold org access")
+		_, _, err = runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "team:")
+		require.ErrorContains(t, err, "team: is a team; a team cannot hold org access")
 		_, _, err = runGrantCmd(t, newProjectGrantCmd, srv, verb, teamProjULID, "team:")
 		require.ErrorContains(t, err, "team: names no team; write team:<name>")
 	}
@@ -182,8 +184,23 @@ func TestTeamGranteeName(t *testing.T) {
 	name, ok := teamGranteeName("team:platform")
 	assert.True(t, ok)
 	assert.Equal(t, "platform", name)
-	_, ok = teamGranteeName("team:")
-	assert.False(t, ok)
+	name, ok = teamGranteeName("Team:platform")
+	assert.True(t, ok, "the prefix matches in any case")
+	assert.Equal(t, "platform", name)
+	name, ok = teamGranteeName("team:")
+	assert.True(t, ok, "an empty name is still a team, so its refusal can say so")
+	assert.Empty(t, name)
 	_, ok = teamGranteeName("github:alice")
 	assert.False(t, ok)
+	_, ok = teamGranteeName("tea")
+	assert.False(t, ok)
+}
+
+// A team member is never a team, so every team: form gets the same refusal,
+// as org grant gives.
+func TestEnsureMemberIsHandle_RefusesEveryTeamForm(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []string{"team:platform", "Team:platform", "team:"} {
+		require.ErrorContains(t, ensureMemberIsHandle(ref), ref+" is a team; a team member is a user like github:alice")
+	}
 }

@@ -255,11 +255,13 @@ func teamGranteeName(ref string) (string, bool) {
 // where the target takes teams, and otherwise a provider-qualified handle.
 func ensureGranteeAccepted[Row any](t grantTarget[Row], grantee string) error {
 	if name, ok := teamGranteeName(grantee); ok {
-		if name == "" {
-			return fmt.Errorf("%s names no team; write team:<name>, e.g. team:platform", grantee)
-		}
+		// A target that takes no team refuses every team: form alike, as
+		// ensureMemberIsHandle does. Only a target that takes teams asks for a name.
 		if t.grantTeam == nil {
 			return fmt.Errorf("%s is a team; a team cannot hold %s access, so grant it a project or repo instead", grantee, t.noun)
+		}
+		if name == "" {
+			return fmt.Errorf("%s names no team; write team:<name>, e.g. team:platform", grantee)
 		}
 		return nil
 	}
