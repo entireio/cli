@@ -253,6 +253,10 @@ always runnable in every build.
   `invite send`. The repo has no alias helper; a compatibility spelling is a
   hidden command, as `trail delete` is
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
+  where `list`/`get` show each project's REF (`et/<name>`, or `gh/<owner>` for a
+  `gh:mirrors:` project; `ref` in `--json`, absent when it cannot be derived),
+  the value trail and agent `--project` take, alongside the project ID they
+  also take (`agent serve` excepted: its saved connection is keyed by reference),
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
   `add` creates a preset agent for the current repository, or extends the

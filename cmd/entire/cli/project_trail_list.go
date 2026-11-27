@@ -18,27 +18,31 @@ import (
 // Listing requires an explicitly selected project, including inside a clone.
 // A repository only narrows that project's results; its cell never routes the
 // collection read. Failed project resolution must not trigger fleet discovery.
-func listProjectTrails(cmd *cobra.Command, status string, size int, cursor string) (api.ProjectTrailListResponse, error) {
+//
+// It also returns the project's gh/<owner> or et/<project> reference, which
+// the table prints in place of whatever form --project was given in.
+func listProjectTrails(cmd *cobra.Command, status string, size int, cursor string) (api.ProjectTrailListResponse, string, error) {
 	var out api.ProjectTrailListResponse
 	ref := projectTrailProjectFlag(cmd)
 	if ref == "" {
-		return out, errors.New("trail list requires --project gh/<owner> or et/<project>; --repo is only a filter within that project")
+		return out, "", errors.New("trail list requires --project gh/<owner>, et/<project>, or a project ID; --repo is only a filter within that project")
 	}
-	host, project, err := parseTrailProjectRef(ref)
+	host, project, err := parseTrailProjectFlagFor(cmd, ref)
 	if err != nil {
-		return out, err
+		return out, "", err
 	}
 	target, err := resolveProjectTrailCollectionFor(cmd.Context(), host, project, trailInsecureHTTP(cmd))
 	if err != nil {
-		return out, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+		return out, "", renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
 	}
 	repoID := ""
 	if repo := trailRepoFlag(cmd); repo != "" {
 		if repoID, err = resolveTrailRepoID(cmd.Context(), repo); err != nil {
-			return out, err
+			return out, "", err
 		}
 	}
-	return target.list(cmd.Context(), size, cursor, status, repoID)
+	out, err = target.list(cmd.Context(), size, cursor, status, repoID)
+	return out, host + "/" + project, err
 }
 
 // resolveTrailRepoID turns a --repo value (or the origin remote when empty)

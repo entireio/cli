@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -30,11 +31,54 @@ func newProjectCmd() *cobra.Command {
 	return cmd
 }
 
-// projectColumns is the human table/field view of a project.
-var projectColumns = []string{"ID", colHeaderName, "OWNER-TYPE", "OWNER", colHeaderRegion}
+// projectColumns is the human table/field view of a project. REF is the
+// value other commands take as --project; NAME is the server's own name,
+// which for a GitHub mirror project is internal. OWNER shows the owner's name
+// where the server knows it (--json keeps ownerId).
+var projectColumns = []string{"ID", "REF", colHeaderName, "OWNER-TYPE", "OWNER", colHeaderRegion}
 
 func projectRow(p coreapi.Project) []string {
-	return []string{p.ID, p.Name, string(p.OwnerType), p.OwnerId, p.Region}
+	return []string{p.ID, projectRef(p), p.Name, string(p.OwnerType), p.OwnerName.Or(p.OwnerId), p.Region}
+}
+
+// mirrorProjectNamePrefix marks the project Entire keeps for a GitHub owner's
+// mirrored repositories: Core names it gh:mirrors:<owner ID>, a name people
+// cannot create, and entire-api recognises mirror projects by the same prefix.
+const mirrorProjectNamePrefix = "gh:mirrors:"
+
+// projectRef is the reference trail and agent commands take as --project:
+// gh/<owner> for a GitHub mirror project (Core reports the GitHub login as its
+// ownerName), et/<name> for an Entire project. It is empty when no valid
+// reference exists — a mirror whose GitHub owner Core could not name, or a
+// name the reference grammar rejects — so nothing prints a value no command
+// accepts.
+func projectRef(p coreapi.Project) string {
+	ref := nativeCloneForge + "/" + p.Name
+	if strings.HasPrefix(p.Name, mirrorProjectNamePrefix) {
+		ref = mirrorCloneForge + "/" + p.OwnerName.Or("")
+	}
+	if _, _, err := parseTrailProjectRef(ref); err != nil {
+		return ""
+	}
+	// Lowercase, as trail commands print it: Core matches references without case.
+	return strings.ToLower(ref)
+}
+
+// projectJSON is a project's wire object plus its synthesized "ref".
+func projectJSON(p *coreapi.Project) (map[string]json.RawMessage, error) {
+	return mergeSynthesizedField(p, "ref", func() string { return projectRef(*p) })
+}
+
+func projectListJSON(projects []coreapi.Project) (any, error) {
+	out := make([]map[string]json.RawMessage, 0, len(projects))
+	for i := range projects {
+		obj, err := projectJSON(&projects[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, obj)
+	}
+	return out, nil
 }
 
 func newProjectCreateCmd() *cobra.Command {
@@ -213,7 +257,11 @@ func newProjectListCmd() *cobra.Command {
 		Short: "List projects you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, "No projects found.", projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Project, error) {
+			view := listView[coreapi.Project]{
+				table:  func([]coreapi.Project) ([]string, func(coreapi.Project) []string) { return projectColumns, projectRow },
+				toJSON: projectListJSON,
+			}
+			return runCoreListShaped(cmd, "No projects found.", view, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Project, error) {
 				// Both the global and org-scoped list endpoints filter by name
 				// server-side (case-insensitive), returning the single match under
 				// the response's `project` field (or 404 → empty result, not an
@@ -286,12 +334,23 @@ func newProjectGetCmd() *cobra.Command {
 		Short: "Show a project by name or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreObject(cmd, projectColumns, projectRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Project, error) {
+			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				projID, err := resolveProjectRef(ctx, c, args[0])
 				if err != nil {
-					return nil, err
+					return err
 				}
-				return c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: projID})
+				p, err := c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: projID})
+				if err != nil {
+					return err
+				}
+				if jsonRequested(cmd) {
+					obj, err := projectJSON(p)
+					if err != nil {
+						return err
+					}
+					return printJSON(cmd.OutOrStdout(), obj)
+				}
+				return printFields(cmd.OutOrStdout(), projectColumns, projectRow(*p))
 			})
 		},
 	}

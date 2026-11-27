@@ -83,7 +83,7 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		// Project intent can exist without any repository or repo-trails
 		// toggle, so the project tree stays discoverable regardless.
 		cmd.Annotations[projectTrailsAnnotation] = agentHelpAnnotationEnabled
-		cmd.PersistentFlags().String("project", "", "Project as gh/<owner> or et/<project>; required for list, otherwise defaults to the repository's namespace")
+		cmd.PersistentFlags().String("project", "", "Project as gh/<owner>, et/<project>, or a project ID; required for list, otherwise defaults to the repository's namespace")
 		cmd.AddCommand(newProjectTrailShowCmd(), newProjectTrailListCmd(), newProjectTrailCreateCmd(), newProjectTrailUpdateCmd())
 		cmd.AddCommand(newTrailLinkCmd(), newTrailUnlinkCmd(), newProjectTrailCommentCmd(), newProjectTrailAttachmentCmd())
 	} else {

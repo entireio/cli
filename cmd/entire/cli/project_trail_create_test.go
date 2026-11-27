@@ -57,6 +57,7 @@ func TestProjectTrailCreateRepositoryScope(t *testing.T) {
 		{"github", "gh", []string{"--repo", "gh/acme/widget"}},
 		{"native", "et", []string{"--repo", "et/acme/widget"}},
 		{"explicit project", "gh", []string{"--project", "gh/acme", "--repo", "gh/acme/widget"}},
+		{"project ID", "gh", []string{"--project", projectTrailTestProject, "--repo", "gh/acme/widget"}},
 		{"current repository", "gh", nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,6 +89,7 @@ func TestProjectTrailCreateRepositoryScope(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, calls)
 			require.Zero(t, project.resolveCalls, "repository-only users must not require project inspection")
+			require.Zero(t, project.getCalls, "a project ID is checked against the repository's project")
 			require.Zero(t, project.catalogCalls)
 			require.NotContains(t, errOut, "Idempotency")
 			require.NotContains(t, errOut, "unexpected-push")

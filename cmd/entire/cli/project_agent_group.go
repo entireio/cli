@@ -36,14 +36,14 @@ Preset agents are maintained by Entire and run on free credit, so they work
 before billing is set up. A custom agent runs only once the project's payer is
 enrolled in billing.
 
-The project is the current repository's (gh/<owner> or et/<project>) unless
---project names another.`,
+The project is the current repository's unless --project names another, as
+gh/<owner>, et/<project>, or a project ID (see 'entire project list').`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
-	cmd.PersistentFlags().String("project", "", "Project to manage: gh/<owner> or et/<project> (default: the current repository's)")
+	cmd.PersistentFlags().String("project", "", "Project to manage: gh/<owner>, et/<project>, or a project ID (default: the current repository's)")
 	cmd.AddCommand(newProjectAgentListCmd())
 	cmd.AddCommand(newProjectAgentAddCmd())
 	cmd.AddCommand(newProjectAgentRunCmd())
@@ -83,7 +83,7 @@ var resolveProjectAgentTarget = func(cmd *cobra.Command) (*projectAgentTarget, e
 	ctx := cmd.Context()
 	t := &projectAgentTarget{}
 	if ref := projectAgentProjectFlag(cmd); ref != "" {
-		host, project, err := parseTrailProjectRef(ref)
+		host, project, err := parseTrailProjectFlagFor(cmd, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +91,7 @@ var resolveProjectAgentTarget = func(cmd *cobra.Command) (*projectAgentTarget, e
 	} else {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("%w (or pass --project gh/<owner> or et/<project>)", err)
+			return nil, fmt.Errorf("%w (or pass --project gh/<owner>, et/<project>, or a project ID)", err)
 		}
 		t.host, t.project = forge, strings.ToLower(owner)
 		t.repoForge, t.repoOwner, t.repoName = forge, owner, repo

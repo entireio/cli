@@ -82,7 +82,7 @@ Entire hosts Git repositories on clusters in several regions, so agents can clon
 
 - **Region** — where an organization's or project's data stays: a jurisdiction such as `us` or `eu`, set with `--region` when you create it.
 - **Cluster** — an Entire Git host, such as `aws-eu-central-1.entire.io`. `entire cluster list` shows them; a repository can have copies on several.
-- **Project** — holds Entire-native repositories and belongs to an organization or a personal account. Repository and project commands take its plain name (`--project acme`); Trail commands take `et/<project>`, and treat a GitHub owner as the project for its mirrors (`gh/<owner>`).
+- **Project** — holds Entire-native repositories and belongs to an organization or a personal account. Repository and project commands take its plain name (`--project acme`); Trail commands take `et/<project>`, and treat a GitHub owner as the project for its mirrors (`gh/<owner>`); `entire project list` shows each project's reference in its REF column, and trail commands also accept the project's ID.
 - **Mirror** — a copy of a repository on one cluster. GitHub repositories are mirrored from their GitHub upstream, and native repositories can be mirrored to more clusters. `entire repo mirror` manages both.
 
 Repository references name their forge: `/et/<project>/<repo>` for an Entire-native repository, `/gh/<owner>/<repo>` for a GitHub mirror, or a full `entire://<cluster>/…` clone URL.
@@ -124,7 +124,7 @@ entire trail merge                      # merge this branch's change into its ba
 entire trail resume 42                  # continue Trail #42: restore its branch's sessions in your agent
 ```
 
-Trail commands use the current repository's project (`gh/<owner>` or `et/<project>`); pass `--project` or `--repo` to work on another one without a checkout. `entire trail list` always takes `--project`. Other subcommands are `checkout`, `link`, `unlink`, `update`, and `approvals`.
+Trail commands use the current repository's project (`gh/<owner>` or `et/<project>`); pass `--project` (a reference or a project ID) or `--repo` to work on another one without a checkout. `entire trail list` always takes `--project`. Other subcommands are `checkout`, `link`, `unlink`, `update`, and `approvals`.
 
 **Project agents** are those evals: review agents such as risk, confidence, drift, security, and review, configured per project in Entire, which score each push to a Trail and raise its findings. `entire project agent` lists them and adds Entire's presets to your repository with `add`; `entire project agent run` lists, inspects, cancels, and retries their runs. Preset agents run on free credit; a custom agent runs once the project's billing is set up.
 
