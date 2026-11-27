@@ -290,9 +290,12 @@ func resolveGrantTeam[Row any](ctx context.Context, c *coreapi.Client, t grantTa
 
 // teamGrantErr names the team and the target in Core's 404 for a team grant.
 // resolveGrantTeam already refused a target that no org owns.
+//
+// Core's message goes in as text, not wrapped: the renderer prints only the
+// message of a Core error it finds anywhere in the chain.
 func teamGrantErr(err error, pt grantPickerTarget, name string) error {
 	if coreapi.APIErrorStatus(err) == http.StatusNotFound {
-		return fmt.Errorf("team %s is not a team of the org that owns %s: %w", name, pt.describe(), err)
+		return fmt.Errorf("team %s is not a team of the org that owns %s: %s", name, pt.describe(), coreapi.APIError(err))
 	}
 	return err
 }
