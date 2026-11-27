@@ -222,3 +222,32 @@ func BenchmarkRedactJSONLBytes_PII(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkJSONLContent_ManyDistinctSecrets pins the single-pass splice scaling
+// (#3081). A tool output line with many distinct connection strings must not
+// exhibit quadratic slowdown.
+func BenchmarkJSONLContent_ManyDistinctSecrets(b *testing.B) {
+	for _, count := range []int{2_000, 8_000, 16_000} {
+		b.Run(fmt.Sprintf("Secrets%d", count), func(b *testing.B) {
+			var buf strings.Builder
+			buf.WriteString(`{"urls":[`)
+			for i := range count {
+				if i > 0 {
+					buf.WriteString(",")
+				}
+				fmt.Fprintf(&buf, `"postgres://u:Zq%dxK9@db/app"`, i*7919+123456789)
+			}
+			buf.WriteString("]}\n")
+			data := []byte(buf.String())
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := JSONLBytes(data); err != nil {
+					b.Fatalf("JSONLBytes: %v", err)
+				}
+			}
+		})
+	}
+}
