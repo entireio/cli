@@ -604,3 +604,11 @@ Returned by `parse-hook`. Represents a normalized lifecycle event.
 The protocol version is declared in the `info` response (`protocol_version` field) and set via `ENTIRE_PROTOCOL_VERSION` environment variable. The CLI checks that the binary's protocol version matches its expected version before registering the agent.
 
 Future protocol versions may add new subcommands or capabilities. Existing subcommands will maintain backwards compatibility within a major version.
+
+## Reference Implementation
+
+`agents/hummin/` in this repository contains a complete standalone plugin for
+the [hummin](https://github.com/rennf93/hummin) coding agent, a single-file
+Node script implementing every subcommand on this page plus a test harness.
+See [the hummin agent docs](hummin-agent.md) for how it maps the protocol onto
+hummin's pi-style sessions.
