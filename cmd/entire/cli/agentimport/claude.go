@@ -1,6 +1,7 @@
 package agentimport
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // claudeImporter imports Claude Code transcripts (~/.claude/projects/<slug>/*.jsonl).
@@ -59,12 +61,13 @@ func (claudeImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 				return nil, nil
 			}
 			return &Turn{
-				UUID:       rec.UUID,
-				Prompt:     transcript.ExtractUserContent(rec.Message),
-				Model:      modelInRange(rawLines, start, end),
-				CreatedAt:  parseTimestamp(rec.Timestamp),
-				Tokens:     tokens,
-				CommitSHAs: commitSHAsInRange(rawLines, start, end),
+				UUID:          rec.UUID,
+				Prompt:        transcript.ExtractUserContent(rec.Message),
+				Model:         modelInRange(rawLines, start, end),
+				CreatedAt:     parseTimestamp(rec.Timestamp),
+				Tokens:        tokens,
+				CommitSHAs:    commitSHAsInRange(rawLines, start, end),
+				CommitWindows: commitWindowsInRange(rawLines, start, end),
 			}, nil
 		})
 }
@@ -128,6 +131,72 @@ func commitSHAsInRange(rawLines [][]byte, start, end int) []string {
 		}
 	}
 	return shas
+}
+
+// The closing quote keeps toolUseToken from matching "tool_use_id", which
+// every tool_result line carries.
+var (
+	toolUseToken    = []byte(`"tool_use"`)
+	toolResultToken = []byte(`"tool_result"`)
+)
+
+// commitWindowsInRange returns the spans of the Bash calls within [start, end)
+// that execute a commit-writing git command (see runsCommitGitCommand), in
+// result order. Each runs from the line holding the tool_use to the line
+// holding its tool_result, so a commit made by the call has a committer time
+// inside it. The start is truncated to the second because git's committer time
+// has second precision. A call with no result in the turn has no end and is
+// skipped. A background call's result arrives before its command finishes, so
+// its commit lands after the span and the turn falls back.
+func commitWindowsInRange(rawLines [][]byte, start, end int) []TimeWindow {
+	var windows []TimeWindow
+	calls := make(map[string]time.Time) // tool_use id -> call time
+	for i := start; i < end && i < len(rawLines); i++ {
+		raw := rawLines[i]
+		// Byte probes skip the JSON decode on the many lines that can't
+		// matter; tool results routinely run to megabytes.
+		mayCall := bytes.Contains(raw, toolUseToken)
+		mayResult := len(calls) > 0 && bytes.Contains(raw, toolResultToken)
+		if !mayCall && !mayResult {
+			continue
+		}
+		var rec struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Content []struct {
+					Type      string          `json:"type"`
+					ID        string          `json:"id"`
+					Name      string          `json:"name"`
+					Input     json.RawMessage `json:"input"`
+					ToolUseID string          `json:"tool_use_id"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			continue
+		}
+		at := parseTimestamp(rec.Timestamp)
+		if at.IsZero() {
+			continue
+		}
+		for _, block := range rec.Message.Content {
+			switch {
+			case rec.Type == transcriptlib.TypeAssistant && block.Type == transcriptlib.ContentTypeToolUse &&
+				block.Name == "Bash" && block.ID != "":
+				var input transcript.ToolInput
+				if json.Unmarshal(block.Input, &input) == nil && runsCommitGitCommand(input.Command) {
+					calls[block.ID] = at.Truncate(time.Second)
+				}
+			case rec.Type == transcriptlib.TypeUser && block.Type == "tool_result":
+				if callAt, ok := calls[block.ToolUseID]; ok {
+					windows = append(windows, TimeWindow{Start: callAt, End: at})
+					delete(calls, block.ToolUseID)
+				}
+			}
+		}
+	}
+	return windows
 }
 
 // isUserPromptLine reports whether a raw JSONL line is a genuine user-prompt

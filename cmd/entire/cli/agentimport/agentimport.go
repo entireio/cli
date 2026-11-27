@@ -64,8 +64,21 @@ type Turn struct {
 	// per-importer (see commitSHAsInRange for Claude Code). Callers must
 	// resolve them against the repo before use. Nil when the transcript
 	// records no commits (including agents that don't extract them); the
-	// anchor then falls back to Options.LinkCommitSHA.
+	// anchor then tries CommitWindows before falling back to
+	// Options.LinkCommitSHA.
 	CommitSHAs []string
+	// CommitWindows are the spans of this turn's tool calls that ran a git
+	// command writing commits, each from the call to its result (see
+	// commitWindowsInRange for Claude Code). Transcripts record a SHA only
+	// when git prints one, so a quiet `git commit -q` leaves CommitSHAs empty;
+	// a commit whose committer time falls inside one of these spans is that
+	// turn's commit. Nil for agents that don't extract them.
+	CommitWindows []TimeWindow
+}
+
+// TimeWindow is a closed span of wall-clock time.
+type TimeWindow struct {
+	Start, End time.Time
 }
 
 // Importer is the per-agent seam: it locates an agent's transcripts for a repo
@@ -119,7 +132,8 @@ type Options struct {
 	// head; see resolveImportLinkCommitSHA); Run validates the exact
 	// commit object and canonicalizes its ID before any writes, even on dry-run
 	// or fully skipped imports. A turn whose transcript records a resolvable
-	// commit that is an ancestor of this fallback anchors to that real commit
+	// commit that is an ancestor of this fallback, or ran a commit-writing git
+	// command while an ancestor was committed, anchors to that real commit
 	// instead (see turnAnchorResolver).
 	LinkCommitSHA string
 
@@ -275,15 +289,17 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	}
 
 	// One resolver per Run: it lazily walks and memoizes opts.LinkCommitSHA's
-	// ancestor set the first time a turn actually carries a candidate, so a
-	// whole import run pays for at most one history walk, not one per turn.
-	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
-
+	// ancestor set the first time a turn actually carries a candidate or
+	// commit window, so a whole import run pays for at most one history walk,
+	// not one per turn.
 	// Resolve the importer's git identity once per run (not per turn):
 	// checkpoint commits otherwise carry an empty author, which the
 	// GitHub->mirror ingestion path falls back to when it has no pusher
-	// identity for imported sessions, leaving them unattributed.
-	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
+	// identity for imported sessions, leaving them unattributed. Keep the
+	// configured email separate from the checkpoint default ("unknown@local")
+	// so window anchoring falls back when no importer email is configured.
+	authorName, authorEmail, configuredEmail := resolveImporterAuthor(repo)
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, configuredEmail, opts.Now)
 
 	for sessionIndex, sf := range files {
 		// Stop before reading and splitting the next transcript.
@@ -345,11 +361,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 				red = r
 				redacted = true
 			}
-			anchor, fromCandidate := anchorResolver.resolve(ctx, turn.CommitSHAs)
-			if len(turn.CommitSHAs) > 0 && !fromCandidate {
-				logging.Debug(ctx, "import: turn anchor fell back",
-					"sessionID", sf.SessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs))
-			}
+			anchor := resolveTurnAnchor(ctx, anchorResolver, sf.SessionID, turn)
 			if err := writeTurn(ctx, stores, imp, cid, sf, red, turn, anchor, authorName, authorEmail); err != nil {
 				return res, err
 			}
@@ -445,6 +457,28 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		return fmt.Errorf("save imported session state %s: %w", sf.SessionID, err)
 	}
 	return nil
+}
+
+func resolveTurnAnchor(ctx context.Context, resolver *turnAnchorResolver, sessionID string, turn Turn) string {
+	anchor, fromCandidate := resolver.resolve(ctx, turn.CommitSHAs, turn.CommitWindows)
+	if (len(turn.CommitSHAs) > 0 || len(turn.CommitWindows) > 0) && !fromCandidate {
+		logging.Debug(ctx, "import: turn anchor fell back",
+			"sessionID", sessionID, "turnUUID", turn.UUID, "candidates", len(turn.CommitSHAs),
+			"commitWindows", len(turn.CommitWindows))
+	}
+	return anchor
+}
+
+func resolveImporterAuthor(repo *git.Repository) (authorName, authorEmail, configuredEmail string) {
+	authorName, configuredEmail = cp.ConfiguredGitAuthorFromRepo(repo)
+	authorEmail = configuredEmail
+	if authorName == "" {
+		authorName = cp.DefaultGitAuthorName
+	}
+	if authorEmail == "" {
+		authorEmail = cp.DefaultGitAuthorEmail
+	}
+	return authorName, authorEmail, configuredEmail
 }
 
 func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.CheckpointID, sf SessionFile, red redact.RedactedBytes, turn Turn, anchorCommitSHA, authorName, authorEmail string) error {

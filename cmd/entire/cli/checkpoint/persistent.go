@@ -2789,9 +2789,17 @@ func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePr
 	return redact.Bytes(content), nil
 }
 
-// GetGitAuthorFromRepo retrieves the git user.name and user.email,
-// checking both the repository-local config and the global ~/.gitconfig.
-func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
+const (
+	// DefaultGitAuthorName is used when git user.name is not configured.
+	DefaultGitAuthorName = "Unknown"
+	// DefaultGitAuthorEmail is used when git user.email is not configured.
+	DefaultGitAuthorEmail = "unknown@local"
+)
+
+// ConfiguredGitAuthorFromRepo retrieves the configured git user.name and
+// user.email from repository-local and global git config without applying
+// fallback defaults. Unconfigured fields are returned as empty strings.
+func ConfiguredGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	// ConfigScoped merges local + global (local wins), matching git's own resolution.
 	// Uses the ConfigLoader plugin registered in configloader.go (a symlink-following
 	// Auto loader; importing go-git/v6/x/plugin registers go-git's default, which we
@@ -2815,12 +2823,20 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 		}
 	}
 
+	return name, email
+}
+
+// GetGitAuthorFromRepo retrieves the git user.name and user.email,
+// checking both the repository-local config and the global ~/.gitconfig.
+func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
+	name, email = ConfiguredGitAuthorFromRepo(repo)
+
 	// Provide sensible defaults if git user is not configured
 	if name == "" {
-		name = "Unknown"
+		name = DefaultGitAuthorName
 	}
 	if email == "" {
-		email = "unknown@local"
+		email = DefaultGitAuthorEmail
 	}
 
 	return name, email
