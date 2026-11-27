@@ -114,7 +114,10 @@ func runControlPlaneDelete(
 		if !proceed {
 			return nil
 		}
-		if err := del(ctx, c, resolved.ID); err != nil {
+		stop := startSpinner(cmd.ErrOrStderr(), "Deleting "+label)
+		err = del(ctx, c, resolved.ID)
+		stop(false)
+		if err != nil {
 			// Idempotent delete: a resource that's already gone (a 404 from the
 			// delete call — e.g. a ULID passed straight through, or a concurrent
 			// delete) is the desired end state, not an error.
