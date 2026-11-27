@@ -50,12 +50,19 @@ func TestParseExplainRepoFlag(t *testing.T) {
 		{name: "native clone url without host", in: "entire:///et/acme/widgets", wantErr: "invalid --repo"},
 		{name: "malformed native path", in: "et/acme/widgets/extra", wantErr: "invalid --repo"},
 		{name: "malformed native clone url", in: "entire://aws-us-east-2.entire.io/et/acme/widgets/extra", wantErr: "invalid --repo"},
+		{name: "web url native", in: "https://entire.com/et/proj/repo", forge: "et", owner: "proj", repo: "repo"},
+		{name: "web url mirror", in: "https://entire.com/gh/o/r", forge: "gh", owner: "o", repo: "r"},
+		{name: "web url schemeless", in: "entire.com/gh/o/r", forge: "gh", owner: "o", repo: "r"},
+		{name: "web url malformed echoes typed", in: "https://entire.com/et/proj/repo/extra", wantErr: `invalid --repo "https://entire.com/et/proj/repo/extra"`},
+		{name: "web url credentialed", in: "https://u:secret@entire.com/et/proj/repo", wantErr: "invalid --repo"},
+		{name: "entire clone url is not a web url", in: "entire://h/entire.com/et/a/b", wantErr: "invalid --repo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			forge, owner, repo, err := parseExplainRepoFlag(tc.in)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
+				require.NotContains(t, err.Error(), "secret", "a credentialed URL must not echo its userinfo")
 				return
 			}
 			require.NoError(t, err)

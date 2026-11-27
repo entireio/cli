@@ -104,9 +104,10 @@ func newRepoProtectionListCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return err
+					return tr.wrapErr(err)
 				}
 				out, err := c.GetBranchProtection(ctx, coreapi.GetBranchProtectionParams{RepoId: repoID})
 				if err != nil {
@@ -205,9 +206,10 @@ func newRepoProtectionAddCmd() *cobra.Command {
 			// PATCH, the server refuses it on a mirror, so reaching the render
 			// at all means the write landed on a repo that accepts rules.
 			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return nil, err
+					return nil, tr.wrapErr(err)
 				}
 				// The level travels only when the flag was given. Absent, the
 				// server keeps an existing rule's level and protects a new
@@ -253,9 +255,10 @@ func newRepoProtectionRemoveCmd() *cobra.Command {
 			// PATCH, the server refuses it on a mirror, so reaching the render
 			// at all means the write landed on a repo that accepts rules.
 			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				tr := newTypedRef(args[0])
+				repoID, err := resolveRepoRef(ctx, c, tr.canon, project)
 				if err != nil {
-					return nil, err
+					return nil, tr.wrapErr(err)
 				}
 				body := &coreapi.UpdateBranchProtectionInputBody{RemoveRefs: []string{ref}}
 				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: repoID})

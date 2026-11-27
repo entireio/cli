@@ -135,8 +135,7 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 			// a setting they may not know they have. newRecapSource rejects the
 			// override before resolving anything, so an http URL here is always
 			// this one. insecureDataOverrideNote strips any credentials from it.
-			fmt.Fprintf(errW, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
-			return NewSilentError(err)
+			return printSilentErrorf(errW, err, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
 		}
 		// Not logged in gets the login hint; every other failure (refresh
 		// rejected, network error, no cell for the home jurisdiction) surfaces
@@ -199,8 +198,7 @@ func newRecapSource(ctx context.Context, insecureHTTP bool) (recapSource, string
 
 func handleRecapFetchError(w io.Writer, err error) error {
 	if shouldShowRecapLoadErrorMessage(err) {
-		fmt.Fprintln(w, recapLoadErrorMessage(err))
-		return NewSilentError(err)
+		return printSilentErrorf(w, err, "%s\n", recapLoadErrorMessage(err))
 	}
 	return fmt.Errorf("fetch recap: %w", err)
 }

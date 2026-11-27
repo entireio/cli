@@ -24,12 +24,12 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 	dir := t.TempDir()
 	signalFile := filepath.Join(dir, "got-sigint.txt")
 
-	// The plugin loops longer than the parent's WaitDelay+grace so that if
+	// The plugin loops longer than the parent's cancel grace so that if
 	// the signal path were broken, the parent would SIGKILL the child and
 	// the marker would never be written. Ready-marker handshake avoids
 	// racing SIGINT against shell startup before the trap is installed.
 	readyFile := filepath.Join(dir, "ready.txt")
-	const pluginLoopSeconds = 10 // > parent WaitDelay (5s) + grace
+	const pluginLoopSeconds = 10 // > parent cancel grace (5s)
 	body := fmt.Sprintf(
 		"#!/bin/sh\ntrap 'echo trapped > %q; exit 130' INT\n"+
 			"echo ready > %q\n"+
@@ -100,13 +100,13 @@ func waitForFile(path string, timeout time.Duration) bool {
 // Entire itself was sent, so the child's signal is often Entire's own signal
 // laundered — and laundered lossily. A supervisor's SIGTERM must still leave
 // Entire dying of SIGTERM (143), not of whatever the child ended up with:
-// this plugin ignores SIGINT, so it outlives WaitDelay and os/exec SIGKILLs
-// it, which reported 137 before the precedence was fixed.
+// this plugin ignores SIGINT, so it outlives the cancel grace and is SIGKILLed,
+// which reported 137 before the precedence was fixed.
 func TestExternalCommand_ParentsSignalOutranksTheChilds(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready.txt")
-	// Longer than the parent's WaitDelay (5s) plus grace, so the child is
+	// Longer than the parent's cancel grace (5s), so the child is
 	// still alive when the delay expires and is killed rather than exiting.
 	const pluginLoopSeconds = 20
 	body := fmt.Sprintf(

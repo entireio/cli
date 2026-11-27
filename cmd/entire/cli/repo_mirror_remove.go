@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -181,9 +182,10 @@ func chooseMirrorRemoveRegions(cmd *cobra.Command, ref mirrorRepoRef, placements
 // is mirrored, choose which of those to drop, then remove them in parallel.
 func runMirrorRemove(cmd *cobra.Command, repoRef string, clusterHosts []string, timeout time.Duration) error {
 	cmd.SilenceUsage = true
-	ref, err := parseMirrorRepoRef(repoRef)
+	tr := newTypedRef(repoRef)
+	ref, err := parseMirrorRepoRef(tr.canon)
 	if err != nil {
-		return err
+		return tr.wrapErr(err)
 	}
 	for _, host := range clusterHosts {
 		if err := validateClusterHost(host); err != nil {
@@ -401,7 +403,7 @@ func reportMirrorRemoveResults(outW, errW io.Writer, results []mirrorResult) err
 	for _, r := range results {
 		if r.err != nil {
 			failures++
-			fmt.Fprintf(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
+			tuiutil.FprintfTerminalText(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
 		}
 	}
 	if failures > 0 {

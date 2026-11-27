@@ -111,6 +111,13 @@ type deleteCmdFixture struct {
 
 func newDeleteCmdFixture(t *testing.T) deleteCmdFixture {
 	t.Helper()
+	return newDeleteCmdFixtureWithSession(t, "sess-1", "Claude Code")
+}
+
+// newDeleteCmdFixtureWithSession is newDeleteCmdFixture with the stored
+// session's ID and agent chosen by the caller.
+func newDeleteCmdFixtureWithSession(t *testing.T, sessionID string, agentType types.AgentType) deleteCmdFixture {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "README.md", "# test")
@@ -134,9 +141,9 @@ func newDeleteCmdFixture(t *testing.T) deleteCmdFixture {
 	require.NoError(t, err)
 	require.NoError(t, stores.Persistent.Write(context.Background(), checkpoint.Session{
 		CheckpointID: cid,
-		SessionID:    "sess-1",
+		SessionID:    sessionID,
 		Strategy:     "manual-commit",
-		Agent:        "Claude Code",
+		Agent:        agentType,
 		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
 		Prompts:      []string{"do it"},
 		AuthorName:   "Test",

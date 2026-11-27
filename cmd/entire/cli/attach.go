@@ -220,8 +220,7 @@ func runAttachSurfaceReviewErrors(cmd *cobra.Command, sessionID string, agentNam
 	err := runAttach(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionID, agentName, opts)
 	if err != nil && opts.Review {
 		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return NewSilentError(err)
+		return printSilentError(cmd.ErrOrStderr(), err)
 	}
 	return err
 }

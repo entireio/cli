@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
@@ -456,4 +459,121 @@ func TestMirrorCollaboratorRow(t *testing.T) {
 			require.Len(t, tt.want, len(mirrorCollaboratorColumns))
 		})
 	}
+}
+
+// TestRepoGrant_AcceptsEntireComURLs pins that a pasted entire.com URL is read
+// as the path it spells before `list` decides which source answers. Classified
+// raw, https://entire.com/et/... declares no forge, so the mirror lister would
+// claim it and read GitHub collaborators for a native repo.
+//
+// Not parallel: swaps the package-level core-client seams.
+func TestRepoGrant_AcceptsEntireComURLs(t *testing.T) {
+	var mirrored []string
+	seamClusterCoreClient(t, newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/mirrors/collaborators") {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		mirrored = append(mirrored, r.URL.Query().Get("owner")+"/"+r.URL.Query().Get("repo"))
+		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListMirrorCollaboratorsOutputBody{
+			Collaborators: []coreapi.MirrorCollaborator{{Handle: coreapi.NewOptString("github:alice"), Role: "reader", AccountId: "01ACCT"}},
+		})
+	}))
+	var paths []string
+	srv := grantActiveCoreServer(t, &paths, defaultClusterHost)
+
+	t.Run("a native URL reaches the native resolver", func(t *testing.T) {
+		paths, mirrored = nil, nil
+		stdout, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", "https://entire.com/et/acme/web")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "writer")
+		require.Contains(t, paths, "/api/v1/repos/"+repoGrantRepoULID+"/grants")
+		require.Empty(t, mirrored, "a native repo never reaches the mirror lister")
+	})
+
+	for _, ref := range []string{"https://entire.com/gh/acme/widget", "entire.com/gh/acme/widget"} {
+		t.Run("a mirror URL reaches the mirror lister: "+ref, func(t *testing.T) {
+			paths, mirrored = nil, nil
+			stdout, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", ref)
+			require.NoError(t, err)
+			require.Contains(t, stdout, "github:alice")
+			require.Equal(t, []string{"acme/widget"}, mirrored)
+		})
+	}
+}
+
+// TestRepoGrantWrite_RefusesAMirrorURL pins that add and remove answer an
+// entire.com mirror URL exactly as they answer its /gh/ path: the same refusal
+// and the same `grant list` pointer, with only the echoed ref differing.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestRepoGrantWrite_RefusesAMirrorURL(t *testing.T) {
+	const url = "https://entire.com/gh/acme/widget"
+	for _, verb := range []string{"add", "remove"} {
+		t.Run(verb, func(t *testing.T) {
+			var paths []string
+			srv := grantActiveCoreServer(t, &paths)
+			_, _, want := runCoreCmd(t, newRepoGrantCmd, srv.URL, verb, "/gh/acme/widget", "github:alice")
+			require.Error(t, want)
+			_, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, verb, url, "github:alice")
+			require.Error(t, err)
+			require.ErrorContains(t, err, "entire repo grant list /gh/acme/widget")
+			require.ErrorContains(t, err, fmt.Sprintf("%q", url), "the error echoes what was typed")
+			require.Equal(t, want.Error(), strings.Replace(err.Error(), url, "/gh/acme/widget", 1))
+			require.Empty(t, paths, "a ref the verb cannot act on costs no round trip")
+		})
+	}
+}
+
+// TestRepoGrant_CredentialedURLNeverLeaks pins that userinfo in a pasted URL
+// is never echoed by any grant verb's ref error.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestRepoGrant_CredentialedURLNeverLeaks(t *testing.T) {
+	for _, ref := range []string{"https://u:secret@entire.com/et/acme/web", "https://u:secret@entire.com/gh/acme/widget"} {
+		for _, args := range [][]string{
+			{"list", ref},
+			{"add", ref, "github:alice", "--role", "reader"},
+			{"remove", ref, "github:alice"},
+			// No grantee and no terminal: the refusal suggests a command
+			// naming the repo, unquoted.
+			{"add", ref, "--role", "reader"},
+			{"remove", ref},
+		} {
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				var paths []string
+				srv := grantActiveCoreServer(t, &paths)
+				stdout, stderr, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, args...)
+				require.Error(t, err)
+				require.NotContains(t, err.Error(), "secret")
+				require.NotContains(t, stdout, "secret")
+				require.NotContains(t, stderr, "secret")
+			})
+		}
+	}
+}
+
+// TestMirrorGrantListing_RefusesANativeRef pins the mirror lister's own guard:
+// even if claims is bypassed, a native ref is never read as a GitHub repo.
+//
+// Not parallel: swaps the package-level core-client seams.
+func TestMirrorGrantListing_RefusesANativeRef(t *testing.T) {
+	called := false
+	seamClusterCoreClient(t, newMirrorRequestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListMirrorCollaboratorsOutputBody{})
+	}))
+	var paths []string
+	srv := grantActiveCoreServer(t, &paths, defaultClusterHost)
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) { return coreapi.NewWithBearer(srv.URL, "tok") }
+	t.Cleanup(func() { activeCoreClient = prev })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := mirrorGrantListing.list(cmd, "/et/acme/web")
+	require.ErrorContains(t, err, "not a GitHub mirror")
+	require.False(t, called, "listMirrorCollaborators must not run for a native ref")
+	require.Empty(t, paths)
 }

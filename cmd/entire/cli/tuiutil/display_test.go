@@ -1,6 +1,7 @@
 package tuiutil
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,17 @@ func TestSanitizeTerminalText_StripsEscapeSequencesKeepsStructure(t *testing.T) 
 	// tabs and newlines survive because this filter serves multi-line output.
 	in := "a\x1b[31mred\x1b[0m\x1b]0;title\x07 b\tc\nd"
 	assert.Equal(t, "ared b\tc\nd", SanitizeTerminalText(in))
+}
+
+func TestFprintfTerminalText_FiltersFormattedValues(t *testing.T) {
+	t.Parallel()
+
+	// The arguments are filtered after formatting, so a value cannot smuggle
+	// an escape sequence, a C1 control or a bidi control past it; the
+	// message's own line breaks and tabs survive.
+	var b bytes.Buffer
+	FprintfTerminalText(&b, "session %s:\n\t%v\n", "id\x1b]8;;http://example.invalid\x07x\u009b2J", "path\u202egnp.exe")
+	assert.Equal(t, "session idx2J:\n\tpathgnp.exe\n", b.String())
 }
 
 func TestSanitizeTerminalText_DropsControlAndFormatRunes(t *testing.T) {
@@ -48,6 +60,32 @@ func TestSanitizeTerminalLabel_StripsEscapeSequences(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "ared b", SanitizeTerminalLabel("a\x1b[31mred\x1b[0m b"))
+}
+
+func TestSanitizeDisplayLine_StoredLabels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "claude-code", "claude-code"},
+		{"CSI", "a\x1b[2Jb", "ab"},
+		{"OSC terminated by BEL", "a\x1b]8;;http://example.invalid\ab", "ab"},
+		{"OSC terminated by ST", "a\x1b]52;c;QQ==\x1b\\b", "ab"},
+		{"C0 controls", "a\a\b\r\x00\x7fb", "ab"},
+		{"C1 controls", "a\u009b\u0085b", "ab"},
+		{"bidi controls", "a\u202egnp\u202cb", "agnpb"},
+		{"line breaks and tabs fold to spaces", "a\nforged\tb", "a forged b"},
+		{"non-ASCII text survives", "Sitzung größe 会话", "Sitzung größe 会话"},
+		{"emoji sequences survive", "fix \U0001F468\u200D\U0001F469\u200D\U0001F467 \U0001F44D\U0001F3FD", "fix \U0001F468\u200D\U0001F469\u200D\U0001F467 \U0001F44D\U0001F3FD"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, SanitizeDisplayLine(tt.in))
+		})
+	}
 }
 
 func TestSanitizeDisplayLine(t *testing.T) {

@@ -263,6 +263,17 @@ func TestRepoMirrorResync(t *testing.T) {
 		require.Equal(t, "Resync queued for /gh/octocat/hello-world on every cluster it is mirrored on.\n", stdout)
 	})
 
+	t.Run("an entire.com URL is the same repo as its path", func(t *testing.T) {
+		for _, in := range []string{"https://entire.com/gh/octocat/hello-world", "entire.com/gh/octocat/hello-world"} {
+			srvURL, got := serveResync(t, http.StatusAccepted, accepted)
+			stdout, _, err := runCoreCmd(t, newRepoMirrorResyncCmd, srvURL, in)
+			require.NoError(t, err, in)
+			require.Equal(t, "octocat", got.Owner)
+			require.Equal(t, "hello-world", got.Repo)
+			require.Equal(t, "Resync queued for /gh/octocat/hello-world on every cluster it is mirrored on.\n", stdout, "success output is canonical")
+		}
+	})
+
 	t.Run("--json is the wire object plus the repo, fields the server adds included", func(t *testing.T) {
 		srvURL, _ := serveResync(t, http.StatusAccepted, accepted)
 		stdout, _, err := runCoreCmd(t, newRepoMirrorResyncCmd, srvURL, "/gh/octocat/hello-world", "--json")

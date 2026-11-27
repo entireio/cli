@@ -92,7 +92,7 @@ type crossRepoExplainOptions struct {
 	insecureHTTP bool
 }
 
-const explainRepoFlagShapes = "gh/owner/name, et/project/repo, entire://<host>/gh/<owner>/<repo>, or entire://<host>/et/<project>/<repo>"
+const explainRepoFlagShapes = "gh/owner/name, et/project/repo, an entire.com URL such as https://entire.com/et/<project>/<repo>, entire://<host>/gh/<owner>/<repo>, or entire://<host>/et/<project>/<repo>"
 
 // explainRepoTargetShapes is shared by the help and the error so they cannot
 // drift. Prefixes are excluded: resolving one means listing the foreign repo's
@@ -108,7 +108,10 @@ const explainRepoTargetShapes = "a full checkpoint ID (12-char hex or 26-char UL
 // index expose different identifiers for a repository, and guessing which space
 // an opaque ID belongs to would key the cell lookup off the wrong one.
 func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
-	v := strings.TrimSpace(value)
+	// An entire.com URL is the path it spells; entire:// clone URLs and every
+	// other value pass through unchanged. Errors echo what was typed.
+	tr := newTypedRef(value)
+	v := tr.canon
 	if v == "" {
 		return "", "", "", fmt.Errorf("--repo requires a value: %s", explainRepoFlagShapes)
 	}
@@ -142,17 +145,17 @@ func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
 	case strings.HasPrefix(ref, nativeCloneForge+"/"):
 		project, repoName, nativeErr := parseNativeCloneRef(ref)
 		if nativeErr != nil {
-			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, nativeErr)
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", tr.typed, explainRepoFlagShapes, tr.wrapErr(nativeErr))
 		}
 		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
 	case strings.HasPrefix(ref, mirrorCloneForge+"/"):
 		_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
 		if mirrorErr != nil {
-			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, mirrorErr)
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", tr.typed, explainRepoFlagShapes, tr.wrapErr(mirrorErr))
 		}
 		return mirrorCloneForge, owner, repo, nil
 	default:
-		return "", "", "", fmt.Errorf("invalid --repo %q: forge prefix is required; expected %s", value, explainRepoFlagShapes)
+		return "", "", "", fmt.Errorf("invalid --repo %q: forge prefix is required; expected %s", tr.typed, explainRepoFlagShapes)
 	}
 }
 

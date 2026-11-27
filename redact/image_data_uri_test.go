@@ -145,3 +145,29 @@ func TestJSONLContent_ReencodeFallbackPreservesImageDataURI(t *testing.T) {
 	assert.Contains(t, got, `"image_url":"`+uri+`"`)
 	assert.NotContains(t, got, highEntropySecret)
 }
+
+// Codex stores an image it generated as bare base64 in an image_generation_call
+// item, beside model-written text. Only the image is left unscanned.
+func TestJSONLContent_CodexImageGenerationCall(t *testing.T) {
+	t.Parallel()
+	img := fakeImageBase64(pngMagic)
+	placeholder := "entire-asset:assets/img-0123456789abcdef0123456789abcdef.png"
+	tests := []jsonlFieldCase{
+		{
+			name: "revised_prompt secret is redacted, result image kept",
+			line: `{"type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup using ` + highEntropySecret + `","result":"` + img + `"}}`,
+			want: `{"type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"a mockup using REDACTED","result":"` + img + `"}}`,
+		},
+		{
+			name: "externalized placeholder in result kept",
+			line: `{"type":"image_generation_call","revised_prompt":"a mockup","result":"` + placeholder + `"}`,
+			want: `{"type":"image_generation_call","revised_prompt":"a mockup","result":"` + placeholder + `"}`,
+		},
+		{
+			name: "claude image block still skipped",
+			line: `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + img + `"}}`,
+			want: `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + img + `"}}`,
+		},
+	}
+	assertJSONLFieldCases(t, tests)
+}

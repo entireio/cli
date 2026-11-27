@@ -32,10 +32,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // Deps collects the runtime-injectable hooks NewCommand needs from the
@@ -401,7 +403,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	s, err := settings.Load(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
 		return silentErr(err)
 	}
 	if s == nil {
@@ -425,8 +427,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	if opts.scripted() {
 		fail := func(err error) error {
 			cmd.SilenceUsage = true
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-			return silentErr(err)
+			return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 		}
 		if profileHasUnverifiedFields(s, profileName, s.ReviewProfiles[profileName]) {
 			return fail(errUnverifiedLocalProfile(profileName, "--configure"))
@@ -503,8 +504,7 @@ func runReviewListModels(ctx context.Context, cmd *cobra.Command, agentFilter st
 		if len(filtered) == 0 {
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("agent %q has no review runner adapter; available: %s", agentFilter, strings.Join(reviewAgentNames(deps), ", "))
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-			return deps.NewSilentError(err)
+			return printReviewSilentError(cmd.ErrOrStderr(), deps.NewSilentError, err)
 		}
 		catalog = filtered
 	}
@@ -548,7 +548,7 @@ func runReviewListProfiles(ctx context.Context, cmd *cobra.Command, deps Deps) e
 	s, err := settings.Load(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
 		return deps.NewSilentError(err)
 	}
 	if s == nil {
@@ -888,7 +888,7 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 	s, err := settings.Load(reviewSettingsContext(ctx))
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
 		fmt.Fprintln(cmd.ErrOrStderr(),
 			"Fix your Entire settings or clone-local review preferences and re-run `entire review`.")
 		return reviewProfileSelection{}, silentErr(err)
@@ -910,8 +910,8 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 		eo := cmd.ErrOrStderr()
 		if profs := nonZeroProfiles(s.ReviewProfiles); len(profs) > 0 {
 			ns := sortedMapKeys(profs)
-			fmt.Fprintf(eo, "Specify a profile to review, e.g. `entire review %s`.\n", ns[0])
-			fmt.Fprintf(eo, "Configured profiles: %s\n", strings.Join(ns, ", "))
+			tuiutil.FprintfTerminalText(eo, "Specify a profile to review, e.g. `entire review %s`.\n", ns[0])
+			tuiutil.FprintfTerminalText(eo, "Configured profiles: %s\n", strings.Join(ns, ", "))
 		} else {
 			fmt.Fprintln(eo, "No review profiles configured. Run `entire review --configure` in a terminal first.")
 		}
@@ -948,8 +948,7 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 			defaultProfile, defaultErr := defaultReviewProfileForInstalledAgents(ctx, profileForSetup, installed, deps.ReviewerFor)
 			if defaultErr != nil {
 				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), defaultErr.Error())
-				return reviewProfileSelection{}, silentErr(defaultErr)
+				return reviewProfileSelection{}, printReviewSilentError(cmd.ErrOrStderr(), silentErr, defaultErr)
 			}
 			profile = defaultProfile
 			fmt.Fprintf(out, "No review profiles found; using default %q profile with %s.\n", profileForSetup, strings.Join(sortedMapKeys(profile.Agents), ", "))
@@ -989,8 +988,7 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 	profileName, profile, err := selectReviewProfile(s, profileOverride)
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return reviewProfileSelection{}, silentErr(err)
+		return reviewProfileSelection{}, printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 	}
 	notifyDroppedReviewPrompts(cmd.ErrOrStderr(), s, profileName)
 	// A reviewer config the user set locally but that can't be honored must
@@ -1005,7 +1003,7 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 	if field, ok := unverifiedReviewerConfig(unverified, profileName, profile, agentOverride); ok {
 		cmd.SilenceUsage = true
 		err := fmt.Errorf("%s can't be applied: .entire/settings.local.json could not be verified as untracked; untrack it (git rm --cached .entire/settings.local.json) or remove the profile from it, then set the config again with entire review --configure %s --set-config", field, profileName)
-		fmt.Fprintln(cmd.ErrOrStderr(), "Not run: "+err.Error())
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Not run: %s\n", err.Error())
 		return reviewProfileSelection{}, silentErr(err)
 	}
 	profile.Task = profileTask(profileName, profile)
@@ -1142,8 +1140,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		if selectErr != nil {
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("%w in review profile %q", selectErr, profileName)
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-			return silentErr(err)
+			return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 		}
 		if modelOverride != "" {
 			cfg.Model = modelOverride
@@ -1154,8 +1151,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	if missing := missingInstalledProfileAgents(profile.Agents, installed); len(missing) > 0 {
 		cmd.SilenceUsage = true
 		err := fmt.Errorf("hooks are not installed for review profile %q agent(s): %s; run `entire configure --agent <name>` first, or edit the profile", profileName, strings.Join(missing, ", "))
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 	}
 
 	eligible := ComputeEligibleConfiguredForProfile(profile, installed)
@@ -1163,8 +1159,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	case 0:
 		cmd.SilenceUsage = true
 		err := fmt.Errorf("review profile %q has no eligible agents", profileName)
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 	case 1:
 		cfg := profile.Agents[eligible[0].Name]
 		return runSingleAgentPath(ctx, cmd, profileName, eligible[0].Name, baseOverride, perRunPrompt, profile.Task, outputMode, timeout, cfg, installed, deps, out)
@@ -1174,8 +1169,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			nonLaunchable := nonLaunchableEligibleNames(profile, eligible, deps.ReviewerFor)
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("review profile %q includes agent(s) without review runner adapters in a fan-out run: %s. Use --agent for a single manual fallback, or remove them from the profile", profileName, strings.Join(nonLaunchable, ", "))
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-			return silentErr(err)
+			return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 		}
 		// Require a consolidating judge (explicit or auto-selected). A judge that
 		// can't actually write a verdict (no text generation) is tolerated here and
@@ -1185,8 +1179,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		if !ok {
 			cmd.SilenceUsage = true
 			err := fmt.Errorf("review profile %q has multiple reviewers but no judge that can write a verdict; set review_profiles.%s.judge", profileName, profileName)
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-			return silentErr(err)
+			return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 		}
 		return runMultiAgentPath(ctx, cmd, profileName, profile, launchableEligible, judge, outputMode, timeout, baseOverride, perRunPrompt, deps, out)
 	}
@@ -1276,7 +1269,7 @@ func runSingleAgentPath(
 	}
 	if !found {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(),
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(),
 			"Hooks are not installed for %q. Run `entire configure --agent %s` first, "+
 				"or remove %q from review settings.\n",
 			agentName, agentName, displayName)
@@ -1290,8 +1283,7 @@ func runSingleAgentPath(
 	}
 	if err := VerifyConfiguredSkillsInstalled(ctx, ag, cfg); err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		return printReviewSilentError(cmd.ErrOrStderr(), silentErr, err)
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
@@ -1509,8 +1501,7 @@ func runMultiAgentPath(
 		cmd.SilenceUsage = true
 		err := fmt.Errorf("no runnable reviewers: every configured worker failed skill validation (%s); run `entire review --edit` to reconfigure",
 			strings.Join(excludedWorkers, ", "))
-		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return deps.NewSilentError(err)
+		return printReviewSilentError(cmd.ErrOrStderr(), deps.NewSilentError, err)
 	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -1596,8 +1587,7 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 		return nil
 	}
 	cmd.SilenceUsage = true
-	fmt.Fprintln(cmd.ErrOrStderr(), pickErr.Error())
-	return silentErr(pickErr)
+	return printReviewSilentError(cmd.ErrOrStderr(), silentErr, pickErr)
 }
 
 // multiAgentSinkInputs collects the parameters composeMultiAgentSinks needs.
@@ -1658,9 +1648,11 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			postRunOut := &bytes.Buffer{}
 			sinks = append(sinks, DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON})
 			sinks = append(sinks, SynthesisSink{
-				Provider:          in.synthesisProvider,
-				Writer:            postRunOut,
-				RenderWriter:      in.out,
+				Provider: in.synthesisProvider,
+				Writer:   postRunOut,
+				Render: func(markdown string) (string, error) {
+					return mdrender.RenderForWriterWithBackground(in.out, markdown, tui.DarkBackground)
+				},
 				PerRunPrompt:      in.perRunPrompt,
 				ProfileName:       in.profileName,
 				Task:              in.task,

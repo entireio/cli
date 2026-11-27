@@ -93,3 +93,36 @@ func TestPackRefs_PacksOnAGitWithoutInclude(t *testing.T) {
 	_, err = os.Stat(filepath.Join(dir, ".git", "refs", "entire", "checkpoints", "ab", "0000000000ab"))
 	require.ErrorIs(t, err, os.ErrNotExist, "the loose ref is packed")
 }
+
+func TestUpdateRefs_AppliesEveryUpdateOrNone(t *testing.T) {
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
+	dir := initGitlinkRepo(t)
+	gitIn(t, dir, "commit", "-q", "--allow-empty", "-m", "one")
+	one := headOf(t, dir)
+	gitIn(t, dir, "commit", "-q", "--allow-empty", "-m", "two")
+	two := headOf(t, dir)
+	gitIn(t, dir, "update-ref", "refs/entire/checkpoints/ab/0000000000ab", one.String())
+	list := func() map[plumbing.ReferenceName]plumbing.Hash {
+		refs, err := ListRefs(t.Context(), dir, "refs/entire/checkpoints/")
+		require.NoError(t, err)
+		return refs
+	}
+
+	err := UpdateRefs(t.Context(), dir, []RefUpdate{
+		{Name: "refs/entire/checkpoints/cd/0000000000cd", New: one},
+		{Name: "refs/entire/checkpoints/ab/0000000000ab", New: two, Old: two}, // wrong old value
+	})
+	require.Error(t, err)
+	assert.Equal(t, map[plumbing.ReferenceName]plumbing.Hash{
+		"refs/entire/checkpoints/ab/0000000000ab": one,
+	}, list(), "a refused update applies none of the batch")
+
+	require.NoError(t, UpdateRefs(t.Context(), dir, []RefUpdate{
+		{Name: "refs/entire/checkpoints/cd/0000000000cd", New: one},
+		{Name: "refs/entire/checkpoints/ab/0000000000ab", Old: one}, // delete
+	}))
+	assert.Equal(t, map[plumbing.ReferenceName]plumbing.Hash{
+		"refs/entire/checkpoints/cd/0000000000cd": one,
+	}, list())
+}

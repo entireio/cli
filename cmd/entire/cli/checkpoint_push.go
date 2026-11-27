@@ -186,8 +186,7 @@ func parseCheckpointPushArgs(args []string, canPrompt bool, errOut io.Writer) ([
 }
 
 func refuseCheckpointPushWithoutTerminal(errOut io.Writer, what string) error {
-	fmt.Fprintf(errOut, "entire checkpoint push %s needs a terminal. Without one, name each checkpoint as <checkpoint-id>@<commit>, using the commit 'entire checkpoint list --outgoing --json' reports.\n", what)
-	return NewSilentError(errors.New("checkpoint push needs exact versions without a terminal"))
+	return printSilentErrorf(errOut, errors.New("checkpoint push needs exact versions without a terminal"), "entire checkpoint push %s needs a terminal. Without one, name each checkpoint as <checkpoint-id>@<commit>, using the commit 'entire checkpoint list --outgoing --json' reports.\n", what)
 }
 
 // printWaitingForCheckpointPush answers a bare `entire checkpoint push`: it
