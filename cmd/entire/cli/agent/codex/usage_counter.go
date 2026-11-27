@@ -141,12 +141,14 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	}
 	var children map[string]*agent.TokenUsage
 	for _, child := range extraction.Children {
-		if child.AgentID == "" || child.TokenUsage == nil {
+		if child.AgentID == "" {
 			continue
 		}
 		if children == nil {
 			children = make(map[string]*agent.TokenUsage)
 		}
+		// nil when its rollout could not be read: the ledger must not call the
+		// children's total complete without it.
 		children[child.AgentID] = child.TokenUsage
 	}
 	if cacheable {
