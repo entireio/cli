@@ -1,8 +1,8 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package proclive
 
-// On platforms without process introspection (e.g. Windows), the seam reports
+// On platforms without process introspection (e.g. FreeBSD), the seam reports
 // "unsupported". Check then yields LivenessUnknown and ResolveOwner yields no
 // owner, so session liveness degrades cleanly to the inactivity-timeout
 // fallback instead of producing wrong answers.

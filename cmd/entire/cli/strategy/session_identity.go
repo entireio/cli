@@ -22,8 +22,8 @@ import (
 // replace the fallback's matches when no session is homed here: those belong
 // to other worktrees, and a session there that edited this worktree through a
 // shell command mid-turn (no record of it until turn end) is dropped too.
-// Without an identified committer (Windows, no recorded owner) the fallback's
-// matches still link. The identity union is what makes an
+// Without an identified committer (no recorded owner, or a platform proclive
+// cannot introspect) the fallback's matches still link. The identity union is what makes an
 // agent-made commit immune to worktree bookkeeping drift: an agent
 // committing in a sibling worktree still links to its own session
 // (guest-linked), where path matching alone found nothing or declined as
@@ -113,8 +113,8 @@ func linkingSetContains(states []*SessionState, id string) bool {
 // store; neither ever matches. Returns nil when no session's owner is in our
 // ancestry (the linking set is then the worktree-matched sessions alone) —
 // including on platforms where proclive cannot introspect processes
-// (Windows), which deliberately fall back to worktree matching rather than
-// trusting unverifiable ancestry.
+// (anything but Linux, darwin and Windows), which deliberately fall back to
+// worktree matching rather than trusting unverifiable ancestry.
 //
 // The ancestry is snapshotted once (proclive.CurrentAncestry) and every
 // candidate matched in memory: this runs in the commit hook with one state
