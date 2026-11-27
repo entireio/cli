@@ -14,7 +14,8 @@ import (
 // PathStatuses uses — repository selectors and pathspec magic stripped,
 // literal pathspecs — so it commits the files PathStatuses reported. The
 // repository's own hooks and commit signing apply, and git's output goes to
-// out. Unlike the classification helpers it has no budget of its own: a
+// out. Git pagers are disabled, including in nested git commands run by hooks.
+// Unlike the classification helpers it has no budget of its own: a
 // pre-commit hook may legitimately take a while, so only ctx bounds it.
 func CommitPaths(ctx context.Context, repoRoot string, paths []string, message string, out io.Writer) error {
 	statuses, err := PathStatuses(ctx, repoRoot, paths)
@@ -37,6 +38,9 @@ func CommitPaths(ctx context.Context, repoRoot string, paths []string, message s
 
 func runCommitStep(ctx context.Context, repoRoot string, paths []string, out io.Writer, args ...string) error {
 	cmd := literalPathspecCommand(ctx, repoRoot, paths, args...)
+	// Hook git commands inherit this setting too. A pager reading the terminal
+	// from git's separate process group can stop it.
+	cmd.Env = append(cmd.Env, "GIT_PAGER=cat")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
