@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.5] - 2026-11-27
+
+### Added
+
+- Invitations: `org|project|repo grant add` let Core invite an account outside the parent scope instead of granting it access directly. An invited account prints `✓ Invited … No access until they accept` with the expiry date, and `--json` emits the invitation. A picker run continues past grantees Core refuses, names each reason, and ends with a granted / invited / refused tally. New `project invite list|revoke` and `repo invite list|revoke`; `org invite revoke` takes `--id`, `org invite send` takes `--account <provider:handle>`, and invitation tables show `INVITEE` instead of `EMAIL` ([#3165](https://github.com/entireio/cli/pull/3165))
+- `https://entire.com/...` and `entire.com/...` URLs copied from the web app are accepted wherever a repo ref is typed: `repo clone`, `view`, `edit`, `delete`, `visibility`, `protection`, `default-branch`, `repo grant`, the `repo mirror` verbs, `repo remote`, `repo invite`, `service-account grant --repo` and `explain --repo`. Refs still have to name their forge, and `https://github.com/...` is still refused ([#3220](https://github.com/entireio/cli/pull/3220))
+- `entire --help` lists installed plugins with their descriptions under "Plugin Commands:". A plugin is listed only when it has a description, its `bin/` entry is its installed binary, and its name does not shadow a built-in command. `entire plugin upgrade` backfills the description for plugins installed before this release ([#3208](https://github.com/entireio/cli/pull/3208))
+- `entire trail show` prints a `Review: draft` or `ready for review` line for each change with an approvals gate, and `--json` carries `readyForReview` ([#3086](https://github.com/entireio/cli/pull/3086))
+
+### Changed
+
+- Project and repository `grant list` tables show one row per grantee: ROLE is the strongest effective role and SOURCE lists every contributing source, weaker ones with their own role (`project:dogfooding, direct (reader)`). `--json` still returns one element per source row ([#3227](https://github.com/entireio/cli/pull/3227))
+- On case-insensitive filesystems (the macOS and Windows defaults), checkpoint refs are stored locally under their lowercase shard directory, so a checkpoint can no longer end up with a ref under each spelling. Existing refs are renamed at the end of every pre-push and by `entire doctor`; remotes keep the canonical ref names. Under the `manual` push policy, pre-push now guards both refs of a checkpoint whose two spellings diverged ([#3193](https://github.com/entireio/cli/pull/3193), [#3194](https://github.com/entireio/cli/pull/3194))
+- On Unix, a plugin that received Ctrl-C from the terminal is no longer killed after 5s; it decides when to exit, so a slow wind-down (such as closing a live session) can finish. Forwarded SIGTERM/SIGHUP still kill after 5s, and a second Ctrl-C still forces the plugin to quit ([#3211](https://github.com/entireio/cli/pull/3211))
+- `repo delete`, `org delete`, `project delete` and `service-account delete` show a spinner on stderr while the server works, including the `--cascade` wait. Stdout output is unchanged ([#3240](https://github.com/entireio/cli/pull/3240))
+- `entire trail stack` shows Entire-native stacks as well as GitHub pull request stacks. Each row leads with the trail ref and a fixed-width status, then the title, with `(PR #N)` appended when the change has a pull request; in `--json`, `pr_number` is null for a change without one ([#3222](https://github.com/entireio/cli/pull/3222))
+
+### Fixed
+
+- Checkpoint and session metadata (session IDs, agents, models, branches, prompts, skill labels), which anyone who can push to a repository can write, is stripped of terminal escape sequences, control characters and bidi controls before it is printed. A crafted value could previously overwrite a collaborator's clipboard (OSC 52), show a disguised hyperlink or redraw the screen when they ran a read-only command such as `entire checkpoint tokens`. Covers `checkpoint tokens`, `session tokens`, `blame`, `why`, `status`, `session list|info|stop|adopt`, `doctor`, `clean`, the resume commands, error messages, and the ~45 commands that print their own error before exiting. `--json` output is unchanged ([#3221](https://github.com/entireio/cli/pull/3221), [#3231](https://github.com/entireio/cli/pull/3231))
+- Pushes no longer fail with "prek's Git shim is installed in migration mode" when Entire's hooks are chained with [prek](https://github.com/j178/prek). Entire now chains through prek's shim the way it chains through pre-commit's, and repairs an earlier layout that ran Entire's hook twice per push. Run `entire enable` once to rewrite installed hooks ([#3028](https://github.com/entireio/cli/pull/3028))
+- Multi-agent `entire review` no longer sits on "Final judge is consolidating..." until a key is pressed, and no longer leaves the terminal in raw mode after exit. The `Ctrl+O: drill in` hint now stays visible while the judge runs ([#3201](https://github.com/entireio/cli/pull/3201), [#3214](https://github.com/entireio/cli/pull/3214))
+- Images Codex generates are externalized under `redaction.externalize_images`, and the rest of the generated-image record (including `revised_prompt`) is redacted instead of skipped ([#3151](https://github.com/entireio/cli/pull/3151))
+- `entire checkpoint explain` no longer fails, or drops the last session, on checkpoints whose session folders have gaps ([#3206](https://github.com/entireio/cli/pull/3206))
+- Any turn-end `git status` failure marks capture as degraded, not only a time-budget breach, and `entire status` says whether the scan failed or ran out of time ([#3205](https://github.com/entireio/cli/pull/3205))
+
+### Housekeeping
+
+- `transcript` library: a streaming Codex rollout adapter and `CodexItemRolloutDecided`, so a live reader folds the same records as `Convert` ([#2953](https://github.com/entireio/cli/pull/2953))
+- E2E tests resume sessions restored from `drop_images` checkpoints for Claude Code, Codex, Pi and OpenCode ([#3153](https://github.com/entireio/cli/pull/3153))
+
+### Thanks
+
+Thanks to @Stavin13 for privately reporting that checkpoint metadata could inject terminal escape sequences through `checkpoint tokens` and `session tokens`, and for sending a fix with a regression test!
+
 ## [0.13.4] - 2026-11-13
 
 ### Added
