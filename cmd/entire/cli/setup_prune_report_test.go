@@ -38,14 +38,14 @@ func TestSetupAgentHookSet_ReportsPrunedStaleHooks(t *testing.T) {
 	require.NoError(t, err)
 
 	var out bytes.Buffer
-	added, errs := setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, false)
+	added, errs := setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, EnableOptions{})
 	require.Empty(t, errs)
 	require.Len(t, added, 1)
 	require.Contains(t, out.String(), "Updated outdated Entire hooks for")
 
 	// A second install has nothing left to prune and says nothing about it.
 	out.Reset()
-	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, false)
+	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, EnableOptions{})
 	require.Empty(t, errs)
 	require.NotContains(t, out.String(), "Updated outdated")
 }
@@ -62,7 +62,7 @@ func TestSetupAgentHookSet_ReportsTimeoutBackfill(t *testing.T) {
 	claude, err := agent.Get(agent.AgentNameClaudeCode)
 	require.NoError(t, err)
 	var out bytes.Buffer
-	_, errs := setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, false)
+	_, errs := setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, EnableOptions{})
 	require.Empty(t, errs)
 
 	settingsPath := filepath.Join(dir, ".claude", "settings.json")
@@ -73,12 +73,12 @@ func TestSetupAgentHookSet_ReportsTimeoutBackfill(t *testing.T) {
 	require.NoError(t, os.WriteFile(settingsPath, stripped, 0o600))
 
 	out.Reset()
-	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, false)
+	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, EnableOptions{})
 	require.Empty(t, errs)
 	require.Contains(t, out.String(), "Updated outdated Entire hooks for")
 
 	out.Reset()
-	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, false)
+	_, errs = setupAgentHookSet(context.Background(), &out, []agent.Agent{claude}, EnableOptions{})
 	require.Empty(t, errs)
 	require.NotContains(t, out.String(), "Updated outdated")
 }

@@ -19,17 +19,21 @@ type HookEvents struct {
 	SubagentStop     []MatcherGroup `json:"SubagentStop,omitempty"`
 }
 
-// MatcherGroup groups hooks under an optional matcher pattern.
+// MatcherGroup groups hooks under an optional matcher pattern. Fields Entire
+// does not model survive a read-modify-write of the file (see hook_json.go).
 type MatcherGroup struct {
 	Matcher *string     `json:"matcher"`
 	Hooks   []HookEntry `json:"hooks"`
+	extra   map[string]json.RawMessage
 }
 
-// HookEntry represents a single hook command in the config.
+// HookEntry represents a single hook command in the config. Fields Entire
+// does not model (timeoutSec, async, statusMessage, ...) are preserved.
 type HookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
 	Timeout int    `json:"timeout,omitempty"`
+	extra   map[string]json.RawMessage
 }
 
 // sessionInfoRaw is the JSON structure shared by the session-scoped hooks,

@@ -866,11 +866,13 @@ func TestCheckCodexHookTrust_LinkedWorktreeReportsInactiveCurrentWorktreeFile(t 
 	require.Contains(t, out, resolvedHooksPath(t, linkedRoot))
 	require.Contains(t, out, resolvedHooksPath(t, repoRoot))
 	require.Contains(t, out, "Codex will read the discovered file above, not the current-worktree file above")
+	require.Contains(t, out, "re-run `entire agent add codex` in this worktree and answer yes to install Entire's Codex hooks in "+resolvedHooksPath(t, repoRoot)+".")
 	require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 	require.Contains(t, out, "(merge to the default branch, or check that branch out there).")
 	require.NotContains(t, out, "If that root is a Git checkout")
 	require.NotContains(t, out, "In a .bare layout")
 	require.NotContains(t, out, "migrate")
+	require.NoFileExists(t, resolvedHooksPath(t, repoRoot), "doctor must never write the discovered hooks file")
 	require.Contains(t, GetAgentsWithHooksInstalled(context.Background()), agent.AgentNameCodex)
 	require.NotContains(t, OutdatedHookAgents(context.Background()), agent.AgentNameCodex)
 }
