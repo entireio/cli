@@ -47,6 +47,14 @@ func runGitIn(t *testing.T, dir string, env []string, stdin string, args ...stri
 // prompt_attributions, the root summary gains combined_attribution.
 func injectLegacyAttribution(t *testing.T, repo *git.Repository, cpID id.CheckpointID, sessionIndex string) {
 	t.Helper()
+	injectLegacyAttributionWith(t, repo, cpID, sessionIndex, legacyPromptAttributions)
+}
+
+// injectLegacyAttributionWith is injectLegacyAttribution with the stored
+// prompt_attributions chosen by the caller, so a test can plant the oversized
+// record a pre-v0.10.1 CLI would have written.
+func injectLegacyAttributionWith(t *testing.T, repo *git.Repository, cpID id.CheckpointID, sessionIndex, promptAttributions string) {
+	t.Helper()
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 	dir := wt.Filesystem().Root()
@@ -69,7 +77,7 @@ func injectLegacyAttribution(t *testing.T, repo *git.Repository, cpID id.Checkpo
 	runGitIn(t, dir, env, "", "read-tree", branch)
 	addKeys(cpID.Path()+"/"+sessionIndex+"/"+paths.MetadataFileName, map[string]string{
 		"initial_attribution": legacyInitialAttribution,
-		"prompt_attributions": legacyPromptAttributions,
+		"prompt_attributions": promptAttributions,
 	})
 	addKeys(cpID.Path()+"/"+paths.MetadataFileName, map[string]string{
 		"combined_attribution": legacyCombinedAttribution,
@@ -199,4 +207,67 @@ func TestMetadataRoundTripKeepsLegacyAttribution(t *testing.T) {
 	out, err = json.Marshal(sum)
 	require.NoError(t, err)
 	assert.Contains(t, string(out), `"combined_attribution"`)
+}
+
+// Every path that re-emits a session's metadata.json drops an oversized
+// prompt_attributions instead of carrying it forward, so a slot an older CLI
+// bloated stops re-committing it. Attaching a different session is the
+// deliberate exception: it leaves this slot's blob untouched, so there is
+// nothing to re-emit and nothing to cap — the field goes when the slot itself
+// is next written. initial_attribution is never capped.
+func TestRewritesDropOversizedLegacyPromptAttributions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		rewrite   func(t *testing.T, store *GitStore, cpID id.CheckpointID)
+		reemitted bool
+	}{
+		{"summary backfill", func(t *testing.T, store *GitStore, cpID id.CheckpointID) {
+			t.Helper()
+			require.NoError(t, store.Write(context.Background(), SessionSummary{CheckpointID: cpID, Summary: &Summary{Intent: "intent"}}))
+		}, true},
+		{"transcript backfill", func(t *testing.T, store *GitStore, cpID id.CheckpointID) {
+			t.Helper()
+			require.NoError(t, store.Write(context.Background(), SessionTranscript{
+				CheckpointID: cpID, SessionID: "legacy-session",
+				Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":"hi again"}` + "\n")),
+				Agent:      agent.AgentTypeClaudeCode,
+			}))
+		}, true},
+		{"rewrite the same session", func(t *testing.T, store *GitStore, cpID id.CheckpointID) {
+			t.Helper()
+			writeLegacyTestSession(t, store, cpID, "legacy-session")
+		}, true},
+		{"attach another session", func(t *testing.T, store *GitStore, cpID id.CheckpointID) {
+			t.Helper()
+			writeLegacyTestSession(t, store, cpID, "attached-session")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := setupTestRepo(t)
+			store := NewGitStore(repo, DefaultV1Refs())
+			cpID := id.MustCheckpointID("c1b2c3d4e5f6")
+			writeLegacyTestSession(t, store, cpID, "legacy-session")
+			injectLegacyAttributionWith(t, repo, cpID, "0", string(oversizedPromptAttributions(MaxLegacyPromptAttributionsBytes)))
+
+			// The planted field has to start out over the cap, or the
+			// assertions below would pass against a checkpoint that never had
+			// anything to drop.
+			before := readRawKeys(t, store, cpID.Path()+"/0/"+paths.MetadataFileName)
+			require.Greater(t, len(before["prompt_attributions"]), MaxLegacyPromptAttributionsBytes)
+
+			tc.rewrite(t, store, cpID)
+
+			after := readRawKeys(t, store, cpID.Path()+"/0/"+paths.MetadataFileName)
+			if tc.reemitted {
+				assert.NotContains(t, after, "prompt_attributions", "a re-emitted metadata.json must not carry the oversized record")
+			} else {
+				assert.Greater(t, len(after["prompt_attributions"]), MaxLegacyPromptAttributionsBytes,
+					"a slot nothing rewrote is left alone rather than rewritten to cap it")
+			}
+			assert.JSONEq(t, legacyInitialAttribution, string(after["initial_attribution"]),
+				"only prompt_attributions is capped; its sibling carries forward as before")
+		})
+	}
 }
