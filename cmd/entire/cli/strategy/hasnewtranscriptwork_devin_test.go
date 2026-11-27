@@ -49,10 +49,10 @@ func transcriptWorkState(t *testing.T, agentType types.AgentType) *SessionState 
 	transcriptPath := filepath.Join(t.TempDir(), "stale-transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte("{\"type\":\"human\"}\n"), 0o600))
 	state := &SessionState{
-		SessionID:                "sess-work-" + string(agentType),
-		AgentType:                agentType,
-		Phase:                    session.PhaseActive,
-		TranscriptPath:           transcriptPath,
+		SessionID:                 "sess-work-" + string(agentType),
+		AgentType:                 agentType,
+		Phase:                     session.PhaseActive,
+		TranscriptPath:            transcriptPath,
 		CheckpointTranscriptStart: 0,
 	}
 	return state

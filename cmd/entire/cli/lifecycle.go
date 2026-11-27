@@ -769,6 +769,33 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 
 const devinAgentType types.AgentType = "Devin"
 
+// prepareTurnEndTranscript materializes the transcript via the agent's
+// TranscriptPreparer. Prepare failures are logged and ignored, except for
+// Devin, which fails closed.
+func prepareTurnEndTranscript(ctx, logCtx context.Context, ag agent.Agent, transcriptRef string) error {
+	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
+		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
+			logging.Warn(logCtx, "failed to prepare transcript",
+				slog.String("error", err.Error()))
+			if ag.Type() == devinAgentType {
+				return fmt.Errorf("failed to prepare transcript: %w", err)
+			}
+		}
+		return nil
+	}
+	if ag.Type() == devinAgentType {
+		return errors.New("devin agent does not support transcript preparation")
+	}
+	return nil
+}
+
+func requireDevinTranscriptData(ag agent.Agent, data []byte) error {
+	if ag.Type() == devinAgentType && len(data) == 0 {
+		return errors.New("devin transcript is empty")
+	}
+	return nil
+}
+
 // handleLifecycleTurnEnd handles turn end: validates transcript, extracts metadata,
 // detects file changes, saves step + checkpoint, transitions phase.
 //
@@ -806,20 +833,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// via `opencode export`, so the file doesn't exist until PrepareTranscript creates it.
 	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
 	// TranscriptPreparer (e.g. Droid) are unaffected.
-	isDevin := ag.Type() == devinAgentType
 	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
-	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
-		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
-			logging.Warn(logCtx, "failed to prepare transcript",
-				slog.String("error", err.Error()))
-			if isDevin {
-				prepareSpan.RecordError(err)
-				prepareSpan.End()
-				return fmt.Errorf("failed to prepare transcript: %w", err)
-			}
-		}
-	} else if isDevin {
-		err := errors.New("devin agent does not support transcript preparation")
+	if err := prepareTurnEndTranscript(ctx, logCtx, ag, transcriptRef); err != nil {
 		prepareSpan.RecordError(err)
 		prepareSpan.End()
 		return err
@@ -885,8 +900,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
-	if isDevin && len(transcriptData) == 0 {
-		err := errors.New("devin transcript is empty")
+	if err := requireDevinTranscriptData(ag, transcriptData); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return err

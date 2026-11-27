@@ -303,6 +303,38 @@ func (s *treeWriter) applySummaryBackfill(ctx context.Context, existing *object.
 	return subtree, existingMetadata.SessionID, nil
 }
 
+// Replace prompts with regex-only-redacted content.
+func (s *treeWriter) replacePrompts(prompts []string, sessionDir string, entries map[string]object.TreeEntry) error {
+	if len(prompts) == 0 {
+		return nil
+	}
+	promptContent := RedactedJoinedPrompts(prompts)
+	blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
+	if err != nil {
+		return fmt.Errorf("failed to create prompt blob: %w", err)
+	}
+	promptPath := checkpointSubtreePath(sessionDir, paths.PromptFileName)
+	entries[promptPath] = object.TreeEntry{
+		Name: promptPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+	return nil
+}
+
+func (s *treeWriter) applyTranscriptCaptureStatus(opts UpdateOptions, sessionDir string, entries map[string]object.TreeEntry) error {
+	if _, hasSessionMetadata := entries[checkpointSubtreePath(sessionDir, paths.MetadataFileName)]; !hasSessionMetadata {
+		return nil
+	}
+	if err := s.updateSessionMetadata(sessionDir, entries, func(metadata *Metadata) {
+		metadata.TranscriptCaptureStatus = opts.TranscriptCaptureStatus
+		metadata.TranscriptCaptureReason = opts.TranscriptCaptureReason
+	}); err != nil {
+		return fmt.Errorf("failed to update transcript capture status: %w", err)
+	}
+	return nil
+}
+
 // applyTranscriptBackfill replaces a session's transcript, prompts, and skill
 // events on the checkpoint's current subtree, returning the new subtree hash.
 // Returns ErrCheckpointNotFound when the checkpoint has no sessions yet.
@@ -442,19 +474,8 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		}
 	}
 
-	// Replace prompts with regex-only-redacted content.
-	if len(opts.Prompts) > 0 {
-		promptContent := RedactedJoinedPrompts(opts.Prompts)
-		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to create prompt blob: %w", err)
-		}
-		promptPath := checkpointSubtreePath(sessionDir, paths.PromptFileName)
-		entries[promptPath] = object.TreeEntry{
-			Name: promptPath,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
+	if err := s.replacePrompts(opts.Prompts, sessionDir, entries); err != nil {
+		return plumbing.ZeroHash, err
 	}
 
 	if len(opts.SkillEvents) > 0 {
@@ -463,13 +484,8 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		}
 	}
 
-	if _, hasSessionMetadata := entries[checkpointSubtreePath(sessionDir, paths.MetadataFileName)]; hasSessionMetadata {
-		if err := s.updateSessionMetadata(sessionDir, entries, func(metadata *Metadata) {
-			metadata.TranscriptCaptureStatus = opts.TranscriptCaptureStatus
-			metadata.TranscriptCaptureReason = opts.TranscriptCaptureReason
-		}); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to update transcript capture status: %w", err)
-		}
+	if err := s.applyTranscriptCaptureStatus(opts, sessionDir, entries); err != nil {
+		return plumbing.ZeroHash, err
 	}
 
 	return s.buildCheckpointSubtree(ctx, entries, basePath)

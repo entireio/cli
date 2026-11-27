@@ -22,9 +22,9 @@ type finalizeDevinAgent struct {
 	freshTranscript []byte
 }
 
-func (a *finalizeDevinAgent) Name() types.AgentName     { return "devin-finalize-test" }
-func (a *finalizeDevinAgent) Type() types.AgentType     { return devinAgentType }
-func (a *finalizeDevinAgent) Description() string       { return "Devin finalize test agent" }
+func (a *finalizeDevinAgent) Name() types.AgentName { return "devin-finalize-test" }
+func (a *finalizeDevinAgent) Type() types.AgentType { return devinAgentType }
+func (a *finalizeDevinAgent) Description() string   { return "Devin finalize test agent" }
 
 func (a *finalizeDevinAgent) PrepareTranscript(_ context.Context, transcriptPath string) error {
 	a.prepareCalls++

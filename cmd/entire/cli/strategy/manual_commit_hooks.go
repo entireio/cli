@@ -3994,6 +3994,65 @@ func (s *ManualCommitStrategy) repairUnavailableCaptures(ctx context.Context, st
 	state.CaptureRepairCheckpointIDs = kept
 }
 
+// loadFinalizeTranscript reads the full session transcript for finalize.
+// ok=false means it logged why; the caller marks finalize incomplete.
+func loadFinalizeTranscript(ctx, logCtx context.Context, ag agent.Agent, state *SessionState) (fullTranscript []byte, ok bool) {
+	if state.AgentType == devinAgentType {
+		transcript, _, devinErr := devinCondensationTranscript(ctx, ag, state)
+		if devinErr != nil || len(transcript) == 0 {
+			logging.Warn(logCtx, "finalize: devin transcript unavailable, skipping",
+				slog.String("session_id", state.SessionID),
+				slog.Any("error", devinErr),
+			)
+			return nil, false
+		}
+		return transcript, true
+	}
+	if state.TranscriptPath == "" {
+		logging.Warn(logCtx, "finalize: no transcript path, skipping",
+			slog.String("session_id", state.SessionID),
+		)
+		return nil, false
+	}
+	transcriptPath, resolveErr := resolveTranscriptPath(state)
+	if resolveErr != nil {
+		logging.Warn(logCtx, "finalize: transcript path resolution failed, skipping",
+			slog.String("session_id", state.SessionID),
+			slog.Any("error", resolveErr),
+		)
+		return nil, false
+	}
+	transcript, readErr := agent.ReadTranscriptFile(transcriptPath)
+	if readErr == nil && len(transcript) != 0 {
+		return transcript, true
+	}
+	// A late-transcript agent (agy) writes its transcript AFTER the Stop
+	// hook, so an empty file here is the placeholder PrepareTranscript
+	// materialised when the flush lost the race, not a read failure.
+	// Keeping TurnCheckpointIDs lets another Stop in this turn finalize
+	// them, but agy usually sends only one, so the checkpoints normally
+	// keep their provisional transcripts and the turn reports degraded
+	// capture.
+	if _, late := agent.AsLateTranscriptWriter(ag); late && readErr == nil {
+		logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
+			slog.String("session_id", state.SessionID),
+			slog.String("transcript_path", state.TranscriptPath),
+			slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
+		)
+		return nil, false
+	}
+	msg := "finalize: empty transcript, skipping"
+	if readErr != nil {
+		msg = "finalize: failed to read transcript, skipping"
+	}
+	logging.Warn(logCtx, msg,
+		slog.String("session_id", state.SessionID),
+		slog.String("transcript_path", state.TranscriptPath),
+		slog.Any("error", readErr),
+	)
+	return nil, false
+}
+
 // finalizeAllTurnCheckpoints replaces the provisional transcript in each checkpoint
 // created during this turn with the full session transcript.
 //
@@ -4043,68 +4102,10 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// agent relocated it mid-session (e.g., Cursor CLI flat → nested layout change).
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 
-	var fullTranscript []byte
-	if state.AgentType == devinAgentType {
-		var devinErr error
-		fullTranscript, _, devinErr = devinCondensationTranscript(ctx, ag, state)
-		if devinErr != nil || len(fullTranscript) == 0 {
-			logging.Warn(logCtx, "finalize: devin transcript unavailable, skipping",
-				slog.String("session_id", state.SessionID),
-				slog.Any("error", devinErr),
-			)
-			markFinalizeIncomplete(state)
-			return 1
-		}
-	} else {
-		if state.TranscriptPath == "" {
-			logging.Warn(logCtx, "finalize: no transcript path, skipping",
-				slog.String("session_id", state.SessionID),
-			)
-			markFinalizeIncomplete(state)
-			return 1
-		}
-
-		transcriptPath, resolveErr := resolveTranscriptPath(state)
-		if resolveErr != nil {
-			logging.Warn(logCtx, "finalize: transcript path resolution failed, skipping",
-				slog.String("session_id", state.SessionID),
-				slog.Any("error", resolveErr),
-			)
-			markFinalizeIncomplete(state)
-			return 1
-		}
-
-		var readErr error
-		fullTranscript, readErr = agent.ReadTranscriptFile(transcriptPath)
-		if readErr != nil || len(fullTranscript) == 0 {
-			// A late-transcript agent (agy) writes its transcript AFTER the Stop
-			// hook, so an empty file here is the placeholder PrepareTranscript
-			// materialised when the flush lost the race, not a read failure.
-			// Keeping TurnCheckpointIDs lets another Stop in this turn finalize
-			// them, but agy usually sends only one, so the checkpoints normally
-			// keep their provisional transcripts and the turn reports degraded
-			// capture.
-			if _, late := agent.AsLateTranscriptWriter(ag); late && readErr == nil {
-				logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
-					slog.String("session_id", state.SessionID),
-					slog.String("transcript_path", state.TranscriptPath),
-					slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
-				)
-				markFinalizeIncomplete(state)
-				return 1
-			}
-			msg := "finalize: empty transcript, skipping"
-			if readErr != nil {
-				msg = "finalize: failed to read transcript, skipping"
-			}
-			logging.Warn(logCtx, msg,
-				slog.String("session_id", state.SessionID),
-				slog.String("transcript_path", state.TranscriptPath),
-				slog.Any("error", readErr),
-			)
-			markFinalizeIncomplete(state)
-			return 1
-		}
+	fullTranscript, ok := loadFinalizeTranscript(ctx, logCtx, ag, state)
+	if !ok {
+		markFinalizeIncomplete(state)
+		return 1
 	}
 
 	// Open repository (needed for the checkpoint store)

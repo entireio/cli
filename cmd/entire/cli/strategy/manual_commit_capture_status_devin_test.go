@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/api/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -298,4 +298,3 @@ func TestFinalizeAllTurnCheckpoints_RemovesRepairedIDsOnSuccess(t *testing.T) {
 	assert.Empty(t, meta0.TranscriptCaptureStatus)
 	assert.Empty(t, meta0.TranscriptCaptureReason)
 }
-
