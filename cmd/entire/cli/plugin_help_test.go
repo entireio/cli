@@ -294,3 +294,49 @@ func TestUpgradeInstalledPlugin_BackfillIsBestEffort(t *testing.T) { //nolint:pa
 		})
 	}
 }
+
+// An install whose manifest predates agent_help (it has a description) picks
+// the declaration up on a no-op upgrade, from the installed tag's metadata;
+// a plugin that doesn't declare it, or whose repository can't be read, keeps
+// the manifest as it was.
+func TestUpgradeInstalledPlugin_BackfillsAgentHelp(t *testing.T) { //nolint:paralleltest // mutates env
+	for name, tc := range map[string]struct {
+		declared, unreachable, want bool
+	}{
+		"declared": {declared: true, want: true}, "not declared": {}, "repository gone": {declared: true, unreachable: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withIsolatedPluginEnv(t)
+			ctx := context.Background()
+			meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", pluginReleaseServer(t, "0.1.0").URL)
+			if tc.declared {
+				meta += "agent_help: true\n"
+			}
+			repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+			if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: remoteTestTagOld}); err != nil {
+				t.Fatalf("InstallPluginFromRepo: %v", err)
+			}
+			m, err := LoadPluginManifest("demo")
+			if err != nil || m == nil {
+				t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+			}
+			m.AgentHelp = false // as an older CLI recorded it
+			if err := SavePluginManifest(m); err != nil {
+				t.Fatal(err)
+			}
+			if tc.unreachable {
+				if err := os.RemoveAll(repoDirFromURL(repoURL)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if o, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil || !o.Pinned {
+				t.Fatalf("UpgradeInstalledPlugin = %+v, %v", o, err)
+			}
+			got, err := LoadPluginManifest("demo")
+			if err != nil || got == nil || got.AgentHelp != tc.want || got.Description != "Demo plugin for tests" {
+				t.Errorf("manifest after upgrade = %+v, %v; want agent_help %v and the description kept", got, err, tc.want)
+			}
+		})
+	}
+}
