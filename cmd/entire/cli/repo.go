@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -480,11 +482,16 @@ func newRepoViewCmd() *cobra.Command {
 			"context's login server.\n\n" +
 			"A native repo's state is read authoritatively, so the primary's STATUS " +
 			"says whether it is usable. Pass --authoritative to fail rather than " +
-			"dash that cell when the server cannot answer.",
+			"dash that cell when the server cannot answer.\n\n" +
+			"--web prints the repository's page in the Entire web app and opens it in " +
+			"the browser instead of showing the repository; nothing is looked up. The " +
+			"page is on the active login's web origin, also for an entire:// URL " +
+			"naming a cluster in another federation.",
 		Example: "  entire repo view --json\n" +
 			"  entire repo view /et/acme/web\n" +
 			"  entire repo view /gh/octocat/hello-world\n" +
 			"  entire repo view /et/acme/web --json\n" +
+			"  entire repo view /gh/octocat/hello-world --web\n" +
 			"  entire repo view entire://aws-us-east-2.entire.io/et/acme/web",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -510,6 +517,9 @@ func newRepoViewCmd() *cobra.Command {
 				if err != nil {
 					return badRepoRefErr(err)
 				}
+				if webRequested(cmd) {
+					return openRepoInWeb(cmd, target, authoritative)
+				}
 				if target.forge == nativeCloneForge {
 					return tr.wrapErr(runNativeRepoView(cmd, target.qualified(), clusterHost, authoritative))
 				}
@@ -528,6 +538,9 @@ func newRepoViewCmd() *cobra.Command {
 			if err != nil {
 				return tr.wrapErr(err)
 			}
+			if webRequested(cmd) {
+				return openRepoInWeb(cmd, target, authoritative)
+			}
 			if target.forge == mirrorCloneForge {
 				warnFlagsGitHubViewIgnores(cmd, authoritative)
 				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, "")
@@ -537,7 +550,38 @@ func newRepoViewCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Fail if the server cannot confirm provisioning state")
 	addJSONFlag(cmd)
+	addWebFlag(cmd)
 	return cmd
+}
+
+// repoWebURL builds the browser URL of a repository's page in the Entire web
+// app: <web-origin>/<forge>/<owner>/<repo>, where forge is the path token
+// ("gh" or "et") and owner is the GitHub owner or the Entire project.
+//
+// The route is inferred, not read from the web app: it is the prefix every
+// other link the CLI builds shares (trailWebURL's
+// /<forge>/<owner>/<repo>/trails/<n>, expertsSessionURL's
+// /gh/<owner>/<repo>/session/<id>). Segments are path-escaped so a name can
+// never add a path segment or a query.
+func repoWebURL(base, forge, owner, repo string) string {
+	return strings.TrimRight(base, "/") + "/" +
+		url.PathEscape(forge) + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+}
+
+// openRepoInWeb serves `repo view --web`: it opens the repo's web page without
+// reading the repo from the control plane, so it works for a repo the CLI
+// cannot resolve and needs only the active login's web origin. That origin is
+// used even when the ref was an entire:// URL naming another federation's
+// cluster: a clone URL carries a cluster host, not a web origin.
+func openRepoInWeb(cmd *cobra.Command, target mirrorRepoRef, authoritative bool) error {
+	if authoritative {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Note: --authoritative is ignored with --web; the repository is opened in the browser, not read.")
+	}
+	base, err := auth.WebBaseURL()
+	if err != nil {
+		return fmt.Errorf("resolve the Entire web app URL: %w", err)
+	}
+	return openInWeb(cmd, repoWebURL(base, target.forge, target.owner, target.repo))
 }
 
 // Keep Entire clone URLs intact so the normal view path selects the login

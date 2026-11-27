@@ -518,6 +518,10 @@ always runnable in every build.
   selection and catalog joins, with no additional requests. Both are omitted
   when coordinates cannot resolve, so an unready repo remains inspectable.
   Consumers must require both fields before making a repo-scoped API call.
+  `repo view --web` opens `<web-origin>/<forge>/<owner>/<repo>` (`repoWebURL`)
+  without a control-plane read; the origin is the active login's
+  (`auth.WebBaseURL`), also for an `entire://` URL naming another federation's
+  cluster, and `--authoritative` is noted as ignored.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
   picker matches on the cluster host, which is what `--cluster` takes, and both
@@ -1077,6 +1081,49 @@ stdio server for MCP-host agents).
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
+
+### `--web` on view and show commands
+
+A `view` / `show` command that has a page in the Entire web app takes
+`--web` / `-w`, as `gh repo view --web` does. The helper lives in
+`cmd/entire/cli/web_open.go`:
+
+- `addWebFlag(cmd)` registers the flag. Call it after `addJSONFlag`: when the
+  command has `--json`, the two are marked mutually exclusive.
+- `webRequested(cmd)` reads it, mirroring `jsonRequested`.
+- `openInWeb(cmd, url)` prints the URL on its own line to stdout, then opens
+  the browser. A browser that cannot be launched is a stderr note and exit 0,
+  since the URL was delivered; an empty URL is an error. When an agent runs
+  the command (`review.DetectAgentSession`), only the URL is printed: the
+  browser is opened only for a person. Tests that expect an open use
+  `stubWebOpenURL`, which clears the agent-caller environment.
+  Before printing or opening anything it requires valid UTF-8 with only
+  printable runes (no control or bidi-control runes) and an http(s) URL on the
+  `auth.WebBaseURL()` origin, both sides compared through
+  `api.NormalizeOriginURL`, so a server-supplied link cannot reach the terminal
+  or the browser unchecked. The base is validated as an http(s) origin first;
+  `ENTIRE_WEB_BASE_URL` is the way to point the CLI at another web origin.
+  One exception covers local dev, where the API and the web app run on
+  different ports: when the origin is a loopback data host used as-is (no
+  `ENTIRE_WEB_BASE_URL`), a loopback URL of the same scheme on any port is
+  accepted. A self-hosted setup with separate API and web hosts still needs
+  `ENTIRE_WEB_BASE_URL`. The query is kept as the server wrote it, so the page
+  opened is the page linked; only a raw space is percent-encoded. An opener
+  failure is logged at debug level without the URL.
+
+Build the URL from `auth.WebBaseURL()` with path-escaped segments, and prefer
+resolving it without an API call when the reference already names the page.
+When the server supplies a URL, open that and fall back to the built one only
+for servers that omit it, as `trailDisplayURL` does for `trail show`. Extend a
+server URL by parsing it (`url.JoinPath`), never by string concatenation, as
+`projectTrailChangeURL` does.
+
+Only add `--web` where the resource itself has a page, or a query parameter
+that selects it. A command whose resource lives inside another page does not
+take the flag: `trail finding show` and `trail comment show` have none, since
+it could only open the trail's page.
+Tests stub the package-level `webOpenURL` seam and so must not be parallel.
+`--web` is for people: do not add it to `agentHelpGuidance`.
 
 ### Error Handling
 

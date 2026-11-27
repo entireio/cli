@@ -146,6 +146,79 @@ func TestProjectAgentRunShow_PrintsTheRun(t *testing.T) {
 	}
 }
 
+func TestProjectAgentRunWebURL(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "https://entire.com/gh/acme/-/agents/runs?runId="+agentRunTestID,
+		projectAgentRunWebURL("https://entire.com/", "gh", "acme", agentRunTestID))
+	assert.Equal(t, "http://localhost:3000/et/a%2Fb/-/agents/runs?runId=x%26y%3Dz",
+		projectAgentRunWebURL("http://localhost:3000", "et", "a/b", "x&y=z"))
+}
+
+// Serial: sets ENTIRE_WEB_BASE_URL. A run URL built on the web origin passes
+// openInWeb's origin check and survives its re-serialization unchanged.
+func TestProjectAgentRunWebURL_PassesTheOriginCheckUnchanged(t *testing.T) {
+	const base = "https://web.example"
+	t.Setenv(api.WebBaseURLEnvVar, base)
+	for _, tc := range []struct{ host, project, runID string }{
+		{"gh", "acme", agentRunTestID},
+		{"et", "a/b c", "x&y=z #1"},
+	} {
+		built := projectAgentRunWebURL(base, tc.host, tc.project, tc.runID)
+		got, err := validatedWebURL(built)
+		require.NoError(t, err, built)
+		assert.Equal(t, built, got)
+	}
+}
+
+func TestProjectAgentRunShow_WebOpensTheRunsPage(t *testing.T) {
+	// Serial: sets ENTIRE_WEB_BASE_URL and replaces the project agent target
+	// and the webOpenURL seam.
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example/")
+	want := "https://web.example/gh/acme/-/agents/runs?runId=" + agentRunTestID
+	for _, flag := range []string{"--web", "-w"} {
+		opened := stubWebOpenURL(t, nil)
+		requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, _ *http.Request) {
+			assert.NoError(t, json.NewEncoder(w).Encode(agentRunTestJSON(agentRunTestID, "succeeded")))
+		})
+		out, errOut, err := executeProjectAgent(t, "run", "show", agentRunTestID, flag)
+		require.NoError(t, err)
+		assert.Equal(t, want+"\n", out)
+		assert.Empty(t, errOut)
+		assert.Equal(t, []string{want}, *opened)
+		assert.Equal(t, []agentRunRequest{{Method: http.MethodGet, Path: agentTestBase + "/runs/" + agentRunTestID}}, *requests)
+	}
+}
+
+func TestProjectAgentRunShow_WebStillRefusesAnUnreadableRun(t *testing.T) {
+	// Serial: sets ENTIRE_WEB_BASE_URL and replaces the project agent target
+	// and the webOpenURL seam.
+	t.Setenv(api.WebBaseURLEnvVar, "https://web.example")
+	opened := stubWebOpenURL(t, nil)
+	requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	out, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web")
+	require.ErrorContains(t, err, "read run "+agentRunTestID)
+	assert.Empty(t, out)
+	assert.Empty(t, *opened)
+	assert.Len(t, *requests, 1)
+
+	_, _, err = executeProjectAgent(t, "run", "show", "run-1", "--web")
+	require.ErrorContains(t, err, "expected a run ID")
+	assert.Len(t, *requests, 1)
+}
+
+func TestProjectAgentRunShow_WebAndJSONAreExclusive(t *testing.T) {
+	// Serial: replaces the project agent target and the webOpenURL seam.
+	opened := stubWebOpenURL(t, nil)
+	requests := stubProjectAgentRuns(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	_, _, err := executeProjectAgent(t, "run", "show", agentRunTestID, "--web", "--json")
+	require.ErrorContains(t, err, "none of the others can be")
+	assert.Empty(t, *opened)
+	assert.Empty(t, *requests)
+}
+
 func TestProjectAgentRunCancel(t *testing.T) {
 	// Serial: replaces the project agent target.
 	for _, tc := range []struct{ status, says string }{

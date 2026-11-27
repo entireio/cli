@@ -225,6 +225,16 @@ func TestTrailDisplayURL(t *testing.T) {
 		t.Fatalf("expected constructed fallback URL on the web origin, got %q", got)
 	}
 
+	// The server URL is returned trimmed, so --web opens what show prints.
+	if got := trailDisplayURL(api.TrailResource{URL: " https://server/url\n"}, "gh", "acme", "repo"); got != "https://server/url" {
+		t.Fatalf("expected trimmed server URL, got %q", got)
+	}
+
+	// No fallback is built from an unknown repo.
+	if got := trailDisplayURL(api.TrailResource{Number: 5}, "", "acme", "repo"); got != "" {
+		t.Fatalf("expected empty URL without a forge, got %q", got)
+	}
+
 	// Nothing to show when neither is available.
 	if got := trailDisplayURL(api.TrailResource{}, "gh", "acme", "repo"); got != "" {
 		t.Fatalf("expected empty URL, got %q", got)
@@ -1714,4 +1724,73 @@ func writeTrailCreatePrePushHook(t *testing.T, localDir, script string) {
 	hooksDir := filepath.Join(localDir, ".git", "hooks")
 	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(script), 0o755))
+}
+
+// executeLegacyTrailTest runs `entire trail <args...>` on the repository-mode
+// tree, as executeProjectTrailTest does for the project tree.
+func executeLegacyTrailTest(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := newTrailCmdForMode(false)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs(args)
+	err = cmd.ExecuteContext(t.Context())
+	return out.String(), errOut.String(), err
+}
+
+// Not parallel: sets ENTIRE_WEB_BASE_URL and swaps the package-level
+// webOpenURL and newTrailAPIClient seams.
+func TestTrailShow_Web(t *testing.T) {
+	const page = "https://entire.io/gh/acme/repo/trails/7"
+	// openInWeb only opens pages on the web origin; match the fixture's URLs.
+	t.Setenv(api.WebBaseURLEnvVar, "https://entire.io")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the list the branch selector resolves through; --web must not
+		// go on to read the trail detail.
+		if r.Method != http.MethodGet || r.URL.Path != trailTestBasePath {
+			t.Errorf("trail show --web must not request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+			ID: "trl_1", Number: 7, URL: page, Branch: "feature/x", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
+		}, {
+			ID: "trl_2", Number: 8, URL: "https://evil.example/gh/acme/repo/trails/8", Branch: "feature/foreign", Base: "main", Title: "Foreign", Status: string(trail.StatusOpen),
+		}}, Total: 2}); err != nil {
+			t.Errorf("encode list response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	old := newTrailAPIClient
+	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return api.NewClientWithBaseURL("tok", srv.URL), trailTestRepoID, nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = old })
+
+	t.Run("opens the trail page", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, stderr, err := executeLegacyTrailTest(t, "show", "feature/x", "--repo", "gh/acme/repo", "--web")
+		require.NoError(t, err)
+		require.Equal(t, page+"\n", stdout)
+		require.Empty(t, stderr)
+		require.Equal(t, []string{page}, *opened)
+	})
+
+	t.Run("a server URL on a foreign host is refused", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, "show", "feature/foreign", "--repo", "gh/acme/repo", "--web")
+		require.ErrorContains(t, err, "not on the Entire web app origin https://entire.io")
+		require.Empty(t, stdout)
+		require.Empty(t, *opened)
+	})
+
+	t.Run("json is refused", func(t *testing.T) {
+		opened := stubWebOpenURL(t, nil)
+		stdout, _, err := executeLegacyTrailTest(t, "show", "feature/x", "--repo", "gh/acme/repo", "--web", "--json")
+		require.ErrorContains(t, err, "none of the others can be")
+		require.NotContains(t, stdout, page)
+		require.Empty(t, *opened)
+	})
 }

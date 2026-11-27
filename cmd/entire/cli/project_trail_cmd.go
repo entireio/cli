@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func addProjectTrailSelectorFlags(cmd *cobra.Command) {
 func newProjectTrailShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "show [<trail>]", Short: "Show trail intent and its repositories and branches",
-		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent. Open changes, and the change the trail was reached through, show their merge gates (the first 20 changes).",
+		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent. Open changes, and the change the trail was reached through, show their merge gates (the first 20 changes). With --web, open the trail's page in the browser instead, or the change's page when the trail was reached through a change.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
@@ -51,12 +52,40 @@ func newProjectTrailShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if webRequested(cmd) {
+				return openInWeb(cmd, projectTrailWebURL(out, target.Change))
+			}
 			return printProjectTrail(cmd, out, target.Change, lookupProjectTrailGates(cmd, target, out))
 		},
 	}
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
+	addWebFlag(cmd)
 	return cmd
+}
+
+// projectTrailWebURL is the page `trail show --web` opens: the page of the
+// change the trail was reached through when that change can be named as
+// <repo>/<number>, otherwise the trail's own page.
+func projectTrailWebURL(item api.ProjectTrail, current *projectTrailCurrentChange) string {
+	item.URL = strings.TrimSpace(item.URL)
+	if current == nil {
+		return item.URL
+	}
+	for _, c := range item.Changes {
+		if c.ID != current.ID {
+			continue
+		}
+		if c.Repository == "" {
+			c.Repository = current.Repo
+		}
+		selector, _ := trailChangeSelectorFor(c)
+		if u := projectTrailChangeURL(item.URL, selector); u != "" {
+			return u
+		}
+		break
+	}
+	return item.URL
 }
 
 // lookupProjectTrailGates reads the mergeability snapshot of each open change,
@@ -175,13 +204,21 @@ type projectTrailChangeJSON struct {
 
 // projectTrailChangeURL is a change's page under its trail's server-supplied
 // URL, <trail URL>/changes/<repo>/<number>; empty when either is unknown.
-// The selector is validated, so it is safe as path segments.
+// The selector is validated, so it is safe as path segments. The path is
+// appended to the parsed URL, so a query on the trail URL stays a query
+// rather than swallowing the change's path; a fragment belongs to the trail's
+// page and is dropped.
 func projectTrailChangeURL(trailURL, selector string) string {
-	trailURL = strings.TrimRight(strings.TrimSpace(trailURL), "/")
+	trailURL = strings.TrimSpace(trailURL)
 	if trailURL == "" || selector == "" {
 		return ""
 	}
-	return trailURL + "/changes/" + selector
+	u, err := url.Parse(trailURL)
+	if err != nil {
+		return ""
+	}
+	u.Fragment, u.RawFragment = "", ""
+	return u.JoinPath("changes", selector).String()
 }
 
 // printProjectTrail renders a project trail. current is the change the trail
