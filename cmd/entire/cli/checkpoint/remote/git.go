@@ -118,10 +118,12 @@ var unreachableRemoteNeedles = []string{
 	"ssh: could not resolve hostname",
 	"could not resolve host:",
 	"could not resolve proxy:",
-	"failed to connect to ",
+	curlFailedToConnect, // only in curl's "<host> port <n>" form, not a helper's
 	"couldn't connect to server",
 	"resolving timed out",
 }
+
+const curlFailedToConnect = "failed to connect to "
 
 // maxUnreachableLineRunes caps the cause line printed inside the user's push.
 const maxUnreachableLineRunes = 200
@@ -147,7 +149,7 @@ func UnreachableRemoteLine(err error) (string, bool) {
 		}
 		lower := strings.ToLower(line)
 		for _, n := range unreachableRemoteNeedles {
-			if strings.Contains(lower, n) {
+			if strings.Contains(lower, n) && (n != curlFailedToConnect || strings.Contains(lower, " port ")) {
 				return displayGitLine(line), true
 			}
 		}
@@ -159,13 +161,17 @@ func UnreachableRemoteLine(err error) (string, bool) {
 // prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
 func displayGitLine(line string) string {
 	line = strings.TrimPrefix(line, "fatal: ")
-	line = gitremote.RedactCredentialsInText(line)
+	// Strip before redacting: a character dropped here could otherwise split a
+	// URL so redaction misses it, then rejoin it with credentials intact.
 	line = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		// Cc: terminal escapes and newlines; Cf: bidi overrides that could
+		// make the line read as something else.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
 	}, line)
+	line = gitremote.RedactCredentialsInText(line)
 	if r := []rune(line); len(r) > maxUnreachableLineRunes {
 		line = string(r[:maxUnreachableLineRunes]) + "…"
 	}
