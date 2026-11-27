@@ -732,6 +732,9 @@ func (s *AddOrgMemberInputBodyRole) UnmarshalText(data []byte) error {
 	}
 }
 
+// AddTeamMemberNoContent is response for AddTeamMember operation.
+type AddTeamMemberNoContent struct{}
+
 // Ref: #/components/schemas/AuditEvent
 type AuditEvent struct {
 	ActorId   string `json:"actorId"`
@@ -4370,6 +4373,56 @@ func (s *CreateServiceAccountSecretOutputBodyAdditional) init() CreateServiceAcc
 	return m
 }
 
+// Ref: #/components/schemas/CreateTeamInputBody
+type CreateTeamInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Lowercase letters, digits, and '-'. Unique in the organization.
+	Name            string `json:"name"`
+	AdditionalProps CreateTeamInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateTeamInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetName returns the value of Name.
+func (s *CreateTeamInputBody) GetName() string {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateTeamInputBody) GetAdditionalProps() CreateTeamInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateTeamInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetName sets the value of Name.
+func (s *CreateTeamInputBody) SetName(val string) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateTeamInputBody) SetAdditionalProps(val CreateTeamInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateTeamInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateTeamInputBodyAdditional) init() CreateTeamInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreatedOrg
 type CreatedOrg struct {
 	// A URL to the JSON Schema for this object.
@@ -5298,6 +5351,9 @@ type DeleteServiceAccountNoContent struct{}
 
 // DeleteServiceAccountSecretNoContent is response for DeleteServiceAccountSecret operation.
 type DeleteServiceAccountSecretNoContent struct{}
+
+// DeleteTeamNoContent is response for DeleteTeam operation.
+type DeleteTeamNoContent struct{}
 
 // Ref: #/components/schemas/DeletionBlocker
 type DeletionBlocker struct {
@@ -7337,8 +7393,12 @@ type GrantAccessBody struct {
 	// Legacy identity selector; requires providerUserId and must not be combined with accountId.
 	Provider OptString `json:"provider"`
 	// Legacy provider user ID; requires provider and must not be combined with accountId.
-	ProviderUserId  OptString           `json:"providerUserId"`
-	Role            GrantAccessBodyRole `json:"role"`
+	ProviderUserId OptString           `json:"providerUserId"`
+	Role           GrantAccessBodyRole `json:"role"`
+	// Entire team ULID to grant. Required when granteeType is team, and refused otherwise. Must not be
+	// combined with accountId, provider/providerUserId or allow_invitation. The team must belong to the
+	// organization that owns the resource; any other team answers 404.
+	TeamID          OptString `json:"team_id"`
 	AdditionalProps GrantAccessBodyAdditional
 }
 
@@ -7375,6 +7435,11 @@ func (s *GrantAccessBody) GetProviderUserId() OptString {
 // GetRole returns the value of Role.
 func (s *GrantAccessBody) GetRole() GrantAccessBodyRole {
 	return s.Role
+}
+
+// GetTeamID returns the value of TeamID.
+func (s *GrantAccessBody) GetTeamID() OptString {
+	return s.TeamID
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -7417,6 +7482,11 @@ func (s *GrantAccessBody) SetRole(val GrantAccessBodyRole) {
 	s.Role = val
 }
 
+// SetTeamID sets the value of TeamID.
+func (s *GrantAccessBody) SetTeamID(val OptString) {
+	s.TeamID = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *GrantAccessBody) SetAdditionalProps(val GrantAccessBodyAdditional) {
 	s.AdditionalProps = val
@@ -7437,12 +7507,14 @@ type GrantAccessBodyGranteeType string
 
 const (
 	GrantAccessBodyGranteeTypeAccount GrantAccessBodyGranteeType = "account"
+	GrantAccessBodyGranteeTypeTeam    GrantAccessBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantAccessBodyGranteeType values.
 func (GrantAccessBodyGranteeType) AllValues() []GrantAccessBodyGranteeType {
 	return []GrantAccessBodyGranteeType{
 		GrantAccessBodyGranteeTypeAccount,
+		GrantAccessBodyGranteeTypeTeam,
 	}
 }
 
@@ -7450,6 +7522,8 @@ func (GrantAccessBodyGranteeType) AllValues() []GrantAccessBodyGranteeType {
 func (s GrantAccessBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantAccessBodyGranteeTypeAccount:
+		return []byte(s), nil
+	case GrantAccessBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -7461,6 +7535,9 @@ func (s *GrantAccessBodyGranteeType) UnmarshalText(data []byte) error {
 	switch GrantAccessBodyGranteeType(data) {
 	case GrantAccessBodyGranteeTypeAccount:
 		*s = GrantAccessBodyGranteeTypeAccount
+		return nil
+	case GrantAccessBodyGranteeTypeTeam:
+		*s = GrantAccessBodyGranteeTypeTeam
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -11406,6 +11483,128 @@ func (s *ListServiceAccountsOutputBody) SetAdditionalProps(val ListServiceAccoun
 type ListServiceAccountsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListServiceAccountsOutputBodyAdditional) init() ListServiceAccountsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListTeamMembersOutputBody
+type ListTeamMembersOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema  OptURI       `json:"$schema"`
+	Members []TeamMember `json:"members"`
+	// Present only when more members remain.
+	NextCursor      OptString `json:"next_cursor"`
+	AdditionalProps ListTeamMembersOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListTeamMembersOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMembers returns the value of Members.
+func (s *ListTeamMembersOutputBody) GetMembers() []TeamMember {
+	return s.Members
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListTeamMembersOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListTeamMembersOutputBody) GetAdditionalProps() ListTeamMembersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListTeamMembersOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMembers sets the value of Members.
+func (s *ListTeamMembersOutputBody) SetMembers(val []TeamMember) {
+	s.Members = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListTeamMembersOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListTeamMembersOutputBody) SetAdditionalProps(val ListTeamMembersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListTeamMembersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListTeamMembersOutputBodyAdditional) init() ListTeamMembersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListTeamsOutputBody
+type ListTeamsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Present only when more teams remain.
+	NextCursor      OptString `json:"next_cursor"`
+	Teams           []Team    `json:"teams"`
+	AdditionalProps ListTeamsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListTeamsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListTeamsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetTeams returns the value of Teams.
+func (s *ListTeamsOutputBody) GetTeams() []Team {
+	return s.Teams
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListTeamsOutputBody) GetAdditionalProps() ListTeamsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListTeamsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListTeamsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetTeams sets the value of Teams.
+func (s *ListTeamsOutputBody) SetTeams(val []Team) {
+	s.Teams = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListTeamsOutputBody) SetAdditionalProps(val ListTeamsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListTeamsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListTeamsOutputBodyAdditional) init() ListTeamsOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -18726,6 +18925,9 @@ type RemoveOrgMemberNoContent struct{}
 // RemovePluginInstallationRepositoryNoContent is response for RemovePluginInstallationRepository operation.
 type RemovePluginInstallationRepositoryNoContent struct{}
 
+// RemoveTeamMemberNoContent is response for RemoveTeamMember operation.
+type RemoveTeamMemberNoContent struct{}
+
 // Ref: #/components/schemas/Repo
 type Repo struct {
 	// A URL to the JSON Schema for this object.
@@ -22955,6 +23157,218 @@ func (s *SetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error
 	}
 }
 
+// Ref: #/components/schemas/Team
+type Team struct {
+	// A URL to the JSON Schema for this object.
+	Schema    OptURI    `json:"$schema"`
+	CreatedAt time.Time `json:"created_at"`
+	// True when directory sync owns the team. Such a team is read-only here.
+	DirectoryManaged bool      `json:"directory_managed"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	OrgID            string    `json:"org_id"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	AdditionalProps  TeamAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *Team) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *Team) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetDirectoryManaged returns the value of DirectoryManaged.
+func (s *Team) GetDirectoryManaged() bool {
+	return s.DirectoryManaged
+}
+
+// GetID returns the value of ID.
+func (s *Team) GetID() string {
+	return s.ID
+}
+
+// GetName returns the value of Name.
+func (s *Team) GetName() string {
+	return s.Name
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *Team) GetOrgID() string {
+	return s.OrgID
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *Team) GetUpdatedAt() time.Time {
+	return s.UpdatedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Team) GetAdditionalProps() TeamAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *Team) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *Team) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetDirectoryManaged sets the value of DirectoryManaged.
+func (s *Team) SetDirectoryManaged(val bool) {
+	s.DirectoryManaged = val
+}
+
+// SetID sets the value of ID.
+func (s *Team) SetID(val string) {
+	s.ID = val
+}
+
+// SetName sets the value of Name.
+func (s *Team) SetName(val string) {
+	s.Name = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *Team) SetOrgID(val string) {
+	s.OrgID = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *Team) SetUpdatedAt(val time.Time) {
+	s.UpdatedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Team) SetAdditionalProps(val TeamAdditional) {
+	s.AdditionalProps = val
+}
+
+type TeamAdditional map[string]jx.Raw
+
+func (s *TeamAdditional) init() TeamAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/TeamMember
+type TeamMember struct {
+	AccountID string `json:"account_id"`
+	// Public avatar URL.
+	AvatarURL OptString `json:"avatar_url"`
+	// Account-level public display name.
+	DisplayName OptString `json:"display_name"`
+	Handle      OptString `json:"handle"`
+	Provider    OptString `json:"provider"`
+	// Membership status in the organization.
+	Status string `json:"status"`
+	// The member's Entire username. Omitted until claimed.
+	Username        OptString `json:"username"`
+	AdditionalProps TeamMemberAdditional
+}
+
+// GetAccountID returns the value of AccountID.
+func (s *TeamMember) GetAccountID() string {
+	return s.AccountID
+}
+
+// GetAvatarURL returns the value of AvatarURL.
+func (s *TeamMember) GetAvatarURL() OptString {
+	return s.AvatarURL
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *TeamMember) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandle returns the value of Handle.
+func (s *TeamMember) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetProvider returns the value of Provider.
+func (s *TeamMember) GetProvider() OptString {
+	return s.Provider
+}
+
+// GetStatus returns the value of Status.
+func (s *TeamMember) GetStatus() string {
+	return s.Status
+}
+
+// GetUsername returns the value of Username.
+func (s *TeamMember) GetUsername() OptString {
+	return s.Username
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *TeamMember) GetAdditionalProps() TeamMemberAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountID sets the value of AccountID.
+func (s *TeamMember) SetAccountID(val string) {
+	s.AccountID = val
+}
+
+// SetAvatarURL sets the value of AvatarURL.
+func (s *TeamMember) SetAvatarURL(val OptString) {
+	s.AvatarURL = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *TeamMember) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *TeamMember) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *TeamMember) SetProvider(val OptString) {
+	s.Provider = val
+}
+
+// SetStatus sets the value of Status.
+func (s *TeamMember) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetUsername sets the value of Username.
+func (s *TeamMember) SetUsername(val OptString) {
+	s.Username = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *TeamMember) SetAdditionalProps(val TeamMemberAdditional) {
+	s.AdditionalProps = val
+}
+
+type TeamMemberAdditional map[string]jx.Raw
+
+func (s *TeamMemberAdditional) init() TeamMemberAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/TopologyCluster
 type TopologyCluster struct {
 	// DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirror-requests.
@@ -23318,6 +23732,56 @@ func (s *UpdateOrgMemberRoleInputBodyRole) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/UpdateTeamInputBody
+type UpdateTeamInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Lowercase letters, digits, and '-'. Unique in the organization. Omitted keeps the name.
+	Name            OptString `json:"name"`
+	AdditionalProps UpdateTeamInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *UpdateTeamInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetName returns the value of Name.
+func (s *UpdateTeamInputBody) GetName() OptString {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *UpdateTeamInputBody) GetAdditionalProps() UpdateTeamInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *UpdateTeamInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetName sets the value of Name.
+func (s *UpdateTeamInputBody) SetName(val OptString) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *UpdateTeamInputBody) SetAdditionalProps(val UpdateTeamInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type UpdateTeamInputBodyAdditional map[string]jx.Raw
+
+func (s *UpdateTeamInputBodyAdditional) init() UpdateTeamInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/ValidatePluginInstallRedirectOutputBody

@@ -233,8 +233,8 @@ func TestSABindingsAndUnbind(t *testing.T) {
 	require.Contains(t, out, "✓ Removed binding "+saTestBindingID+" from "+saTestID)
 	require.Contains(t, f.callList(), "DELETE "+saBase+"/"+saTestID+"/bindings/"+saTestBindingID)
 
-	// A lower-case ID must reach core upper-cased: core answers 204 for an
-	// unknown binding, so a miss would print a removal that never happened.
+	// A lower-case ID must reach core upper-cased: core matches the
+	// upper-case ID only.
 	lower := saBindingIDPrefix + strings.ToLower(strings.TrimPrefix(saTestBindingID, saBindingIDPrefix))
 	out, err = runSA(t, srv.URL, "unbind", saTestID, lower)
 	require.NoError(t, err)

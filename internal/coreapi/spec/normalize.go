@@ -262,6 +262,8 @@ var readModelEnumFields = map[string][]string{
 	// `repo mirror resync` prints the status verbatim; "queued" is the only
 	// value today and a second one must not fail the request that carried it.
 	"ResyncMirrorOutputBody": {"status"},
+	// `org team member list` prints the status.
+	"TeamMember": {"status"},
 }
 
 // readModelOptionalFields lists response read-model fields the spec marks

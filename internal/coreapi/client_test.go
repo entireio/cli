@@ -646,3 +646,29 @@ func TestListOrgMembers_UnknownEnumValuesPassThrough(t *testing.T) {
 		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", member.Status, "suspended")
 	}
 }
+
+func TestListTeamMembers_UnknownStatusPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"members":[{"account_id":"01H0000000000000000000000A","status":"suspended"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListTeamMembers(context.Background(), ListTeamMembersParams{OrgId: "01H000000000000000000000O1", TeamID: "01H000000000000000000000T1"})
+	if err != nil {
+		t.Fatalf("ListTeamMembers with an unknown status must not fail, got: %v", err)
+	}
+	if len(out.Members) != 1 || out.Members[0].Status != "suspended" {
+		t.Fatalf("Members = %+v, want one member with status %q", out.Members, "suspended")
+	}
+}

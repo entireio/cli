@@ -251,7 +251,19 @@ always runnable in every build.
   output lines and exit codes for scripts, is absent from `org grant --help`,
   completions and `agent-help`, and its own help and the `org grant` help name
   `invite send`. The repo has no alias helper; a compatibility spelling is a
-  hidden command, as `trail delete` is
+  hidden command, as `trail delete` is.
+  `team` (`list`/`create`/`rename`/`delete`, and `member`
+  `list`/`add`/`remove`) manages the org's teams. A team is addressed by name.
+  Core routes take the team ULID, so each command resolves the name through
+  the org's team list (`resolveOrgTeam`). A member is a `provider:handle`,
+  resolved to its account ULID. `member add` without a user opens a picker of
+  the org's active members who are not on the team (`teamMemberPicker`).
+  Without a terminal it is refused before any request. `member remove`
+  confirms on a terminal unless `--yes` is given; without a terminal it
+  removes unprompted, like a typed `grant remove`. `delete` confirms like
+  `org delete`. Core's 409 types (`team/name-in-use`,
+  `team/directory-managed`, `invitation/required`) become messages that say
+  what to do next
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -743,6 +755,14 @@ always runnable in every build.
 - The three `grant` subtrees (`org grant`, `project grant`, `repo grant`) are one
   generic builder plus three target descriptions in `grant.go`; a new target is
   a `grantTarget` value, not a fourth copy of the leaves.
+
+  **A project or repo grantee can be a team, spelled `team:<name>`.** The name
+  resolves in the org that owns the target (`owningOrg`), so an account-owned
+  target refuses a team before any write. A team grant is always direct and
+  sends no `allow_invitation`. `remove` revokes it through the typed-id route
+  with `granteeType=team`, and the remove picker offers direct team grants.
+  `grant list` shows a team row as `team:<name>`. `org grant` refuses a team
+  before any request (`grantTeam` is nil there).
 
   **`add` and `remove` take the grantee optionally**: omitted on a terminal,
   they open a multi-select (`grant_picker.go`). `add` then collects a role **per
