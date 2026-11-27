@@ -475,9 +475,13 @@ func TestOrgTeamMember_UnknownHandle(t *testing.T) {
 	srv := f.serve(t)
 
 	_, _, err := runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform", "github:ghost")
-	require.ErrorContains(t, err, `no identity for handle "github:ghost"`)
+	require.ErrorContains(t, err, `no identity for handle "github:ghost"; a team member is a handle like github:alice`)
 	_, _, err = runOrgCmd(t, srv, "team", "member", "remove", testOrgULID, "platform", "github:ghost", "--yes")
 	require.ErrorContains(t, err, `no identity for handle "github:ghost"`)
+	// A team member is never a team, so the hint does not offer team:<name>.
+	_, _, err = runOrgCmd(t, srv, "team", "member", "add", testOrgULID, "platform", "Team:platform")
+	require.ErrorContains(t, err, `no identity for handle "Team:platform"; a team member is a handle like`)
+	require.NotContains(t, err.Error(), "team:<name>")
 	assert.Empty(t, f.writes)
 }
 

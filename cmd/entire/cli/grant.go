@@ -242,13 +242,9 @@ func granteeNoun[Row any](t grantTarget[Row]) string {
 }
 
 // teamGranteeName reports whether a grantee is team:<name>, and the name. The
-// prefix matches in any case, and the name can be empty.
+// name can be empty, so the caller can refuse it as a team.
 func teamGranteeName(ref string) (string, bool) {
-	n := len(teamGranteePrefix)
-	if len(ref) < n || !strings.EqualFold(ref[:n], teamGranteePrefix) {
-		return "", false
-	}
-	return ref[n:], true
+	return strings.CutPrefix(ref, teamGranteePrefix)
 }
 
 // ensureGranteeAccepted checks a typed grantee before any request: a team
@@ -452,7 +448,7 @@ func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row
 		}
 		return outcome, nil
 	}
-	provider, providerUserID, err := resolveGranteeProvider(ctx, c, p.handle)
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, p.handle, t.grantTeam != nil)
 	if err != nil {
 		return grantOutcome{}, err
 	}
@@ -758,7 +754,7 @@ func revokeOne[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Clie
 			return t.revokeByID(ctx, c, id, granteeTypeTeam, teamID)
 		})
 	}
-	provider, providerUserID, err := resolveGranteeProvider(ctx, c, g.ref)
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, g.ref, t.grantTeam != nil)
 	if err != nil {
 		return err
 	}

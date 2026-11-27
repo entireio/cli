@@ -66,6 +66,16 @@ func TestGrantAdd_TeamGranteeRefusals(t *testing.T) {
 		require.ErrorContains(t, err, "run `entire org team list "+testOrgULID+"`")
 		assert.Empty(t, f.writes)
 	})
+	// The prefix is exact, so Team:platform is a handle on a provider called
+	// Team. The failed lookup lists the forms a grantee takes.
+	t.Run("wrong-case team prefix", func(t *testing.T) {
+		f := newTeamCore()
+		f.noIdentity = true
+		srv := f.serve(t)
+		_, _, err := runGrantCmd(t, newProjectGrantCmd, srv, "add", teamProjULID, "Team:platform", "--role", "reader")
+		require.ErrorContains(t, err, `no Team identity for handle "platform"; a grantee is team:<name> or a handle like github:alice`)
+		assert.Empty(t, f.writes)
+	})
 	t.Run("account-owned project", func(t *testing.T) {
 		f := newTeamCore()
 		f.ownerType = coreapi.ProjectOwnerTypeAccount
@@ -109,8 +119,6 @@ func TestOrgGrant_RefusesATeamGrantee(t *testing.T) {
 	for _, verb := range []string{"add", "remove"} {
 		_, _, err := runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "team:platform")
 		require.ErrorContains(t, err, "team:platform is a team; a team cannot hold org access")
-		_, _, err = runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "Team:platform")
-		require.ErrorContains(t, err, "Team:platform is a team; a team cannot hold org access")
 		_, _, err = runGrantCmd(t, newOrgGrantCmd, srv, verb, testOrgULID, "team:")
 		require.ErrorContains(t, err, "team: is a team; a team cannot hold org access")
 		_, _, err = runGrantCmd(t, newProjectGrantCmd, srv, verb, teamProjULID, "team:")
@@ -188,9 +196,8 @@ func TestTeamGranteeName(t *testing.T) {
 	name, ok := teamGranteeName("team:platform")
 	assert.True(t, ok)
 	assert.Equal(t, "platform", name)
-	name, ok = teamGranteeName("Team:platform")
-	assert.True(t, ok, "the prefix matches in any case")
-	assert.Equal(t, "platform", name)
+	_, ok = teamGranteeName("Team:platform")
+	assert.False(t, ok, "the prefix is exact: Team:platform is a handle")
 	name, ok = teamGranteeName("team:")
 	assert.True(t, ok, "an empty name is still a team, so its refusal can say so")
 	assert.Empty(t, name)
@@ -204,7 +211,7 @@ func TestTeamGranteeName(t *testing.T) {
 // as org grant gives.
 func TestEnsureMemberIsHandle_RefusesEveryTeamForm(t *testing.T) {
 	t.Parallel()
-	for _, ref := range []string{"team:platform", "Team:platform", "team:"} {
+	for _, ref := range []string{"team:platform", "team:"} {
 		require.ErrorContains(t, ensureMemberIsHandle(ref), ref+" is a team; a team member is a user like github:alice")
 	}
 }

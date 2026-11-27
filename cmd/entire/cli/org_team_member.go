@@ -141,7 +141,7 @@ func ensureMemberIsHandle(user string) error {
 func memberAccount(ctx context.Context, c *coreapi.Client, user string) (string, error) {
 	id, err := resolveAccountRef(ctx, c, user)
 	if isCoreNotFound(err) {
-		return "", fmt.Errorf("no identity for handle %q", user)
+		return "", fmt.Errorf("no identity for handle %q; %s", user, granteeFormsHint("team member", false))
 	}
 	return id, err
 }
