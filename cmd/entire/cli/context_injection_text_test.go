@@ -125,10 +125,22 @@ func TestEntireContextInjection_TrailsParagraphOnlyWhenEnabled(t *testing.T) {
 	if pointer < 0 || trail < 0 || commits < 0 || pointer >= trail || trail >= commits {
 		t.Errorf("want agent-help pointer, then trails, then commits:\n%s", with)
 	}
-	for _, want := range []string{"`entire trail update`", "`--project <forge>/<owner>`", "include its full URL", "findings (`entire trail finding`), never as trail comments"} {
+	for _, want := range []string{
+		"`entire trail update`", "`--project <forge>/<owner>`", "include its full URL",
+		"findings (`entire trail finding`), never as trail comments",
+		"the trail, not the pull request, is the record of the work", "existing trail or a new one, ask the user", "keep others' text",
+		"the change's full URL", "answer with the pull request only, without trail links",
+		"otherwise open one as usual with `gh pr create`.",
+		"name the trail, not only the pull request",
+	} {
 		if !strings.Contains(with, want) {
 			t.Errorf("trails paragraph missing %q:\n%s", want, with)
 		}
+	}
+	// Pushing and opening a pull request is how a branch gets its trail, so
+	// the paragraph does not steer agents to `entire trail create` instead.
+	if strings.Contains(with, "trail create") {
+		t.Errorf("trails paragraph should not route pushes through trail create:\n%s", with)
 	}
 }
 
@@ -145,5 +157,19 @@ func TestEntireContextInjection_TrailsOnly(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("trails-only injection must not repeat the base text (%q):\n%s", unwanted, got)
 		}
+	}
+}
+
+// An Entire-native repository has no pull requests, so its injection does not
+// send agents to `gh pr` and says to give the change's URL instead.
+func TestEntireContextInjection_NativeRepoHasNoPullRequests(t *testing.T) {
+	t.Parallel()
+	native := trailEnablementScope{Forge: nativeCloneForge, Owner: "acme", Repo: "app"}
+	got := entireContextInjection(native, true, true)
+	if strings.Contains(got, "gh pr") {
+		t.Errorf("native injection should not mention gh pr:\n%s", got)
+	}
+	if !strings.Contains(got, "has no pull requests: when the user asks for one, say so and give the change's URL") {
+		t.Errorf("native injection missing the no-pull-request line:\n%s", got)
 	}
 }

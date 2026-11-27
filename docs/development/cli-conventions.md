@@ -1024,11 +1024,18 @@ truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
 When trails are enabled, the first-turn injection introduces a trail as
-project-level intent across repositories and branches. It asks agents to inspect
-the current branch's trail, reuse intent where appropriate, and keep the trail's
-description current. Command details come from `entire agent-help trail`; the
-injection retains auto-detected repository context without listing unrelated
-checkpoint or setup workflows.
+project-level intent across repositories and branches. It asks agents to treat
+the trail, not the pull request, as the record of the work. Status reports
+carry the change's full URL, and pull request details are given only when the
+user asks for the pull request. Agents push and open pull requests as usual;
+that is how a branch gets its trail. They edit the trail's shared description
+keeping others' text. This workflow is stated up front because agents
+otherwise default to pull requests and rarely open agent-help at that moment.
+The per-command detail (shadow-PR marker, open findings, merge readiness)
+comes from `entire agent-help trail` and its `show`, `update`, `finding` and
+`merge` entries, which agents do open before acting. The injection retains
+auto-detected repository context without listing unrelated checkpoint or setup
+workflows.
 
 #### Where agent-facing text goes
 

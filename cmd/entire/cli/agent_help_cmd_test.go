@@ -830,6 +830,22 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 		}
 	}
 
+	// Linking a branch to another trail and merging are the user's calls.
+	drill = drillJSON(t, projectTrailsHelpTestRoot(), "trail")
+	want = map[string]string{"link": agentHelpUserOwnedSlug, "create": "task-driven", "merge": agentHelpUserOwnedSlug}
+	found := 0
+	for _, sub := range drill.Subcommands {
+		if w, ok := want[sub.Name]; ok {
+			found++
+			if sub.Audience != w {
+				t.Errorf("trail %s audience = %q, want %q", sub.Name, sub.Audience, w)
+			}
+		}
+	}
+	if found != len(want) {
+		t.Errorf("found %d of %d trail subcommands checked for audience", found, len(want))
+	}
+
 	drill = drillJSON(t, root, "org")
 	for _, sub := range drill.Subcommands {
 		if sub.Audience != "" {
@@ -1078,5 +1094,56 @@ func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
 	}
 	if got := agentHelpGuidanceFor(del); got != agentHelpGuidance["checkpoint delete"] {
 		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
+	}
+}
+
+// The project-trail workflow guidance (guidance evals, November 2026) reaches
+// the commands agents open before acting, and the findings entry keeps the
+// reply rules the shared entry carries.
+func TestAgentHelpProjectTrailGuidance_TrailWorkflow(t *testing.T) {
+	t.Parallel()
+
+	root := projectTrailsHelpTestRoot()
+	trail := agentHelpFindChild(root, "trail")
+	for _, tc := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"update", []string{"keep their text", shadowPRMarker, "give a\npull request URL only when the user asks for it"}},
+		{"finding", []string{"default filters hide: while any are open, the change is not ready", "ask the user whether to address it",
+			"Dismiss with -m only when\nthe finding is wrong", "Reply to a finding with `entire trail finding reply`"}},
+		{"", []string{"A bare number is a project trail number", "If trail N is not this branch's trail, do not\nchange it"}},
+		{"merge", []string{"--dry-run only reports", "\"looks\ngood\" is not that", "never pass --force or --yes on your own"}},
+		{"show", []string{"For questions about status, review, CI, or readiness, start here",
+			"with the change's full url", "Give pull\nrequest details only when the user asks for the pull request",
+			"find it with `gh pr view` rather than creating another"}},
+	} {
+		cmd := trail
+		if tc.cmd != "" {
+			cmd = agentHelpFindChild(trail, tc.cmd)
+		}
+		if cmd == nil {
+			t.Fatalf("trail %s not found", tc.cmd)
+		}
+		got := agentHelpGuidanceFor(cmd)
+		for _, want := range tc.want {
+			if !strings.Contains(got, want) {
+				t.Errorf("trail %s guidance missing %q:\n%s", tc.cmd, want, got)
+			}
+		}
+		if strings.Contains(cmd.Long, "--dry-run only reports") || strings.Contains(cmd.Long, "keep their text") {
+			t.Errorf("trail %s workflow guidance leaked into its cobra help", tc.cmd)
+		}
+	}
+
+	legacy := &cobra.Command{Use: "entire"}
+	legacy.AddCommand(newTrailCmdForMode(false))
+	finding := agentHelpFindChild(agentHelpFindChild(legacy, "trail"), "finding")
+	if finding == nil {
+		t.Fatal("legacy trail finding not found")
+	}
+	got := agentHelpGuidanceFor(finding)
+	if !strings.Contains(got, "Reply to a finding with `entire trail finding reply`") || strings.Contains(got, "default filters hide") {
+		t.Errorf("legacy trail finding should keep only the shared reply rules:\n%s", got)
 	}
 }
