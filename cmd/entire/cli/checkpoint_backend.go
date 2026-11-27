@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -116,7 +115,7 @@ func updateCheckpointBackend(ctx context.Context, w io.Writer, opts EnableOption
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
