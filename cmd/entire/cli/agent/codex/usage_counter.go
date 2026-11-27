@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
-	"os"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -131,7 +134,7 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 	if len(in.Subagents) == 0 {
 		return nil
 	}
-	key, cacheable := childFingerprint(in)
+	key, preferred, cacheable := childFingerprint(in, u.childRolloutRoots(in.Home))
 	if cacheable && key == u.ChildKey {
 		return maps.Clone(u.ChildTotals)
 	}
@@ -140,7 +143,10 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 		return nil
 	}
 	var children map[string]*agent.TokenUsage
-	for _, child := range extraction.Children {
+	for index, child := range extraction.Children {
+		if child.AgentID != "" && !readAsFingerprinted(child, preferred, index) {
+			cacheable = false
+		}
 		if child.AgentID == "" || child.TokenUsage == nil {
 			continue
 		}
@@ -149,29 +155,103 @@ func (u *usageCounter) children(ctx context.Context, in agent.CumulativeTokenInp
 		}
 		children[child.AgentID] = child.TokenUsage
 	}
-	if cacheable {
+	if cacheable && ctx.Err() == nil {
 		u.ChildKey, u.ChildTotals = key, maps.Clone(children)
+	} else {
+		u.ChildKey, u.ChildTotals = "", nil
 	}
 	return children
 }
 
-// childFingerprint identifies the inventory and each child file's size and
-// modification time. A child without a known path is found by scanning, and
-// one that is not a regular file is left to the inventory's own checks, so
-// neither inventory is cached.
-func childFingerprint(in agent.CumulativeTokenInput) (string, bool) {
+// readAsFingerprinted reports whether the child at index came back with a
+// total read from preferred[index], the path childFingerprint expects it to
+// be read from. A failed or canceled read, a child found by scanning, and a
+// read that fell back past a preferred file it couldn't read (a transient
+// failure leaves the file's size and time alone) are read again next time,
+// not cached.
+func readAsFingerprinted(child agent.SubagentAnalysis, preferred []string, index int) bool {
+	return child.TokenUsage != nil && index < len(preferred) && child.ResolvedPath == preferred[index]
+}
+
+// childRolloutRoots are the trusted roots a child's rollout can be read
+// from: the agent's own, and the stores beneath the session's recorded home
+// when that home is trusted. A child's paths are looked at only inside them.
+func (u *usageCounter) childRolloutRoots(home string) []string {
+	roots := slices.Clone(u.agent.rolloutRoots())
+	if home == "" {
+		return roots
+	}
+	trusted, err := agent.ResolveTrustedHome(u.agent, home)
+	if err != nil {
+		return roots
+	}
+	return append(roots, codexHomeLayout().StoresUnder(trusted)...)
+}
+
+// childFingerprint identifies the inventory and, for each child, every path
+// its rollout is read from (declared, then resolved, as loadDirectRollout
+// tries them): a regular file's size and modification time, or that it is
+// missing, so one appearing changes the key. preferred holds each child's
+// first path that is a regular file, the one its cached total must come
+// from. A child with neither path a regular file is found by scanning, and a
+// path that is something else, or outside roots, is left to the inventory's
+// own checks, so neither inventory is cached.
+func childFingerprint(in agent.CumulativeTokenInput, roots []string) (key string, preferred []string, ok bool) {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n", in.Home)
-	for _, ref := range in.Subagents {
-		path := ref.ResolvedTranscriptPath
-		if path == "" {
-			path = ref.DeclaredTranscriptPath
+	preferred = make([]string, len(in.Subagents))
+	for index, ref := range in.Subagents {
+		fmt.Fprintf(h, "%s", ref.AgentID)
+		for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
+			regular, pathOK := fingerprintPath(h, roots, path)
+			if !pathOK {
+				return "", nil, false
+			}
+			if regular && preferred[index] == "" {
+				preferred[index] = path
+			}
 		}
-		info, err := os.Lstat(path)
-		if path == "" || err != nil || !info.Mode().IsRegular() {
-			return "", false
+		if preferred[index] == "" {
+			return "", nil, false
 		}
-		fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\n", ref.AgentID, path, info.Size(), info.ModTime().UnixNano())
+		fmt.Fprintln(h)
 	}
-	return hex.EncodeToString(h.Sum(nil)[:12]), true
+	return hex.EncodeToString(h.Sum(nil)[:12]), preferred, true
+}
+
+// fingerprintPath writes path's part of a child fingerprint to w: its size
+// and modification time when it is a regular file (regular), a marker when
+// it is empty or missing. ok is false for anything else, including a path
+// outside roots.
+func fingerprintPath(w io.Writer, roots []string, path string) (regular, ok bool) {
+	if path == "" {
+		fmt.Fprint(w, "\x00")
+		return false, true
+	}
+	info, err := lstatInRoots(roots, path)
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		fmt.Fprintf(w, "\x00%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
+		return true, true
+	case errors.Is(err, fs.ErrNotExist):
+		fmt.Fprintf(w, "\x00%s\x00missing", path)
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// lstatInRoots is Lstat of path through the first of roots that holds it, as
+// openScopedRollout opens one. A path outside every root is not looked at.
+func lstatInRoots(roots []string, path string) (fs.FileInfo, error) {
+	root, rel, err := openRolloutRoot(roots, path)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return nil, fmt.Errorf("lstat rollout: %w", err)
+	}
+	return info, nil
 }
