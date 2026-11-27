@@ -2,8 +2,19 @@
 
 package procutil
 
-import "os/exec"
+import (
+	"os/exec"
 
-// killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
-// Object. The WaitDelay backstop still bounds the wait on a hung subprocess.
-func killProcessGroupOnCancel(_ *exec.Cmd) {}
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+)
+
+// killProcessGroupOnCancel terminates the process tree on ctx-cancel, so
+// grandchildren that inherited the output pipe die too.
+func killProcessGroupOnCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return execx.KillProcessTree(cmd.Process.Pid)
+	}
+}
