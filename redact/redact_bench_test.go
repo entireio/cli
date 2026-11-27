@@ -199,7 +199,7 @@ func roleForBenchmarkLine(i int) string {
 
 // BenchmarkRedactJSONLBytes_PII measures the PII layer on a real transcript,
 // with and without the ip category, which scans every colon run for IPv6
-// candidates.
+// candidates, and with every category, including the address patterns.
 func BenchmarkRedactJSONLBytes_PII(b *testing.B) {
 	data := readBenchmarkFixture(b, "../transcript/testdata/claude_full2.jsonl")
 	for _, tc := range []struct {
@@ -208,6 +208,7 @@ func BenchmarkRedactJSONLBytes_PII(b *testing.B) {
 	}{
 		{"email-phone", map[PIICategory]bool{PIIEmail: true, PIIPhone: true}},
 		{"email-phone-ip", map[PIICategory]bool{PIIEmail: true, PIIPhone: true, PIIIP: true}},
+		{"all", map[PIICategory]bool{PIIEmail: true, PIIPhone: true, PIIIP: true, PIIAddress: true}},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			ConfigurePII(PIIConfig{Enabled: true, Categories: tc.categories})
