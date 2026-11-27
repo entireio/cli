@@ -93,8 +93,9 @@ func TestMain(m *testing.M) {
 
 	gitenv.IsolateMain()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	err = deviceLogin(ctx, stateDir, username, password, totpSecret)
+	// Room for every attempt and the waits between them.
+	ctx, cancel := context.WithTimeout(context.Background(), loginAttempts*loginAttemptTimeout+(loginAttempts-1)*(loginRetryDelay+retryLogoutTimeout))
+	err = loginWithRetry(ctx, stateDir, runDir, username, password, totpSecret)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "control-plane e2e: login failed: %v\n", err)
