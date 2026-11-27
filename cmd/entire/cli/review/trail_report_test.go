@@ -49,7 +49,9 @@ func postedTrailReport(t *testing.T, summary reviewtypes.RunSummary, aggregate s
 		got = report
 		return nil
 	}}
-	maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, summary, aggregate)
+	if err := maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", TrailScope{}, "", summary, aggregate); err != nil {
+		t.Fatalf("maybePostReviewToTrail: %v", err)
+	}
 	return got, called, out.String()
 }
 

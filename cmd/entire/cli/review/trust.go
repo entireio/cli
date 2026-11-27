@@ -348,9 +348,12 @@ type trustGate struct {
 	Inventory   TrustInventory
 	TrustTarget string
 	// Command is the user's invocation minus gate flags, used in hints.
-	Command     string
-	Interactive bool
-	AgentCaller string
+	Command string
+	// InspectCommand is Command for a --show-config hint, without the flags
+	// --show-config cannot take; empty means Command.
+	InspectCommand string
+	Interactive    bool
+	AgentCaller    string
 	// Confirm asks the human at the terminal; tests replace it.
 	Confirm func(ctx context.Context, w io.Writer, title, description string) (bool, error)
 }
@@ -375,7 +378,7 @@ func (g trustGate) run(ctx context.Context, errOut io.Writer) error {
 		if !trustTargetMatches(g.TrustTarget, g.Subject.HeadSHA) {
 			fmt.Fprintf(errOut, "Not run: %s is at %s, not the approved %s.\n",
 				sanitizeDisplay(g.Subject.Label), shortSHA(g.Subject.HeadSHA), g.TrustTarget)
-			fmt.Fprintf(errOut, "Check again: %s --show-config\n", g.Command)
+			fmt.Fprintf(errOut, "Check again: %s --show-config\n", g.inspectCommand())
 			if g.AgentCaller != "" || !g.Interactive {
 				fmt.Fprintln(errOut, "Stop and show the user this message.")
 			}
@@ -398,10 +401,10 @@ func (g trustGate) run(ctx context.Context, errOut io.Writer) error {
 	// Agents can hold a PTY, so they never get the confirm. No terminal gets the
 	// same text, so an undetected agent isn't invited to approve itself.
 	if g.AgentCaller != "" || !g.Interactive || g.Confirm == nil {
-		printTrustRefusal(errOut, what, g.Inventory, g.Command, g.Subject.HeadSHA)
+		printTrustRefusal(errOut, what, g.Inventory, g.Command, g.inspectCommand(), g.Subject.HeadSHA)
 		return errTrustRefused
 	}
-	title, description := trustConfirmText(g.Subject, g.Inventory, g.Command)
+	title, description := trustConfirmText(g.Subject, g.Inventory, g.inspectCommand())
 	run, err := g.Confirm(ctx, errOut, title, description)
 	if err != nil && !errors.Is(err, huh.ErrUserAborted) && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("confirm review: %w", err)
@@ -413,16 +416,26 @@ func (g trustGate) run(ctx context.Context, errOut io.Writer) error {
 	return nil
 }
 
-func printTrustRefusal(errOut io.Writer, what string, inv TrustInventory, command, head string) {
+// inspectCommand is the command a --show-config hint extends.
+func (g trustGate) inspectCommand() string {
+	if g.InspectCommand != "" {
+		return g.InspectCommand
+	}
+	return g.Command
+}
+
+// printTrustRefusal prints the refusal: inspect is the command the
+// --show-config hints extend, command the one the approval re-runs.
+func printTrustRefusal(errOut io.Writer, what string, inv TrustInventory, command, inspect, head string) {
 	isolated := inv.Isolated
 	fmt.Fprintln(errOut, "Not run: this review needs the user's approval.")
 	switch {
 	case isolated && what != trustWhatNothing:
-		fmt.Fprintf(errOut, "The code is by someone else; the review agent uses the profile's config but would still load the branch's skills and commands%s (%s --show-config lists them).\n", inv.piSettingsNote(", and Pi's settings"), command)
+		fmt.Fprintf(errOut, "The code is by someone else; the review agent uses the profile's config but would still load the branch's skills and commands%s (%s --show-config lists them).\n", inv.piSettingsNote(", and Pi's settings"), inspect)
 	case what == trustWhatNothing:
-		fmt.Fprintf(errOut, "The code is by someone else (%s --show-config shows what the review reads).\n", command)
+		fmt.Fprintf(errOut, "The code is by someone else (%s --show-config shows what the review reads).\n", inspect)
 	default:
-		fmt.Fprintf(errOut, "The code is by someone else, and the review agent would load its hooks, MCP servers and settings, running %s on this machine (%s --show-config lists them).\n", what, command)
+		fmt.Fprintf(errOut, "The code is by someone else, and the review agent would load its hooks, MCP servers and settings, running %s on this machine (%s --show-config lists them).\n", what, inspect)
 	}
 	fmt.Fprintln(errOut, "Stop and show the user this message. Do not approve on their behalf.")
 	fmt.Fprintln(errOut, "Only after the user explicitly approves, run:")

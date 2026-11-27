@@ -36,6 +36,8 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",
 		{source: "gitdir/gitdir.go:CommonDirForWorktree", flag: "--git-common-dir"}:                     "session removes the explicit-worktree resolver in the session split",
+		{source: "gitrepo/hidden_changes.go:HiddenWorktreeChanges", flag: "--absolute-git-dir"}:         "the hidden-change search records the repository git status reads, the caller's selectors included, so a submodule path leading back to it ends the search",
+		{source: "gitrepo/hidden_changes.go:submoduleHiddenChanges", flag: "--absolute-git-dir"}:        "the hidden-change search asks git which repository a submodule path holds, so one already searched ends the search",
 		{source: "paths/paths.go:resolveWorktreeRoot", flag: "--show-toplevel"}:                         "worktree-root discovery remains separate from explicit-root metadata resolution",
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--git-common-dir"}:                    "adoption validates an arbitrary source repository in the session split",
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--show-toplevel"}:                     "adoption validates an arbitrary source repository in the session split",

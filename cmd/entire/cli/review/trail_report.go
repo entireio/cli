@@ -46,6 +46,8 @@ type TrailReport struct {
 	Prose    string
 	// Scope is what the findings may anchor to; see TrailScope.
 	Scope TrailScope
+	// HeadSHA is the commit the review ran on.
+	HeadSHA string
 }
 
 // trailReportFor decides what a trail-mode run posts. It returns post=false
@@ -79,6 +81,134 @@ func trailReportFor(summary reviewtypes.RunSummary, aggregateOutput string) (Tra
 	}
 	report := TrailReport{Comments: merged, Prose: combinedReviewNarratives(unstructured)}
 	return report, len(merged) > 0 || len(unstructured) > 0
+}
+
+// trailReportOutcome is what a finished run's report holds for a trail post.
+type trailReportOutcome int
+
+const (
+	// reportToPost holds findings or prose to post.
+	reportToPost trailReportOutcome = iota
+	// reportNothingToReport is a review that found nothing to report.
+	reportNothingToReport
+	// reportNoOutput is a review whose reviewers and judge left no output.
+	reportNoOutput
+	// reportUnreadable is output in which no report could be read.
+	reportUnreadable
+)
+
+// readTrailReport is trailReportFor with the reason a report posts
+// nothing: there is nothing to report, the review left no output, or none
+// of its output could be read.
+func readTrailReport(summary reviewtypes.RunSummary, aggregateOutput string) (TrailReport, trailReportOutcome) {
+	report, post := trailReportFor(summary, aggregateOutput)
+	switch {
+	case !post && strings.TrimSpace(aggregateOutput) == "" && len(usableAgentRuns(summary)) == 0:
+		return report, reportNoOutput
+	case !post:
+		return report, reportNothingToReport
+	case len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "":
+		return report, reportUnreadable
+	}
+	return report, reportToPost
+}
+
+// readLocalReport is readTrailReport for a run that did not ask for the
+// trail JSON line, such as a local profile's. Without the line, a trailing
+// JSON block is the reviewer's own text, so the report is prose: the
+// judge's verdict when one ran, otherwise each reviewer's final report
+// (finalReportText). Nothing says such a review is clean, so a report that
+// is a clean verdict (cleanVerdict) is nothing to report, and one
+// reviewer's clean verdict is left out of the others' findings.
+func readLocalReport(summary reviewtypes.RunSummary, aggregateOutput string) (TrailReport, trailReportOutcome) {
+	if verdict := strings.TrimSpace(aggregateOutput); verdict != "" {
+		if cleanVerdict(verdict) {
+			return TrailReport{}, reportNothingToReport
+		}
+		return TrailReport{Prose: verdict}, reportToPost
+	}
+	runs := usableAgentRuns(summary)
+	if len(runs) == 0 {
+		return TrailReport{}, reportNoOutput
+	}
+	var b strings.Builder
+	for _, run := range runs {
+		text := finalReportText(run.Buffer)
+		if cleanVerdict(text) {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("## " + run.Name + "\n\n" + text)
+	}
+	if b.Len() == 0 {
+		return TrailReport{}, reportNothingToReport
+	}
+	return TrailReport{Prose: b.String()}, reportToPost
+}
+
+// finalReportText is a reviewer's report in a run without the trail JSON
+// line. The output format asks a report to open with a verdict line, so
+// when the text after the last tool call does, that text is the report, and
+// exploration narration such as "I'll check:\n- retry.go" written before it
+// is left out. Otherwise, or when the earlier text has a severity marker or
+// a feedback verdict, which narration does not, all of the text is the
+// report, so findings written before a last tool call are kept.
+func finalReportText(buf []reviewtypes.Event) string {
+	for i := len(buf) - 1; i >= 0; i-- {
+		if !isTextBoundary(buf, i) {
+			continue
+		}
+		final := joinAssistantText(buf[i+1:])
+		if final == "" {
+			continue
+		}
+		if opensWithVerdict(final) && !reportsFindings(joinAssistantText(buf[:i]), false) {
+			return final
+		}
+		break
+	}
+	return joinAssistantText(buf)
+}
+
+// opensWithVerdict reports whether report's first line is a verdict the
+// output format asks for: approve, approve with nits, or request changes.
+func opensWithVerdict(report string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(report), "\n")
+	verdict := verdictText(first)
+	return strings.HasPrefix(verdict, "approve") || strings.HasPrefix(verdict, "request changes") ||
+		strings.HasPrefix(verdict, "request_changes")
+}
+
+// cleanVerdict reports whether a report without the trail JSON line says
+// the change is clean: it is only an approve verdict line, which is what the
+// output format asks a clean review to write, and the verdict is not
+// "approve with nits" or another one that says there is feedback. Anything
+// else, such as an approval followed by a finding written as a plain
+// paragraph, is a finding.
+func cleanVerdict(report string) bool {
+	first, rest, _ := strings.Cut(strings.TrimSpace(report), "\n")
+	if strings.TrimSpace(rest) != "" {
+		return false
+	}
+	verdict := verdictText(first)
+	return strings.HasPrefix(verdict, "approve") && !proseReportsFindings(verdict)
+}
+
+// verdictEmphasis removes the Markdown emphasis a verdict line may carry
+// anywhere in it, as in "Verdict: **approve** with nits".
+var verdictEmphasis = strings.NewReplacer("**", "", "__", "", "*", "", "`", "")
+
+// verdictText is line in lower case without Markdown emphasis, a heading or
+// quote marker, or a "Verdict:" label.
+func verdictText(line string) string {
+	text := strings.ToLower(verdictEmphasis.Replace(line))
+	text = strings.TrimLeft(text, "#>_ ")
+	if after, found := strings.CutPrefix(text, "verdict"); found {
+		text = strings.TrimLeft(after, ":-—– ")
+	}
+	return text
 }
 
 // contractCoversProse reports whether a valid contract can be posted in place

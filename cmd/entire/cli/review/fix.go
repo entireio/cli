@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +21,15 @@ import (
 
 const reviewCommandBinary = "entire review"
 
-func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, silentErr func(error) error) error {
+// reviewFindingsRequest is what `entire review --findings` was asked for.
+type reviewFindingsRequest struct {
+	Handle string
+	// JSON prints the handle's findings as JSON (--json).
+	JSON bool
+}
+
+func runReviewFindings(ctx context.Context, cmd *cobra.Command, req reviewFindingsRequest, deps Deps) error {
+	silentErr := deps.NewSilentError
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
@@ -31,7 +40,7 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, s
 	if err != nil {
 		return err
 	}
-	handle = strings.TrimSpace(handle)
+	handle := strings.TrimSpace(req.Handle)
 	if handle != "" {
 		manifest, findErr := findReviewManifestByHandle(manifests, handle)
 		if findErr != nil {
@@ -39,6 +48,9 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, s
 			tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "%s\n", findErr.Error())
 			printReviewFindingsHandles(cmd.ErrOrStderr(), manifests)
 			return wrapReviewSilentError(silentErr, findErr)
+		}
+		if req.JSON {
+			return printReviewFindingsJSON(cmd, manifest, manifests, deps)
 		}
 		printReviewManifestDetail(cmd.OutOrStdout(), manifest)
 		return nil
@@ -57,6 +69,80 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command, handle string, s
 	}
 	printReviewFindingsList(cmd.OutOrStdout(), manifests)
 	return nil
+}
+
+// Finding is one finding as `entire review --findings <handle> --json`
+// prints it. Each key is named after the `entire trail finding add` flag
+// that posts it; a location key is left out when the finding has none.
+type Finding struct {
+	Severity   string   `json:"severity,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	File       string   `json:"file,omitempty"`
+	Line       int      `json:"line,omitempty"`
+	EndLine    int      `json:"end_line,omitempty"`
+	Body       string   `json:"body"`
+}
+
+// reviewFindingsJSON is what `entire review --findings <handle> --json`
+// prints: the saved run and its findings.
+type reviewFindingsJSON struct {
+	Handle    string    `json:"handle"`
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	// HeadSHA is the commit the review ran on.
+	HeadSHA  string    `json:"head_sha,omitempty"`
+	Findings []Finding `json:"findings"`
+}
+
+// printReviewFindingsJSON prints a saved run's findings as JSON: those a
+// trail post of the run would send. A run that left no report, or was saved
+// before its report was kept, prints nothing to stdout and fails, so a
+// script never reads it as a review with nothing to report.
+func printReviewFindingsJSON(cmd *cobra.Command, manifest LocalReviewManifest, manifests []LocalReviewManifest, deps Deps) error {
+	findings, err := savedReviewFindings(manifest, deps.TrailFindings)
+	if err != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return wrapReviewSilentError(deps.NewSilentError, err)
+	}
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(reviewFindingsJSON{
+		Handle:    reviewManifestUniqueHandle(manifest, manifests),
+		CreatedAt: manifest.CreatedAt,
+		HeadSHA:   manifest.StartingSHA,
+		Findings:  findings,
+	}); err != nil {
+		return fmt.Errorf("print review findings: %w", err)
+	}
+	return nil
+}
+
+// savedReviewFindings splits a saved run's report into findings with split.
+func savedReviewFindings(manifest LocalReviewManifest, split func(TrailReport) []Finding) ([]Finding, error) {
+	report := manifest.Report
+	switch {
+	case report == nil:
+		return nil, errors.New("these review findings were saved before --json could read them; run the review again")
+	case report.Unreadable != "":
+		return nil, fmt.Errorf("no findings to print: %s", report.Unreadable)
+	case split == nil:
+		return nil, errors.New("--findings --json is not available here")
+	}
+	findings := split(TrailReport{Comments: report.Comments, Prose: report.Prose})
+	if findings == nil {
+		findings = []Finding{}
+	}
+	return findings, nil
+}
+
+// reviewManifestUniqueHandle is the handle the review's completion footer
+// prints for manifest, or, when another saved run shares it (two runs that
+// started in the same second), one that selects only this run.
+func reviewManifestUniqueHandle(manifest LocalReviewManifest, manifests []LocalReviewManifest) string {
+	if handle := reviewManifestCompletionHandle(manifest); reviewManifestHandleCounts(manifests)[handle] == 1 {
+		return handle
+	}
+	return reviewManifestViewHandle(manifest, manifests)
 }
 
 func findReviewManifestByHandle(manifests []LocalReviewManifest, handle string) (LocalReviewManifest, error) {
