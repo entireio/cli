@@ -37,6 +37,7 @@ var configCheckLedger = map[string]configCheckEntry{
 	"entire __send_analytics":           {configCheckSkip, false, "detached; nobody sees its failure"},
 	"entire __sweep_sessions":           {configCheckSkip, false, "detached from session-start; nobody sees its failure"},
 	"entire __refresh_trail_enablement": {configCheckSkip, false, "detached; fails before the logger starts"},
+	"entire __refresh_live_sessions":    {configCheckSkip, false, "detached from the agent hooks; nobody sees its failure"},
 	"entire curl-bash-post-install":     {configCheckSkip, false, "install.sh runs it under set -e; a re-install must not report failure"},
 	"entire completion":                 {configCheckSkip, true, "users eval it from a shell rc; never touches the token store"},
 	"entire help":                       {configCheckSkip, false, "prints help; never touches the token store"},

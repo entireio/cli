@@ -109,9 +109,18 @@ type PluginManifest struct {
 	Requires []PluginRequirement `yaml:"requires,omitempty"`
 	// Description is the one-line summary from the plugin's entire-plugin.yml
 	// at the installed tag. Root help lists a plugin only when this is set (see
-	// pluginHelpEntries), so it is recorded here to keep `entire --help`
-	// offline and free of plugin execution.
+	// pluginHelpEntries), and `entire agent-help` uses it to say what an
+	// installed plugin is for; it is recorded here so both stay offline and
+	// free of plugin execution.
 	Description string `yaml:"description,omitempty"`
+	// AgentHelp records entire-plugin.yml's agent_help at the installed tag:
+	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
+	// may point agents at it.
+	AgentHelp bool `yaml:"agent_help,omitempty"`
+	// MetadataBackfilledTag is the tag whose entire-plugin.yml an upgrade
+	// with nothing to install last read to fill in Description and AgentHelp
+	// (backfillManifestDescription), so it reads a tag's metadata once.
+	MetadataBackfilledTag string `yaml:"metadata_backfilled_tag,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between
@@ -148,8 +157,14 @@ type PluginMetadata struct {
 	// basename (entire-run → run).
 	Name string `yaml:"name,omitempty"`
 	// Description is a one-line summary shown by info/search, and in root
-	// help once installed (copied into PluginManifest.Description).
+	// help and by `entire agent-help`, once installed (copied into
+	// PluginManifest.Description).
 	Description string `yaml:"description,omitempty"`
+	// AgentHelp declares that the plugin implements the `agent-help` verb
+	// (see docs/architecture/external-commands.md), so `entire agent-help`
+	// points agents at `entire agent-help <name>`. Opt-in: that command runs
+	// the plugin, so it is only advertised for plugins that say they answer it.
+	AgentHelp bool `yaml:"agent_help,omitempty"`
 	// DownloadURL overrides the per-forge release-asset URL convention.
 	// Template placeholders: {name} {tag} {version} {os} {arch} {asset}.
 	// When {asset} is present, candidate asset filenames are substituted;

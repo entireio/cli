@@ -356,6 +356,12 @@ type State struct {
 	// goes out on the first normal turn whether or not trails are decided yet.
 	ContextInjectionBaseDone bool `json:"context_injection_base_done,omitempty"`
 
+	// LiveSessionsFingerprint identifies the teammates' live sessions (and
+	// the files they were editing) last injected into this session's context,
+	// so the block is added only on a turn where that set changed. Cleared
+	// when a fresh cache shows none are left.
+	LiveSessionsFingerprint string `json:"live_sessions_fingerprint,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 

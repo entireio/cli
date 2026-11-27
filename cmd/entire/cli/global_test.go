@@ -6,6 +6,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -58,6 +59,9 @@ func TestMain(m *testing.M) {
 	// name that matches a real install would run a real `git ls-remote`.
 	// Tests that need a populated plugin dir override this with withPluginDir.
 	os.Setenv("ENTIRE_PLUGIN_DIR", filepath.Join(isolationDir, "plugins"))
+	// The live sessions refresh runs an entire-stream it finds on PATH, as
+	// the dispatcher would; tests must never run the developer's.
+	liveSessionsPathLookup = func(string) (string, error) { return "", exec.ErrNotFound }
 	// Cursor import discovery reads ~/.cursor/chats; keep it off the
 	// developer's real sessions.
 	os.Setenv("ENTIRE_TEST_CURSOR_CHATS_DIR", filepath.Join(isolationDir, "cursor-chats"))

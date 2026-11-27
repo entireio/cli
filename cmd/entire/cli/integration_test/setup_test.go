@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,10 @@ func TestMain(m *testing.M) {
 		// security allowlist should not be widened for test convenience.
 		// testing.Testing() is false in the spawned binary, so it is told here.
 		"ENTIRE_TEST_ALLOW_FILE_REMOTES": "1",
+		// The managed plugin tree: the binary under test runs plugins from
+		// it unprompted (the live sessions refresh runs entire-stream at
+		// SessionStart), and must never run the developer's.
+		"ENTIRE_PLUGIN_DIR": filepath.Join(tmpDir, "entire-plugins"),
 	}
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {
@@ -68,6 +73,14 @@ func TestMain(m *testing.M) {
 			os.RemoveAll(tmpDir)
 			os.Exit(1)
 		}
+	}
+
+	// For the same reason, no entire-stream from the developer's PATH: the
+	// dispatcher (and so the live sessions refresh) would find and run it.
+	if err := os.Setenv("PATH", pathWithoutStreamPlugin(os.Getenv("PATH"))); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to set PATH: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
 	}
 
 	// Unset the agents' caller-session variables, for the same reason as the
@@ -169,4 +182,19 @@ func TestMain(m *testing.M) {
 	// Cleanup
 	os.RemoveAll(tmpDir)
 	os.Exit(code)
+}
+
+// pathWithoutStreamPlugin is path without the directories that hold an
+// entire-stream.
+func pathWithoutStreamPlugin(path string) string {
+	var keep []string
+	for _, dir := range filepath.SplitList(path) {
+		if dir != "" {
+			if _, err := os.Stat(filepath.Join(dir, "entire-stream")); err == nil {
+				continue
+			}
+		}
+		keep = append(keep, dir)
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
 }

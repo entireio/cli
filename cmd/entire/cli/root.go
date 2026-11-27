@@ -235,6 +235,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromConfigCheck(newSendAnalyticsCmd()))
 	cmd.AddCommand(exemptFromConfigCheck(newCurlBashPostInstallCmd()))
 	cmd.AddCommand(exemptFromConfigCheck(newRefreshTrailEnablementCmd()))
+	cmd.AddCommand(exemptFromConfigCheck(newRefreshLiveSessionsCmd()))
 	cmd.AddCommand(exemptFromConfigCheck(newSweepSessionsCmd()))
 
 	cmd.SetVersionTemplate(versionString())

@@ -310,6 +310,39 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = pluginRunEnv(ctx, pluginName)
+
+	if err := runTrackedPlugin(cmd); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
+			// not an exit status, so the caller re-raises the signal rather
+			// than letting os.Exit truncate it to 255. Which signal comes
+			// from the wait status, because it need not be one this process
+			// received — see pluginTerminatingSignal.
+			return exitErr.ExitCode(), pluginTerminatingSignal(exitErr.ProcessState)
+		}
+		// The plugin ran and exited successfully after we cancelled it (it
+		// handled the Ctrl-C itself). exec then reports the cancellation
+		// instead of the exit — context.Canceled, or the Cancel func's own
+		// error — but the plugin's outcome is what the user gets: a TUI that
+		// quits cleanly on Ctrl-C exits 0, not "Failed to run plugin".
+		if cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil {
+			return 0, nil
+		}
+		// Prefix with the plugin name so users can tell parent vs child
+		// errors apart in mixed stderr.
+		fmt.Fprintf(os.Stderr, "Failed to run plugin %s: %v\n", filepath.Base(binPath), err)
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// pluginRunEnv is the environment a plugin runs with: the filtered parent
+// environment (pluginEnv) plus the CLI version, the repo root and the
+// plugin's data dir. Shared by the dispatcher and the CLI's own runs of a
+// plugin (the live sessions refresh), so a plugin sees one contract.
+func pluginRunEnv(ctx context.Context, pluginName string) []string {
 	extras := []string{"ENTIRE_CLI_VERSION=" + versioninfo.Version}
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
 		extras = append(extras, "ENTIRE_REPO_ROOT="+repoRoot)
@@ -341,32 +374,7 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (
 			slog.String("plugin", pluginName),
 			slog.String("error", err.Error()))
 	}
-	cmd.Env = pluginEnv(parentEnv, extras...)
-
-	if err := runTrackedPlugin(cmd); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
-			// not an exit status, so the caller re-raises the signal rather
-			// than letting os.Exit truncate it to 255. Which signal comes
-			// from the wait status, because it need not be one this process
-			// received — see pluginTerminatingSignal.
-			return exitErr.ExitCode(), pluginTerminatingSignal(exitErr.ProcessState)
-		}
-		// The plugin ran and exited successfully after we cancelled it (it
-		// handled the Ctrl-C itself). exec then reports the cancellation
-		// instead of the exit — context.Canceled, or the Cancel func's own
-		// error — but the plugin's outcome is what the user gets: a TUI that
-		// quits cleanly on Ctrl-C exits 0, not "Failed to run plugin".
-		if cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil {
-			return 0, nil
-		}
-		// Prefix with the plugin name so users can tell parent vs child
-		// errors apart in mixed stderr.
-		fmt.Fprintf(os.Stderr, "Failed to run plugin %s: %v\n", filepath.Base(binPath), err)
-		return 1, nil
-	}
-	return 0, nil
+	return pluginEnv(parentEnv, extras...)
 }
 
 // runningPlugins holds the plugin processes this CLI is waiting on, each with

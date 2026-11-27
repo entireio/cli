@@ -1023,6 +1023,20 @@ current flags; `--json` emits structured output. It is the single source of
 truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
+The bare listing also names the installed plugins it could hand off to (at most
+50, each name once), each with the one-line description recorded in its install
+manifest. It points at `entire agent-help <plugin>` only for plugins whose
+`entire-plugin.yml` declares `agent_help: true`, since implementing it is
+opt-in and the command runs the plugin, under a heading that asks the agent to
+read the ones that may bear on its task, and names them once more before the
+commands (an agent may read only the start); the others are listed apart as the
+user's to run. `--json` carries them as `plugins` (`help` only when declared),
+with `plugins_total` and `plugins_truncated`. The MCP `agent_help` tool leaves
+them out, since it can't hand off to a plugin. It reads only the managed tree:
+it never runs a plugin, reads the index, or touches the network. The rules
+(names, runnability, descriptions, local installs) are in
+[external commands](../architecture/external-commands.md).
+
 When trails are enabled, the first-turn injection introduces a trail as
 project-level intent across repositories and branches. It asks agents to inspect
 the current branch's trail, reuse intent where appropriate, and keep the trail's

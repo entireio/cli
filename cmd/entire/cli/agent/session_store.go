@@ -428,6 +428,18 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
 }
 
+// Open opens name in the store for reading, refusing a symbolic link in any
+// component and anything but a regular file. The CALLER closes it. For a
+// caller that reads only part of a file, such as its first line.
+func (s *SessionStore) Open(name string) (*os.File, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return osroot.OpenNoFollow(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+}
+
 // WriteFile writes name in the store, creating parent directories. Session
 // layouts nest (Copilot `<id>/events.jsonl`, Cursor `<id>/<id>.jsonl`, Codex
 // `YYYY/MM/DD/`), so the parents are made here rather than at each call site.

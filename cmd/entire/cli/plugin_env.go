@@ -51,6 +51,17 @@ var pluginEnvAllowed = map[string]struct{}{
 
 	// Documented in CLAUDE.md as the toggle for accessibility mode.
 	"ACCESSIBLE": {},
+
+	// Codex exports its session/thread ID to the commands it runs.
+	// entire-stream's per-edit check (entireio/entire-stream#70) is to use
+	// them to recognise the agent's own live session, because Codex 0.172
+	// runs commands from a shared background server that lacks the ENTIRE_*
+	// variables. CODEX_HOME is where Codex keeps its rollouts, which that
+	// check reads to tie a Codex sub-agent's thread to its parent session;
+	// before this, `entire stream codex` already lost a custom CODEX_HOME
+	// through this filter. IDs and a path, no credentials; the rest of the
+	// CODEX_* namespace (CODEX_API_KEY among it) stays filtered.
+	"CODEX_THREAD_ID": {}, "CODEX_SESSION_ID": {}, "CODEX_HOME": {},
 }
 
 // pluginEnvPrefixes are namespaces we either own (ENTIRE_*) or that are
