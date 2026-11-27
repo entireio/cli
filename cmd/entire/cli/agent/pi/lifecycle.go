@@ -193,8 +193,10 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			Type:       agent.TurnEnd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
-			Model:      extractModelFromPiSessionFile(sessionRef),
-			Timestamp:  now,
+			// Pi's write and edit tools name files relative to it.
+			CWD:       payload.Cwd,
+			Model:     extractModelFromPiSessionFile(sessionRef),
+			Timestamp: now,
 		}, nil
 
 	case HookNameSessionShutdown:

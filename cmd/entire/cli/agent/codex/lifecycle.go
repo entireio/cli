@@ -180,6 +180,7 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		ProvisionalSubagentStop: true,
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
+		CWD:                     raw.CWD,
 		Model:                   raw.Model,
 		Timestamp:               time.Now(),
 	}, nil
@@ -290,8 +291,10 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		// apply_patch names files relative to it.
+		CWD:       raw.CWD,
+		Model:     raw.Model,
+		Timestamp: time.Now(),
 	}, nil
 }
 
