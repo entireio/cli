@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -804,6 +805,29 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 	if !strings.Contains(output, "Found 3 items to clean") {
 		t.Errorf("Expected 'Found 3 items to clean', got: %s", output)
+	}
+}
+
+// The xorb store counts as a deleted item, like the other cleanup types.
+func TestRunCleanAllWithItems_XorbStoreCounted(t *testing.T) {
+	setupCleanTestRepo(t)
+	store := filepath.Join(".git", gitdir.XorbStoreDirName, "0123abcd")
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	items := []strategy.CleanupItem{{Type: strategy.CleanupTypeXorbStore, ID: gitdir.XorbStoreDirName, Reason: "test"}}
+	cmd, stdout, _ := newTestCleanCmd(t)
+	if err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil); err != nil {
+		t.Fatalf("runCleanAllWithItems() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Deleted 1 item") || !strings.Contains(output, "Large blob upload cache (1):") {
+		t.Errorf("Expected the xorb store in the deleted items, got: %s", output)
+	}
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Errorf("xorb store still exists: %v", err)
 	}
 }
 
