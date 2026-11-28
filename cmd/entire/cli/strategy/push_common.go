@@ -1101,8 +1101,8 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 }
 
 // fetchAndRebaseRefCommon fetches a remote ref and rebases local commits on top
-// of the remote tip. Since checkpoint shards use unique paths, rebases always
-// apply cleanly.
+// of the remote tip. Independent changes merge; content conflicts leave the
+// local ref unchanged so callers can keep delivery pending.
 // The target can be a remote name or a URL.
 func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName) error {
 	// No timeout: runs under doPushRef's shared budget.
