@@ -203,6 +203,9 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		Pinned:      opts.Pin != "",
 		InstalledAt: time.Now().UTC(),
 	}
+	// Recorded either way, so a no-op upgrade never fetches it again.
+	agentHelp := meta != nil && bool(meta.AgentHelp)
+	manifest.AgentHelp = &agentHelp
 	if meta != nil {
 		manifest.Requires = meta.Requires
 		manifest.Description = meta.Description
@@ -517,7 +520,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 		return nil, noUpgradeManifestError(name)
 	}
 	if m.Pinned {
-		backfillManifestDescription(ctx, m)
+		backfillManifestMetadata(ctx, m)
 		return &UpgradeOutcome{Name: name, Pinned: true}, nil
 	}
 	tags, err := listRemoteSemverTags(ctx, m.RepoURL)
@@ -531,7 +534,7 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	// same version, and a remote that re-tagged with the other spelling
 	// must not trigger a reinstall.
 	if semver.Compare(canonicalSemver(tags[0]), canonicalSemver(m.Tag)) <= 0 {
-		backfillManifestDescription(ctx, m)
+		backfillManifestMetadata(ctx, m)
 		return &UpgradeOutcome{Name: name, UpToDate: true}, nil
 	}
 	// Inherit the install-time trust decision: a plugin the user knowingly
@@ -552,34 +555,52 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 	return &UpgradeOutcome{Name: name, FromTag: m.Tag, ToTag: res.Manifest.Tag}, nil
 }
 
-// backfillManifestDescription records the description from entire-plugin.yml
-// at the installed tag in a manifest that has none, for the upgrade branches
-// that return without reinstalling (pinned, up to date). Installs made before
-// manifests recorded descriptions would otherwise stay out of root help until
-// their author tagged a new release, and a pinned one forever.
+// backfillManifestMetadata records the description and the agent_help
+// declaration from entire-plugin.yml at the installed tag in a manifest that
+// lacks either, for the upgrade branches that return without reinstalling
+// (pinned, up to date). Installs made before manifests recorded them would
+// otherwise stay out of root help and agent-help's pointers until their
+// author tagged a new release, and a pinned one forever.
 //
 // The tag is the installed one, not the newest, so the text describes the
 // binary that runs. Best effort: the upgrade outcome must not depend on it, so
-// failures are logged and dropped. A plugin whose metadata has no description
-// pays one metadata fetch per upgrade; upgrade is already a networked command.
+// failures are logged and dropped, to be retried on the next upgrade.
+// agent_help is recorded true or false, so an install fetches for it at most
+// once; a plugin whose metadata has no description still pays one fetch per
+// upgrade for that, as before.
 // The caller holds the plugin's lock.
-func backfillManifestDescription(ctx context.Context, m *PluginManifest) {
-	if m.Description != "" {
+func backfillManifestMetadata(ctx context.Context, m *PluginManifest) {
+	if m.Description != "" && m.AgentHelp != nil {
 		return
 	}
-	meta, err := fetchPluginMetadataAtTag(ctx, m.RepoURL, m.Tag)
+	meta, err := pluginMetadataBackfillFetch(ctx, m.RepoURL, m.Tag)
 	if err != nil {
-		logging.Debug(ctx, "plugin upgrade: description backfill fetch failed", "plugin", m.Name, "error", err.Error())
+		logging.Debug(ctx, "plugin upgrade: metadata backfill fetch failed", "plugin", m.Name, "error", err.Error())
 		return
 	}
-	if meta == nil || meta.Description == "" || (meta.Name != "" && meta.Name != m.Name) {
+	if meta != nil && meta.Name != "" && meta.Name != m.Name {
 		return
 	}
-	m.Description = meta.Description
+	changed := false
+	if m.Description == "" && meta != nil && meta.Description != "" {
+		m.Description, changed = meta.Description, true
+	}
+	if m.AgentHelp == nil {
+		// Recorded true or false, so the tag isn't fetched for it again.
+		agentHelp := meta != nil && bool(meta.AgentHelp)
+		m.AgentHelp, changed = &agentHelp, true
+	}
+	if !changed {
+		return
+	}
 	if err := SavePluginManifest(m); err != nil {
-		logging.Debug(ctx, "plugin upgrade: description backfill save failed", "plugin", m.Name, "error", err.Error())
+		logging.Debug(ctx, "plugin upgrade: metadata backfill save failed", "plugin", m.Name, "error", err.Error())
 	}
 }
+
+// pluginMetadataBackfillFetch is backfillManifestMetadata's fetch, a seam
+// for tests.
+var pluginMetadataBackfillFetch = fetchPluginMetadataAtTag
 
 // noUpgradeManifestError explains why name, which has no install manifest,
 // cannot be upgraded: it is not installed at all (perhaps removed meanwhile),

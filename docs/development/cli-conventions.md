@@ -1019,7 +1019,10 @@ with a token.
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
 command tree (so it always matches the installed binary): bare prints a curated
 "when to use entire" map; `agent-help <command>` drills into one command's
-current flags; `--json` emits structured output. It is the single source of
+current flags; `--json` emits structured output. Bare text also names the
+installed plugins that declare agent guidance (`entire agent-help <plugin>`
+runs a plugin's own; see
+[external commands](../architecture/external-commands.md#agent-help)). It is the single source of
 truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 

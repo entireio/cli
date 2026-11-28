@@ -491,7 +491,8 @@ func newAgentHelpCmd(rootCmd *cobra.Command) *cobra.Command {
 		Long: `Prints agent-facing usage for the Entire CLI, generated live from the installed
 command tree so it always matches this binary. With no arguments it prints a
 high-level map of when to use entire and which subcommand; pass a command path
-(e.g. "agent-help checkpoint") to see that command's exact, current flags.`,
+(e.g. "agent-help checkpoint") to see that command's exact, current flags, or
+an installed plugin's name to run that plugin's own agent-help.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			// The enablement probe below authenticates as the selected login, but
 			// nothing here acts on the user's behalf, and this output is read by an
@@ -596,8 +597,10 @@ func agentHelpRepoContextWithRefresh(
 	return repoLine, cachedTrailsEnablementForScope(ctx, scope, time.Now()) == trailEnablementCacheEnabled
 }
 
-// runAgentHelp resolves args to a command node and renders it. It is pure (no
-// git / IO): the caller passes the already-resolved repoLine and trailsEnabled.
+// runAgentHelp resolves args to a command node and renders it, without git,
+// exec or network: the caller passes the already-resolved repoLine and
+// trailsEnabled. The bare text path reads the local plugin tree (bin entries
+// and install manifests, os.Stat) to name the plugins with agent guidance.
 func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON, trailsEnabled bool) (string, error) {
 	target := rootCmd
 	for _, name := range args {
@@ -893,6 +896,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))
+	b.WriteString(renderAgentHelpGuidedPlugins(agentHelpGuidedPlugins(rootCmd)))
 
 	var listed []*cobra.Command
 	rest := map[agentHelpAudience][]string{}

@@ -172,7 +172,7 @@ func TestSubcommandHelp_OmitsPluginSection(t *testing.T) { //nolint:paralleltest
 func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:paralleltest // mutates env
 	withIsolatedPluginEnv(t)
 	srv := pluginReleaseServer(t, "0.1.0")
-	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
+	meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\nagent_help: true\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", srv.URL)
 	repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
 
 	res, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{})
@@ -188,6 +188,9 @@ func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:parall
 	}
 	if saved.Description != "Demo plugin for tests" {
 		t.Errorf("saved manifest description = %q, want it copied from %s", saved.Description, pluginMetadataFileName)
+	}
+	if saved.AgentHelp == nil || !*saved.AgentHelp {
+		t.Errorf("saved manifest agent_help = %v, want true, copied from %s", saved.AgentHelp, pluginMetadataFileName)
 	}
 }
 
@@ -290,4 +293,70 @@ func TestUpgradeInstalledPlugin_BackfillIsBestEffort(t *testing.T) { //nolint:pa
 			}
 		})
 	}
+}
+
+// An install whose manifest predates agent_help (it has a description, and no
+// agent_help at all) gets it on a no-op upgrade from the installed tag's
+// metadata, true or false, so a plugin that doesn't declare it isn't fetched
+// again. A repository that can't be read leaves it unrecorded, to retry.
+func TestUpgradeInstalledPlugin_BackfillsAgentHelp(t *testing.T) { //nolint:paralleltest // mutates env
+	for name, tc := range map[string]struct {
+		declared, unreachable bool
+		want                  *bool
+		fetches               int // over two upgrades
+	}{
+		"declared":        {declared: true, want: new(true), fetches: 1},
+		"not declared":    {want: new(false), fetches: 1},
+		"repository gone": {declared: true, unreachable: true, fetches: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withIsolatedPluginEnv(t)
+			ctx := context.Background()
+			meta := fmt.Sprintf("name: demo\ndescription: Demo plugin for tests\ndownload_url: \"%s/dl/{tag}/{asset}\"\n", pluginReleaseServer(t, "0.1.0").URL)
+			if tc.declared {
+				meta += "agent_help: true\n"
+			}
+			repoURL := newTaggedPluginRepo(t, meta, remoteTestTagOld)
+			if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{Pin: remoteTestTagOld}); err != nil {
+				t.Fatalf("InstallPluginFromRepo: %v", err)
+			}
+			m, err := LoadPluginManifest("demo")
+			if err != nil || m == nil || m.AgentHelp == nil || *m.AgentHelp != tc.declared {
+				t.Fatalf("install recorded agent_help %v (%v); want %v", m, err, tc.declared)
+			}
+			m.AgentHelp = nil // as an older CLI wrote it
+			if err := SavePluginManifest(m); err != nil {
+				t.Fatal(err)
+			}
+			if tc.unreachable {
+				if err := os.RemoveAll(repoDirFromURL(repoURL)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fetches := 0
+			prev := pluginMetadataBackfillFetch
+			pluginMetadataBackfillFetch = func(ctx context.Context, repoURL, tag string) (*PluginMetadata, error) {
+				fetches++
+				return prev(ctx, repoURL, tag)
+			}
+			t.Cleanup(func() { pluginMetadataBackfillFetch = prev })
+
+			for range 2 {
+				if o, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil || !o.Pinned {
+					t.Fatalf("UpgradeInstalledPlugin = %+v, %v", o, err)
+				}
+			}
+			got, err := LoadPluginManifest("demo")
+			if err != nil || got == nil || got.Description != "Demo plugin for tests" || !equalBoolPtr(got.AgentHelp, tc.want) {
+				t.Errorf("manifest after upgrade = %+v, %v; want agent_help %v and the description kept", got, err, tc.want)
+			}
+			if fetches != tc.fetches {
+				t.Errorf("metadata fetched %d times over two upgrades, want %d", fetches, tc.fetches)
+			}
+		})
+	}
+}
+
+func equalBoolPtr(a, b *bool) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
 }
