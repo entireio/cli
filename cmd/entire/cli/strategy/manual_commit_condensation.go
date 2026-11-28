@@ -2226,6 +2226,13 @@ func clearStagedFilesIn(ctx context.Context, root *os.Root, sessionID, worktreeP
 			slog.String("metadata_dir", paths.SessionMetadataDirFromSessionID(sessionID)))
 		return
 	}
+	// A Stop may have published before our snapshot but not saved its step
+	// yet. Never release its buffer, or wait for it while holding state locks.
+	releasePublication, publicationErr := trySessionMetadataCleanup(ctx, sessionID)
+	if publicationErr != nil {
+		return // best-effort: contention or uncertainty keeps recovery data
+	}
+	defer releasePublication()
 	// Open the session directory once and remove leaves from it. The obvious
 	// osroot.RemoveNoSymlinks(root, <full path>) per file would re-resolve
 	// .entire/metadata and the session directory on every call, three times over
@@ -2243,14 +2250,6 @@ func clearStagedFilesIn(ctx context.Context, root *os.Root, sessionID, worktreeP
 	for _, name := range stagedSessionFiles {
 		_ = osroot.Remove(dir, name) //nolint:errcheck // best-effort; absence is the normal case for the legacy name
 	}
-}
-
-// storedCopyRelease is what a successful commit-less condensation needs to
-// release the stored copy it read: the resolved root and, for the log, the
-// session's recorded worktree.
-type storedCopyRelease struct {
-	root         *os.Root
-	worktreePath string
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {
@@ -2407,6 +2406,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// Resolve the stored copy's root once: the condensation reads it, and
 		// a successful one releases it from the same root.
 		storedRoot := storedSessionRootOrNil(ctx, state)
+		consumed := snapshotStoredCopy(storedRoot, state)
 		// This checkpoint is the last record of the session's pending files,
 		// which are cleared below: include those pending in other worktrees,
 		// not only the home's.
@@ -2452,10 +2452,11 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.FilesTouched = nil
 		state.TouchedFileHashes = nil
 		state.OtherWorktrees = nil
-		release = &storedCopyRelease{root: storedRoot, worktreePath: state.WorktreePath}
+		release = consumed
+		release.checkpointID = result.CheckpointID
 		return nil
 	}, func() {
-		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
+		// commitCondensedEmitter.emit is deliberately NOT
 		// called here: its payload is commit-scoped (files_committed counts a
 		// commit's files, and prior_ai_history's git-log probe uses --skip=1 to
 		// exclude the commit just made). This path condenses without a commit —
@@ -2463,20 +2464,15 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// meaningless and --skip=1 would exclude an unrelated HEAD. See
 		// newCommitCondensedSignal.
 		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
+		if release != nil {
+			release.run(ctx, sessionID)
+		}
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	if mutErr != nil {
 		return mutErr
-	}
-
-	// Nothing is left pending, so release the staged prompt.txt and full.jsonl
-	// as the commit path does once every file is committed; otherwise they stay
-	// in the worktree indefinitely. Only after the state is saved, so a failed
-	// save leaves the copy for the retry. The next Stop recreates them.
-	if release != nil {
-		clearStagedFilesIn(ctx, release.root, sessionID, release.worktreePath)
 	}
 
 	if cleared {
