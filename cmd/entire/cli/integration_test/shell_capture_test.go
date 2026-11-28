@@ -292,3 +292,63 @@ func stopBackgroundTask(t *testing.T, env *TestEnv, sess *Session, subagentID st
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
 }
+
+// TestLateJoinedSessionShellCreatedFile_IsRecorded covers a session already
+// running elsewhere that copies a new file into this repository during a turn
+// before its first TurnStart here. The transcript's earlier prompt marks when
+// that turn started; untracked files written since are its work, not baseline.
+func TestLateJoinedSessionShellCreatedFile_IsRecorded(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	const copiedFile = "client.js"
+	sess := env.NewSession()
+	sess.CreateTranscript("copy client.js from ../src here", nil)
+	env.WriteFile(copiedFile, "console.log(1)\n")
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+	}
+	if !containsFile(state.FilesTouched, copiedFile) {
+		t.Errorf("turn end did not record %s, copied in by the late-joined session: FilesTouched=%v",
+			copiedFile, state.FilesTouched)
+	}
+}
+
+// TestNewSessionPreExistingUntrackedFile_IsNotRecorded is the regression guard
+// for the late-join rule: a brand-new session has no earlier prompt, so a file
+// the user created before its first prompt stays in the baseline.
+func TestNewSessionPreExistingUntrackedFile_IsNotRecorded(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	const userFile = "notes.txt"
+	sess := env.NewSession()
+	env.SimulateSessionStartWithOutput(sess.ID)
+	env.WriteFile(userFile, "the user's own notes\n")
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	sess.CreateTranscript("summarize the repo", nil)
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+	}
+	if containsFile(state.FilesTouched, userFile) {
+		t.Errorf("turn end recorded %s, which the user created before the session's first prompt: FilesTouched=%v",
+			userFile, state.FilesTouched)
+	}
+}

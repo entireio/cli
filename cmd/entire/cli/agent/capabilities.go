@@ -40,6 +40,7 @@ type CapabilityDeclarer interface {
 //   - ModelLister
 //   - OutOfBandTokenSource (refuses CapabilityDeclarer agents)
 //   - PermissionConfigOwner
+//   - PreviousTurnStartReader
 //   - ProtectedFilesProvider
 //   - RestoredSessionPathResolver
 //   - SessionBaseDirProvider
@@ -167,6 +168,13 @@ func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
 // so it resolves by type assertion alone with no DeclaredCaps gate.
 func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 	return builtinCapability[SidecarImageProvider](ag)
+}
+
+// AsPreviousTurnStartReader returns the agent as PreviousTurnStartReader if it
+// implements the interface. It only narrows the TurnStart baseline and fails
+// open, so there is no DeclaredCaps gate.
+func AsPreviousTurnStartReader(ag Agent) (PreviousTurnStartReader, bool) {
+	return builtinCapability[PreviousTurnStartReader](ag)
 }
 
 // AsProtectedFilesProvider returns the agent as ProtectedFilesProvider if it
