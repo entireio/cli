@@ -69,6 +69,7 @@ const (
 	rolloutLineTypeWorldState   = "world_state"
 	rolloutLineTypeTurnContext  = "turn_context"
 	eventMsgTypeTokenCount      = "token_count"
+	eventMsgTypeTaskStarted     = "task_started"
 	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
 	// rollout response_item payload and as a `codex exec --json` event item.
 	itemTypeAgentMessage = "agent_message"
@@ -570,7 +571,7 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 			terminalValid = false
 			continue
 		}
-		if header.Type != eventMsgTypeTokenCount && header.Type != "task_started" && header.Type != "task_complete" && header.Type != "turn_aborted" {
+		if header.Type != eventMsgTypeTokenCount && header.Type != eventMsgTypeTaskStarted && header.Type != "task_complete" && header.Type != "turn_aborted" {
 			continue
 		}
 		var event eventMsgPayload
@@ -590,7 +591,7 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 			if lastTokenSnapshot != nil {
 				tokenSnapshots++
 			}
-		case "task_started":
+		case eventMsgTypeTaskStarted:
 			// Forks copy an unfinished parent turn. A later explicit turn start
 			// replaces that orphan; only balanced pairs can yield terminal IDs.
 			if inherited && localStartOrdinal == nil && event.TurnID != nil && *event.TurnID != openTurn {

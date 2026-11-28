@@ -381,6 +381,19 @@ type ChildSessionSubagents interface {
 	SubagentUsageOutsideParent()
 }
 
+// PreviousTurnStartReader is implemented by agents whose transcripts record
+// when each turn started. TurnStart uses it when Entire first sees a session
+// that already ran turns elsewhere: untracked files written since the previous
+// turn started may be that session's work, so they stay out of the baseline.
+type PreviousTurnStartReader interface {
+	Agent
+
+	// PreviousTurnStart returns the start time of the latest turn before the
+	// one now starting, read from the transcript at sessionRef. ok is false
+	// when the transcript records no earlier turn.
+	PreviousTurnStart(sessionRef string) (start time.Time, ok bool, err error)
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this

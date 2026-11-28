@@ -248,6 +248,8 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	// the snapshot (transcript position) is still worth capturing. The
 	// skipped-scan marker tells turn-end to disable new-file detection.
 	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
+	untrackedStats := statUntrackedFiles(ctx, untrackedFiles)
+	untrackedFiles, untrackedStats = trimLateJoinBaseline(ctx, ag, sessionID, sessionRef, untrackedFiles, untrackedStats)
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
@@ -267,7 +269,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
-		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
+		UntrackedFileStats:   untrackedStats,
 		TranscriptOffset:     transcriptOffset,
 	}
 
