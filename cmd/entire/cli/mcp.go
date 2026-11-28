@@ -38,6 +38,10 @@ const maxMCPMessageBytes = 1 << 20
 // mcpServerName is the MCP serverInfo name advertised at initialize.
 const mcpServerName = "entire"
 
+// mcpResultTypeComplete is the SEP-2575 DiscoverResult resultType for a fully
+// resolved discovery response.
+const mcpResultTypeComplete = "complete"
+
 func newMCPCmd(rootCmd *cobra.Command) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
@@ -155,6 +159,8 @@ func dispatchMCP(ctx context.Context, rootCmd *cobra.Command, method string, par
 	switch method {
 	case "initialize":
 		return mcpInitializeResult(params), nil
+	case "server/discover":
+		return mcpDiscoverResult(), nil
 	case "notifications/initialized":
 		return nil, nil // notification; result is ignored by the caller
 	case "ping":
@@ -180,8 +186,37 @@ func mcpInitializeResult(params json.RawMessage) map[string]any {
 	}
 	return map[string]any{
 		"protocolVersion": protocol,
-		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"capabilities":    mcpServerCapabilities(),
 		"serverInfo":      map[string]any{"name": mcpServerName, "version": versioninfo.Version},
+	}
+}
+
+// mcpServerCapabilities is the single source for the capabilities object
+// advertised at initialize and in the server/discover result, so the two
+// surfaces cannot drift apart.
+func mcpServerCapabilities() map[string]any {
+	return map[string]any{"tools": map[string]any{}}
+}
+
+// mcpDiscoverResult answers the SEP-2575 server/discover probe so modern
+// clients learn the server's versions, capabilities, and identity in one
+// exchange instead of eating a -32601 fallback every connection. Only
+// mcpProtocolVersion is advertised: this server implements the legacy
+// initialize lifecycle, not the stateless 2026-07-28 per-request _meta
+// lifecycle (no -32022 version errors, no subscriptions/listen).
+func mcpDiscoverResult() map[string]any {
+	return map[string]any{
+		"resultType":        mcpResultTypeComplete,
+		"supportedVersions": []string{mcpProtocolVersion},
+		"capabilities":      mcpServerCapabilities(),
+		"_meta": map[string]any{
+			"io.modelcontextprotocol/serverInfo": map[string]any{
+				"name":    mcpServerName,
+				"version": versioninfo.Version,
+			},
+		},
+		"ttlMs":      3600000,
+		"cacheScope": "public",
 	}
 }
 
