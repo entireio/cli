@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // `nohup entire <plugin> &`, then the terminal closes: both entire and the
@@ -177,5 +181,105 @@ func TestTerminalCtrlC_ReachesPluginOnce(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "1" {
 		t.Errorf("plugin received %s SIGINTs for one Ctrl-C, want 1", got)
+	}
+}
+
+// Re-execute main with inherited stdin: closing a Go-created os.Pipe reader
+// alone can interrupt its pollable read, while closing inherited blocking stdin
+// on Unix cannot. This guards the native cancellation path, not just Close.
+func TestMCP_FirstSignalStopsInheritedStdin(t *testing.T) {
+	t.Parallel()
+	for _, partial := range []bool{false, true} {
+		name := "idle"
+		if partial {
+			name = "partial message"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cmd := execx.NonInteractive(ctx, os.Args[0], "-test.run=^$")
+			cmd.Dir = dir
+			for _, entry := range os.Environ() {
+				if !strings.HasPrefix(entry, "ENTIRE_") && !strings.HasPrefix(entry, "GIT_") {
+					cmd.Env = append(cmd.Env, entry)
+				}
+			}
+			cmd.Env = append(cmd.Env,
+				runMainEnvVar+"=mcp",
+				"ENTIRE_CONFIG_DIR="+filepath.Join(dir, "config"),
+				"ENTIRE_PLUGIN_DIR="+filepath.Join(dir, "plugins"),
+				"XDG_CACHE_HOME="+filepath.Join(dir, "cache"),
+				"ENTIRE_TOKEN_STORE=file",
+				"ENTIRE_TOKEN_STORE_PATH="+filepath.Join(dir, "tokens.json"),
+				"ENTIRE_TEST_AUTH_STORE_FILE="+filepath.Join(dir, "auth.json"),
+				"ENTIRE_TELEMETRY_OPTOUT=1",
+				"GIT_CONFIG_GLOBAL="+os.DevNull,
+				"GIT_CONFIG_NOSYSTEM=1",
+			)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			input, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			output, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan struct{})
+			var waitErr error
+			go func() { waitErr = cmd.Wait(); close(exited) }()
+			t.Cleanup(func() {
+				if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					t.Errorf("kill MCP child: %v", err)
+				}
+				<-exited
+			})
+			if _, err := io.WriteString(input, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n"); err != nil {
+				t.Fatal(err)
+			}
+			var reply struct {
+				ID     int             `json:"id"`
+				Result json.RawMessage `json:"result"`
+			}
+			if err := json.NewDecoder(output).Decode(&reply); err != nil {
+				t.Fatalf("read ping reply: %v", err)
+			}
+			if reply.ID != 1 || len(reply.Result) == 0 {
+				t.Fatalf("unexpected ping reply: %+v", reply)
+			}
+			if partial {
+				if _, err := io.WriteString(input, `{"jsonrpc":"2.0","id":2`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Let the server return to its read after the readiness ping. Stdin stays
+			// open until cleanup, including while we assert termination.
+			time.Sleep(50 * time.Millisecond)
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-exited:
+			case <-time.After(5 * time.Second):
+				t.Fatal("MCP server did not stop on first SIGTERM with stdin open")
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				t.Fatalf("exit = %v, want SIGTERM; stderr: %s", waitErr, stderr.String())
+			}
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+				t.Fatalf("exit = %v, want SIGTERM; stderr: %s", waitErr, stderr.String())
+			}
+		})
 	}
 }
