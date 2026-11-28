@@ -22,12 +22,19 @@ var storeSelectorEnvVars = []string{
 // repository selectors plus GIT_INDEX_FILE, which redirects index reads and
 // writes.
 var repoOverrideEnvVars = func() []string {
-	prefixes := make([]string, 0, len(repoSelectorEnvVars)+1)
-	for _, key := range append(slices.Clone(repoSelectorEnvVars), "GIT_INDEX_FILE") {
+	names := RepoOverrideEnvVars()
+	prefixes := make([]string, 0, len(names))
+	for _, key := range names {
 		prefixes = append(prefixes, key+"=")
 	}
 	return prefixes
 }()
+
+// RepoOverrideEnvVars returns the variables EnvWithoutRepoOverrides strips, for
+// a process that must drop them from its own environment.
+func RepoOverrideEnvVars() []string {
+	return append(slices.Clone(repoSelectorEnvVars), "GIT_INDEX_FILE")
+}
 
 // NativeReadSelectorEnvVars returns every variable ReadsNeedNativeGit treats
 // as selecting a store go-git would not open. It is the single source for that

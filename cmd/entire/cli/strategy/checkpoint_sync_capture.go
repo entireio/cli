@@ -198,7 +198,7 @@ func commitCapturedSyncRemote(ctx context.Context, pushRemote string) {
 	}
 	// Announced only after the state landed AND the checkpoints did, so the
 	// message can claim neither an unpersisted change nor an empty delivery.
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] Checkpoints now sync to %q — the remote your branch pushes to. Override with strategy_options.checkpoint_push_remote in .entire/settings.local.json.\n",
 		pushRemote)
 	logging.Info(ctx, "checkpoint sync remote captured",

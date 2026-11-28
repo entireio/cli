@@ -448,6 +448,14 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	}
 	defer repo.Close()
 
+	// Before reading the queue: refs a running worker lands during the wait
+	// are then reported as already pushed, not as not waiting.
+	release, err := waitForBackgroundUpload(ctx, repo)
+	if err != nil {
+		return CheckpointPushReport{}, err
+	}
+	defer release()
+
 	waiting, _, err := waitingCheckpointRefs(ctx, repo)
 	if err != nil {
 		return CheckpointPushReport{}, err

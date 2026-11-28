@@ -90,7 +90,7 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	// provider — so strip escape sequences before either reaches the terminal.
 	shown := tuiutil.SanitizeDisplayText(repo)
 	reason = tuiutil.SanitizeDisplayText(reason)
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] Checkpoints are going to %q, not to the configured checkpoint_remote %s: %s.\n",
 		ps.remote, shown, reason)
 	// Promise only new checkpoints: on git-refs, refs already pushed to the
@@ -98,11 +98,11 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	// backend would move them (it pushes the whole v1 branch), and it is legacy
 	// and will lose support soon, so the wording follows git-refs.
 	if claim := remote.ClaimCheckpointRemoteCommand(s.GetCheckpointRemote()); claim != "" {
-		fmt.Fprintf(stderrWriter,
+		fmt.Fprintf(noticeWriter(ctx),
 			"[entire] If %s is yours, run: %s — new checkpoints go there from your next push.\n",
 			shown, claim)
 	} else {
-		fmt.Fprintf(stderrWriter,
+		fmt.Fprintf(noticeWriter(ctx),
 			"[entire] If %s is yours, declare it in .entire/settings.local.json — new checkpoints go there from your next push.\n",
 			shown)
 	}

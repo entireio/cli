@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	// fallback cannot protect it).
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+	// Upload checkpoints inside the pre-push hook: a detached background
+	// upload would outlive the test and race its checks of the remote.
+	os.Setenv("ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND", "1")
 
 	// And clear the agents' caller-session variables. E2E is usually run from
 	// inside an agent, which publishes its session ID into this process's

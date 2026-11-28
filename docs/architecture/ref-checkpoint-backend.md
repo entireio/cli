@@ -151,6 +151,22 @@ An early abort also rotates that flush's failed entries to the back of the queue
 
 Two diagnostics make a wholesale failure readable. Each failed chunk's error is logged before the fallback runs: the per-ref retries re-derive a *rejection* reason, but a transport failure — an unreachable remote, a stalled connection — matches none of them, so without that line the cause reached neither the terminal nor `.entire/logs`. And `remote.Fetch` now annotates its error with git's own output — redacted and capped by the same `errWithGitOutput` helper the push path uses — instead of the strategy layer substituting that output for the error, which reported a contentless `fetch failed:` per ref whenever git was killed before writing anything.
 
+### Background upload (after the user's push)
+
+GitHub rejects a push whose pack arrives within about a second of another push to the same repository finishing (`(failed)`, `missing necessary objects`, or `fatal error in commit_refs`), and the later push loses. Checkpoints pushed from the pre-push hook finish just before git sends its own pack, so the **user's** push was rejected (7 of 16 pushes against GitHub). So the hook pushes nothing: it hands the queue to one detached worker per repository (`entire __upload checkpoint-refs`, `strategy/checkpoint_upload_worker.go`), prints `Uploading checkpoints in the background.`, and returns. Checkpoints reach the remote a second or two after `git push` returns (0 of 40 user pushes rejected across macOS and Windows). Under the manual push policy nothing is handed off, and the worker's flush re-checks the policy.
+
+The worker runs on `bgupload`, a generic background-upload runner: one lock and state file per kind of work in the git common dir (`entire-upload-<kind>.lock`, `entire-upload-<kind>-state.json`), a detached spawn, a bounded run loop, and a last-run record that the next push prints. Checkpoint refs are its first kind; session uploads are meant to be another, with their own lock.
+
+- **It waits for the user's pushes.** Every pre-push hook, even one with nothing queued, records its `git push` (`checkpoint.UserPush`, the nearest `git` ancestor; `strategy/git_push_wait*.go`). Before each pass, and before every chunk after the first, the worker waits for each recorded process to exit and then settles for `userPushSettle` (1.5s); a push whose process could not be found gets `unknownUserPushDelay` (3s). New rounds stop after two minutes, so a stream of pushes cannot hold the upload off. If GitHub still rejects the worker's push with the race error, `batchPushCheckpointRefs` retries twice (1s, 2s).
+- **One flush at a time.** Every flush takes the kind's lock. A pre-push that finds it held records a request instead; a foreground-only pre-push waits up to 30s; `entire checkpoint push` waits up to 10 minutes. Whoever releases the lock starts a worker if a request is waiting (`releaseUploadLock`).
+- **It acts on the hook's decisions.** The request (`checkpoint.UploadRequest`) carries the remote, the OPF decision resolved in the hook (it may prompt), and the pending checkpoint-sync capture, committed only after the worker's delivery lands. The worker uploads nothing if settings or redaction cannot be loaded, or for a "run" OPF decision when OPF is off in its process.
+- **It never holds the user's push open.** `execx.SpawnDetached` marks inherited descriptors close-on-exec; otherwise the worker keeps a remote helper's stdin open (`git-remote-entire`) and `git push` cannot exit until the worker does.
+- **Nothing it would print is lost.** Its stdio is the null device; the last run (pushed, still queued, why it stopped, announcements) is recorded and the next push prints it once.
+- **Bounded.** A pass flushes under a 10-minute budget, a run under 30 minutes and 5 passes; refs left queued wait for the next push.
+- **Inline instead** with `ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND=1` (test harnesses), in CI (`CI`, `GITHUB_ACTIONS`, …), or with `strategy_options.background_checkpoint_upload: false`. An inline flush that pushed refs waits `inlineUploadSettle` (1.2s) before the hook returns, and records its push so a running worker waits for it.
+
+Accepted limits: the queue is shared by every worktree, so a worker resolves settings from the worktree that spawned it, and on Windows that worktree cannot be removed until the run ends. An environment torn down seconds after the push loses its queued refs; set `strategy_options.background_checkpoint_upload: false` where CI detection does not cover it.
+
 ### Checkpoint push policy
 
 Each clone has a checkpoint push policy, stored as one word in `entire/checkpoint-push-policy` in the git common dir and set with `entire configure --checkpoint-push-policy`:
@@ -335,6 +351,8 @@ Before copying, the write asks the remote whether the checkpoint already has a r
 | `strategy/checkpoint_push_policy.go` | Checkpoint push policy gate, `PushCheckpoints` for `entire checkpoint push` |
 | `strategy/checkpoint_push_question.go` | First-push policy question, its back-off, and the OPF deprecation line |
 | `strategy/push_common.go` | `batchPushCheckpointRefs`, `pushCheckpointRefWithRecovery`, fetch+replay |
+| `bgupload/bgupload.go` | Generic background upload: per-kind lock, state, spawn, run loop |
+| `strategy/checkpoint_upload_worker.go` | Checkpoint upload hand-off and worker pass |
 | `strategy/checkpoint_delete*.go` | `entire checkpoint delete`: read-only plan, leased per-remote deletes |
 | `checkpoint/deleted_list.go` | Local deleted-checkpoints list in the git common dir |
 

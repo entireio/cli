@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"os"
 	"path/filepath"
@@ -189,4 +190,23 @@ func TestHasCheckpointRemoteKey(t *testing.T) {
 	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
 		"checkpoint_remote": nil,
 	}}).HasCheckpointRemoteKey(), "null entry still counts as present")
+}
+
+func TestIsBackgroundCheckpointUploadDisabled(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		json string
+		want bool
+	}{
+		{"unset", `{}`, false},
+		{"no strategy option", `{"strategy_options":{"push_sessions":false}}`, false},
+		{"enabled", `{"strategy_options":{"background_checkpoint_upload":true}}`, false},
+		{"disabled", `{"strategy_options":{"background_checkpoint_upload":false}}`, true},
+		{"not a bool is ignored", `{"strategy_options":{"background_checkpoint_upload":"false"}}`, false},
+	} {
+		var s EntireSettings
+		require.NoError(t, json.Unmarshal([]byte(tc.json), &s), tc.name)
+		assert.Equal(t, tc.want, s.IsBackgroundCheckpointUploadDisabled(), tc.name)
+	}
 }

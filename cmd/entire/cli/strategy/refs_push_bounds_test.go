@@ -446,7 +446,8 @@ func TestPushQueuedCheckpointRefs_BatchNotBudgeted(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	restore()
 	require.NoError(t, err)
 	assert.Equal(t, len(refs), pushed)
@@ -477,7 +478,8 @@ func TestPushQueuedCheckpointRefs_FallbackGetsBudgetAfterSlowBatch(t *testing.T)
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	output := restore()
 	require.NoError(t, err, output)
 	assert.Equal(t, len(refs), pushed, "the fallback lands every ref of the slow failed batch")
@@ -562,11 +564,13 @@ func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T)
 	enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, batchWithinFlushBudget)
+	res, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, flushOptions{boundBatch: true})
+	pushed := res.pushed
 	output := restore()
 	require.Error(t, err)
 	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")
 	assert.Contains(t, output, "SSH authentication failed")
+	assert.Contains(t, res.detail, "ssh-add", "the worker keeps the hint for the next push")
 }
 
 func installSlowMultiRefHook(t *testing.T, bareDir string) {
@@ -695,7 +699,8 @@ func TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint(t *testing.T) {
 	require.NoError(t, queue.SetChunkSizeHint(1))
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, batchUnbounded)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	restore()
 	require.NoError(t, err)
 	assert.Equal(t, 6, pushed)
@@ -703,4 +708,29 @@ func TestFlushCheckpointRefs_UnboundedIgnoresChunkSizeHint(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, strings.Count(string(data), "push"), "full-size chunks, not one push per ref")
 	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the pre-push hint is left alone")
+}
+
+// TestFlushCheckpointRefs_UnreachableCheckpointRemoteKeepsHint: an unreachable
+// checkpoint_remote URL's hint is kept as the flush's detail, so a background
+// upload can still show it on the next push.
+func TestFlushCheckpointRefs_UnreachableCheckpointRemoteKeepsHint(t *testing.T) {
+	workDir, _, refs := setupRepoWithNCheckpointRefs(t, 2)
+	prepareGitRefsPrePush(t, workDir, t.TempDir())
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\necho 'ssh: connect to host example.invalid port 22: Connection refused' >&2\nexit 255\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo,
+		pushSettings{remote: "origin", checkpointURL: "ssh://git@example.invalid/checkpoints.git"}, flushOptions{boundBatch: true})
+	restore()
+	require.Error(t, err)
+	assert.Contains(t, res.unreachable, "Connection refused")
+	assert.Contains(t, res.detail, "A checkpoint remote is configured")
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -306,10 +307,39 @@ func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpoi
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.refSpec())
 	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	for attempt := 0; ; attempt++ {
+		res, err := pushCheckpointRefs(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+		if err == nil {
+			return nil
+		}
+		if attempt >= len(pushRaceRetryDelays) || !isPushRaceRejection(res.Output) {
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		}
+		logging.Info(ctx, "checkpoint push rejected right after another push; retrying",
+			slog.Int("attempt", attempt+1))
+		if sleepCtx(ctx, pushRaceRetryDelays[attempt]); ctx.Err() != nil {
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		}
 	}
-	return nil
+}
+
+// pushCheckpointRefs is the batch push's seam, swapped in tests.
+var pushCheckpointRefs = remote.PushWithOptions
+
+// pushRaceRetryDelays spaces the retries of a push GitHub rejected for landing
+// right after another push to the same repository finished. Var for tests.
+var pushRaceRetryDelays = []time.Duration{time.Second, 2 * time.Second}
+
+// pushRaceRejection matches git's report of GitHub refusing a pack that arrived
+// within about a second of another push finishing: the refs are fine and the
+// same push lands when retried. The checkpoint push runs with --porcelain
+// (tab-separated "!\t<src>:<dst>\t[remote rejected] (<reason>)"); the
+// human-readable form is matched too.
+var pushRaceRejection = regexp.MustCompile(`(?m)^!\t[^\t]*\t\[remote rejected\] \((failed|missing necessary objects)\)$` +
+	`|^ ! \[remote rejected\] .+ \((failed|missing necessary objects)\)$|fatal error in commit_refs`)
+
+func isPushRaceRejection(output string) bool {
+	return pushRaceRejection.MatchString(output)
 }
 
 // chunkPushResult is what the chunked batch phase of a flush left behind.
@@ -334,11 +364,19 @@ type chunkPushResult struct {
 // row does, and so does an unreachable remote before any chunk landed: per-ref
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
-func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int, onLanded func([]checkpointRefPush)) chunkPushResult {
+//
+// beforeChunk, when set, runs before every chunk but the first, ahead of the
+// stop check, so its time counts against ctx.
+func pushRefChunks(ctx context.Context, target string, refs []checkpointRefPush, size int,
+	beforeChunk func(context.Context), onLanded func([]checkpointRefPush),
+) chunkPushResult {
 	var res chunkPushResult
 	consecutive := 0
 	for start := 0; start < len(refs); start += size {
 		if start > 0 {
+			if beforeChunk != nil {
+				beforeChunk(ctx)
+			}
 			if reason := chunkStopReason(ctx, consecutive); reason != "" {
 				res.untried = refs[start:]
 				res.stopReason = reason
@@ -736,6 +774,23 @@ var checkpointPushBudget = 2 * time.Minute
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
+type flushBudgetKey struct{}
+
+// withFlushBudget records the budget a flush runs under, so its stop reason
+// names that budget rather than the pre-push default.
+func withFlushBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, flushBudgetKey{}, budget)
+}
+
+// flushBudgetFrom returns the budget withFlushBudget recorded, or
+// checkpointFlushBudget.
+func flushBudgetFrom(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(flushBudgetKey{}).(time.Duration); ok {
+		return d
+	}
+	return checkpointFlushBudget
+}
+
 // checkpointRefPushChunkSize is the most queued refs one batch push carries.
 //
 // It must keep one push's command line under Windows' 32,767-character
@@ -783,7 +838,7 @@ const maxConsecutiveRefPushFailures = 5
 func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+		return fmt.Sprintf("budget (%s) exhausted", flushBudgetFrom(ctx))
 	case ctx.Err() != nil:
 		return "interrupted"
 	case consecutiveFailures >= maxConsecutiveRefPushFailures:
@@ -892,27 +947,37 @@ func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
 	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
 }
 
-// printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.
-// Only prints when the target is a URL (not the user's default remote).
-func printCheckpointRemoteHint(target string) {
+// checkpointRemoteHint is the hint for a failed push to a checkpoint URL, or
+// "" when target is not a URL (the user's default remote).
+func checkpointRemoteHint(target string) string {
 	if !remote.IsURL(target) {
-		return
+		return ""
 	}
-	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
-	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+	return "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.\n" +
+		"[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote."
+}
+
+// printCheckpointRemoteHint prints checkpointRemoteHint, if any.
+func printCheckpointRemoteHint(target string) {
+	if hint := checkpointRemoteHint(target); hint != "" {
+		fmt.Fprintln(os.Stderr, hint)
+	}
 }
 
 // sshAuthHintOnce ensures the ssh-agent hint prints at most once per process
 // (pre-push can push multiple refs).
 var sshAuthHintOnce sync.Once
 
-// printNonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
+// nonInteractiveSSHAuthHint tells the user how to unblock checkpoint pushes
 // that failed because SSH needed interactive auth under BatchMode (issue #1523).
+const nonInteractiveSSHAuthHint = "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.\n" +
+	"[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.\n" +
+	"[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no."
+
+// printNonInteractiveSSHAuthHint prints nonInteractiveSSHAuthHint once.
 func printNonInteractiveSSHAuthHint() {
 	sshAuthHintOnce.Do(func() {
-		fmt.Fprintln(os.Stderr, "[entire] Checkpoint push skipped: SSH needs interactive auth (passphrase/PIN) and cannot prompt during git hooks.")
-		fmt.Fprintln(os.Stderr, "[entire] Load your key into ssh-agent (`ssh-add`), then push again. Checkpoints are saved locally until then.")
-		fmt.Fprintln(os.Stderr, "[entire] PIN-protected security keys: unlock/add them to the agent first. To allow prompts in this path, set GIT_SSH_COMMAND (or core.sshCommand) with an explicit BatchMode=no.")
+		fmt.Fprintln(os.Stderr, nonInteractiveSSHAuthHint)
 	})
 }
 

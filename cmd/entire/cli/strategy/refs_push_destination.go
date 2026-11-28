@@ -111,9 +111,9 @@ func (d refsPushDestination) warnIgnoredPushURLs(ctx context.Context) {
 	if d.ignoredPushURLs == 0 {
 		return
 	}
-	fmt.Fprintf(stderrWriter, "[entire] Checkpoints go to one repository: %s. %d other push URL(s) of this remote will not receive them.\n",
+	fmt.Fprintf(noticeWriter(ctx), "[entire] Checkpoints go to one repository: %s. %d other push URL(s) of this remote will not receive them.\n",
 		d.display(), d.ignoredPushURLs)
-	fmt.Fprintln(stderrWriter, "[entire] To store checkpoints in a specific repository instead, set checkpoint_remote in .entire/settings.json.")
+	fmt.Fprintln(noticeWriter(ctx), "[entire] To store checkpoints in a specific repository instead, set checkpoint_remote in .entire/settings.json.")
 	logging.Info(ctx, "git-refs push: multi-URL remote, pushing checkpoint refs to the first push URL only",
 		slog.String("target", remote.RedactURLOrPath(d.target)),
 		slog.Int("ignored_push_urls", d.ignoredPushURLs),

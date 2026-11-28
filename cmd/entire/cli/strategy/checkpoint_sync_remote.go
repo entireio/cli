@@ -343,10 +343,10 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 	if count == 0 {
 		return
 	}
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] %d checkpoint(s) are waiting to sync to %q, this repo's checkpoint sync remote; this push to %q does not carry them.\n",
 		count, syncRemote.Name, pushRemote)
-	fmt.Fprintf(stderrWriter,
+	fmt.Fprintf(noticeWriter(ctx),
 		"[entire] To sync checkpoints to %q instead, set strategy_options.checkpoint_push_remote to %q in .entire/settings.local.json.\n",
 		pushRemote, pushRemote)
 	logging.Info(ctx, "gated checkpoint sync hint shown",

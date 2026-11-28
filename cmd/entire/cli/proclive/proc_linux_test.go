@@ -3,6 +3,7 @@
 package proclive
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,6 +52,16 @@ func TestParseProcStat_Malformed(t *testing.T) {
 	} {
 		if _, _, _, err := parseProcStat(content); err == nil {
 			t.Errorf("parseProcStat(%q) = nil error, want error", content)
+		}
+	}
+}
+
+func TestParseProcStat_ZombieIsGone(t *testing.T) {
+	t.Parallel()
+	const tail = " 4200 1 1 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 98765 1000 100"
+	for _, state := range []string{"Z", "X"} {
+		if _, _, _, err := parseProcStat("4242 (git) " + state + tail); !errors.Is(err, errProcessGone) {
+			t.Errorf("state %s: err = %v, want errProcessGone", state, err)
 		}
 	}
 }
