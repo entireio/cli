@@ -140,6 +140,43 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_Stop_EmptyOrMissingTranscriptPath verifies that HookNameStop
+// successfully parses payloads without a transcript_path or with an empty string,
+// which Devin and other hook-compat wrappers emit.
+func TestParseHookEvent_Stop_EmptyOrMissingTranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	tests := []struct {
+		name      string
+		input     string
+		sessionID string
+	}{
+		{
+			name:      "empty transcript path",
+			input:     `{"session_id": "sess-empty", "transcript_path": ""}`,
+			sessionID: "sess-empty",
+		},
+		{
+			name:      "missing transcript path",
+			input:     `{"session_id": "sess-missing"}`,
+			sessionID: "sess-missing",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(tc.input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, agent.TurnEnd, event.Type)
+			require.Equal(t, tc.sessionID, event.SessionID)
+			require.Empty(t, event.SessionRef)
+		})
+	}
+}
+
 // TestParseHookEvent_StopFailure_EndsTurn verifies that a turn ending on an
 // API error ends the turn like Stop, so the session leaves ACTIVE instead of
 // waiting for the next prompt.
