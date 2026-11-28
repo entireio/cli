@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -590,6 +591,7 @@ func TestCheckpointSyncAllowedForRemote_SSHHostAlias(t *testing.T) {
 		want                bool
 	}{
 		{"alias push to the elected GitHub repository", "git@github.com:acme/widgets.git", "git@github-work:acme/widgets.git", true},
+		{"same alias on both remotes", "git@github-work:acme/widgets.git", "git@github-work:acme/widgets.git", true},
 		{"elected alias, mirror push", "git@github-work:acme/widgets.git", "entire://aws-eu-central-1.entire.io/gh/acme/widgets", true},
 		{"alias to another host", "git@github.com:acme/widgets.git", "git@gitlab-work:acme/widgets.git", false},
 		{"alias to GitHub, different repository", "git@github.com:acme/widgets.git", "git@github-work:acme/gadgets.git", false},
@@ -605,7 +607,15 @@ func TestCheckpointSyncAllowedForRemote_SSHHostAlias(t *testing.T) {
 			testutil.AddRemote(t, dir, "origin", tc.push)
 			testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
 			t.Chdir(dir)
-			assert.Equal(t, tc.want, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+			before := len(sshCalls())
+			operation := gitremote.WithResolutionCache(ctx)
+			assert.Equal(t, tc.want, checkpointSyncAllowedForRemote(operation, "origin", ""))
+			after := len(sshCalls())
+			assert.Equal(t, tc.want, checkpointSyncAllowedForRemote(operation, "origin", ""))
+			assert.Len(t, sshCalls(), after, "matching again in the same push must reuse discovery")
+			if tc.elected == tc.push {
+				assert.Equal(t, before+1, after)
+			}
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,6 +26,19 @@ func OriginRepoSlug(remoteURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing remote URL: %w", err)
 	}
+	return originInfoSlug(info, remoteURL)
+}
+
+// ResolveOriginRepoSlug resolves a configured remote in its target worktree.
+func ResolveOriginRepoSlug(ctx context.Context, dir string, env []string, remoteURL string) (string, error) {
+	info, err := gitremote.ResolveInfoBestEffort(ctx, dir, env, remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("resolve origin identity: %w", err)
+	}
+	return originInfoSlug(info, remoteURL)
+}
+
+func originInfoSlug(info *gitremote.Info, remoteURL string) (string, error) {
 	if !gitremote.IsForgePathToken(info.Forge) {
 		return "", fmt.Errorf("origin remote is not a GitHub or Entire-native repository (host: %s); expected %s", info.CanonicalHost(), RepoSlugShapes)
 	}

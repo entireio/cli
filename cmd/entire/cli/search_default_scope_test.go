@@ -27,7 +27,7 @@ func TestResolveDefaultSearchRepo(t *testing.T) {
 		{name: "native origin", origin: "entire://cell1.entire.io/et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "github origin", origin: "https://github.com/acme/thing.git", wantForge: "gh", wantOwner: "acme", wantRepo: "thing"},
 		{name: "mirror origin", origin: "entire://cell1.entire.io/gh/acme/thing", wantForge: "gh", wantOwner: "acme", wantRepo: "thing"},
-		{name: "native origin with explicit scope still resolves", origin: "entire://cell1.entire.io/et/audit1/foo", explicit: true, wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
+		{name: "explicit scope skips origin", origin: "entire://cell1.entire.io/et/audit1/foo", explicit: true},
 		{name: "no origin without explicit scope is an error", wantErr: "use --repo or --all-repos"},
 		{name: "no origin with explicit scope is not an error", explicit: true},
 	}

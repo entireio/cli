@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,27 @@ import (
 // Skipped on Windows, which cannot run the shell script.
 func InstallFakeSSH(t *testing.T, aliases map[string]string) (calls func() []string) {
 	t.Helper()
+	details := InstallFakeSSHWithCalls(t, aliases)
+	return func() []string {
+		var hosts []string
+		for _, call := range details() {
+			hosts = append(hosts, call.Args[len(call.Args)-1])
+		}
+		return hosts
+	}
+}
+
+// SSHCall records the full argv and working directory of one fake SSH lookup.
+type SSHCall struct {
+	Args []string
+	Dir  string
+}
+
+// InstallFakeSSHWithCalls is InstallFakeSSH with full invocation evidence.
+// Supports ssh -G [-l user] [-p port] host. The original helper still returns
+// only host names for existing callers.
+func InstallFakeSSHWithCalls(t *testing.T, aliases map[string]string) func() []SSHCall {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake ssh is a shell script")
 	}
@@ -42,10 +64,14 @@ func InstallFakeSSH(t *testing.T, aliases map[string]string) (calls func() []str
 	logPath := filepath.Join(dir, "calls.log")
 	script := "#!/bin/sh\n" +
 		"[ \"$1\" = \"-G\" ] || exit 255\n" +
-		"echo \"$2\" >> '" + logPath + "'\n" +
+		"printf '%s\\0' \"$PWD\" \"$#\" \"$@\" >> '" + logPath + "'\n" +
+		"shift\n" +
+		"while [ \"$#\" -gt 1 ]; do\n" +
+		"  case \"$1\" in -l|-p) [ \"$#\" -ge 3 ] || exit 255; shift 2 ;; *) exit 255 ;; esac\n" +
+		"done\n" +
 		"echo \"user git\"\n" +
-		"case \"$2\" in\n" + cases.String() +
-		"  *) echo \"hostname $2\" ;;\n" +
+		"case \"$1\" in\n" + cases.String() +
+		"  *) echo \"hostname $1\" ;;\n" +
 		"esac\n" +
 		"echo \"port 22\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil { //nolint:gosec // test helper must be executable
@@ -63,11 +89,24 @@ func InstallFakeSSH(t *testing.T, aliases map[string]string) (calls func() []str
 	if err := os.Remove(logPath); err != nil {
 		t.Fatalf("reset fake ssh call log: %v", err)
 	}
-	return func() []string {
-		data, err := os.ReadFile(logPath) //nolint:gosec // the log lives in this test's own TempDir
-		if err != nil {
+	return func() []SSHCall {
+		data, err := os.ReadFile(logPath) //nolint:gosec // test-owned log
+		if os.IsNotExist(err) {
 			return nil
 		}
-		return strings.Fields(string(data))
+		if err != nil {
+			t.Fatalf("read fake ssh calls: %v", err)
+		}
+		fields := strings.Split(string(data), "\x00")
+		var calls []SSHCall
+		for len(fields) > 1 {
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n < 1 || len(fields) < n+3 {
+				t.Fatal("invalid fake ssh call log")
+			}
+			calls = append(calls, SSHCall{Dir: fields[0], Args: fields[2 : 2+n]})
+			fields = fields[2+n:]
+		}
+		return calls
 	}
 }

@@ -197,8 +197,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 
 	// Resolve scope before the TurnStart prompt path.
-	refreshCtx, refreshCancel := context.WithTimeout(ctx, trailEnablementSessionStartRefreshTimeout)
-	if scope, scopeErr := currentTrailEnablementScope(refreshCtx); scopeErr != nil {
+	discoveryCtx, discoveryCancel := context.WithTimeout(ctx, trailEnablementScopeDiscoveryTimeout)
+	scope, scopeErr := currentTrailEnablementScope(discoveryCtx)
+	discoveryCancel()
+	if scopeErr != nil {
 		logging.Debug(logCtx, "trails enablement refresh skipped",
 			slog.String("error", scopeErr.Error()))
 	} else {
@@ -206,12 +208,13 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			logging.Debug(logCtx, "failed to cache trails scope hint",
 				slog.String("error", hintErr.Error()))
 		}
+		refreshCtx, refreshCancel := context.WithTimeout(ctx, trailEnablementSessionStartRefreshTimeout)
 		if refreshErr := refreshTrailsEnabledCacheIfStaleForScope(refreshCtx, scope); refreshErr != nil {
 			logging.Debug(logCtx, "trails enablement refresh skipped",
 				slog.String("error", refreshErr.Error()))
 		}
+		refreshCancel()
 	}
-	refreshCancel()
 
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.

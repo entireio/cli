@@ -78,6 +78,8 @@ func TestTrailCommandRejectsRemovedReviewCommand(t *testing.T) {
 
 // Not parallel: uses t.Chdir() to point remote resolution at a fake repo.
 func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	testutil.InstallFakeSSH(t, nil)
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
