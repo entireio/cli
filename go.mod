@@ -16,7 +16,7 @@ require (
 	github.com/entireio/auth-go v0.5.3-0.20260911082959-f3d099d20e7b
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
-	github.com/go-git/go-billy/v6 v6.0.0-beta.1
+	github.com/go-git/go-billy/v6 v6.0.0-beta.1.0.20261118131511-ef69bf247300
 	// Floor, not just a bump: c15a9478 adds plumbing.ValidateBranchName with
 	// native branch-creation rules (including HEAD and @ components). Also
 	// retain go-git#2309 (per-directory ignore Scope): the root-level
@@ -31,7 +31,7 @@ require (
 	// "not found" and Status reported every file under their trees as
 	// modified. go-git#2556 makes an unreadable subtree an error instead of a
 	// silently short walk. Move to a plain tag once one includes f07160f8.
-	github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261105090440-f07160f87eaa
+	github.com/go-git/go-git/v6 v6.0.0-beta.1.0.20261122150234-9f261d7e3f2a
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.1-0.20260624122410-382b2905c041
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260624122410-382b2905c041
 	github.com/gofrs/flock v0.13.2
@@ -50,9 +50,9 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.59.0
 	golang.org/x/mod v0.43.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
@@ -97,7 +97,7 @@ require (
 	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/gitleaks/go-gitdiff v0.9.1 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
-	github.com/go-git/gcfg/v2 v2.0.2 // indirect
+	github.com/go-git/gcfg/v2 v2.0.3 // indirect
 	github.com/go-git/x/plugin/objectsigner/gpg v0.2.1-0.20260624122410-382b2905c041 // indirect
 	github.com/go-git/x/plugin/objectsigner/ssh v0.2.1-0.20260624122410-382b2905c041 // indirect
 	github.com/go-sprout/sprout v1.0.3 // indirect
@@ -133,7 +133,7 @@ require (
 	github.com/rrethy/ahocorasick v1.0.0 // indirect
 	github.com/rs/zerolog v1.33.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/sergi/go-diff v1.4.0 // indirect
+	github.com/sergi/go-diff v1.4.5 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/shurcooL/githubv4 v0.0.0-20260209031235-2402fdf4a9ed // indirect
 	github.com/shurcooL/graphql v0.0.0-20240915155400-7ee5256398cf // indirect
@@ -149,6 +149,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
