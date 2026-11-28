@@ -3,14 +3,16 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 // installReleaseTestPlugin installs entire-<name> as a release install does:
-// the binary in pkg/<name>/, the bin entry a symlink to it, and a manifest.
+// the binary in pkg/<name>/, the bin entry a symlink to it, and a manifest
+// recording agentHelp (nil: a manifest written before the field existed).
 // Skips on Windows (shell-script plugins).
-func installReleaseTestPlugin(t *testing.T, name string, agentHelp bool) {
+func installReleaseTestPlugin(t *testing.T, name string, agentHelp *bool) {
 	t.Helper()
 	pkg, err := PluginPkgDir(name)
 	if err != nil {
@@ -33,70 +35,60 @@ func installReleaseTestPlugin(t *testing.T, name string, agentHelp bool) {
 	}
 }
 
-func agentHelpTopText(t *testing.T) string {
-	t.Helper()
-	return renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true)
-}
-
-func TestAgentHelpNamesPluginsWithGuidance(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
-	withPluginDir(t)
-	installReleaseTestPlugin(t, "stream", true)
-	installReleaseTestPlugin(t, "quiet", false) // doesn't declare it
-	installReleaseTestPlugin(t, "status", true) // a built-in answers status
-
-	out := agentHelpTopText(t)
-
-	block := agentHelpGuidedPluginsHeading + "\n  entire agent-help stream\n"
-	if !strings.Contains(out, block) {
-		t.Fatalf("no guidance block for stream:\n%s", out)
+// The bare `entire agent-help` names, before the commands, the installed
+// plugins whose release declared agent_help, and nothing when there are none.
+func TestAgentHelpGuidedPluginsBlock(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
+	type plugin struct {
+		name      string
+		agentHelp *bool
 	}
-	if strings.Contains(out, "entire agent-help quiet") || strings.Contains(out, "entire agent-help status") {
-		t.Errorf("names a plugin that doesn't declare guidance, or a built-in:\n%s", out)
-	}
-	if strings.Index(out, block) > strings.Index(out, "When to use entire") {
-		t.Error("the block should come before the commands")
-	}
-}
-
-func TestAgentHelpNoGuidanceBlock(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
-	cases := map[string]func(t *testing.T){
-		"no plugins": func(*testing.T) {},
-		"not declared": func(t *testing.T) {
-			installReleaseTestPlugin(t, "stream", false)
-		},
-		// A manifest written before the field existed reads as not declared.
-		"manifest without the field": func(t *testing.T) {
-			installReleaseTestPlugin(t, "stream", false)
-			dir, err := PluginPkgDir("stream")
-			if err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(filepath.Join(dir, pluginManifestFileName))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(data), "agent_help") {
-				t.Fatalf("manifest has the field:\n%s", data)
-			}
-		},
-		// A local install over a release keeps the release's manifest, but
-		// the bin entry is no longer the release binary, which the manifest
-		// describes: the local build may not answer agent-help.
-		"local install over a release": func(t *testing.T) {
-			installReleaseTestPlugin(t, "stream", true)
-			src := t.TempDir()
-			bin := writePluginBinary(t, src, pluginBinaryPrefix+"stream", filepath.Join(src, "args.txt"), 0)
-			if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: bin, Force: true}); err != nil {
-				t.Fatal(err)
-			}
-		},
-	}
-	for name, setup := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		plugins []plugin
+		// localOver is a plugin a local install then replaces: the release's
+		// manifest stays, but the bin entry is no longer the binary it
+		// describes, and the local build may not answer agent-help.
+		localOver string
+		listed    []string
+	}{
+		{name: "none"},
+		{name: "declared", plugins: []plugin{{"stream", new(true)}}, listed: []string{"stream"}},
+		{name: "not declared", plugins: []plugin{{"stream", new(false)}}},
+		{name: "field absent", plugins: []plugin{{"stream", nil}}},
+		{name: "local install over release", plugins: []plugin{{"stream", new(true)}}, localOver: "stream"},
+		{name: "built-in shadows", plugins: []plugin{{"status", new(true)}, {"stream", new(true)}}, listed: []string{"stream"}},
+		// validatePluginName accepts these, but a shell would split them.
+		{name: "shell-unsafe names", plugins: []plugin{{"foo;bar", new(true)}, {"foo bar", new(true)}, {"ok", new(true)}}, listed: []string{"ok"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			withPluginDir(t)
-			setup(t)
-			if out := agentHelpTopText(t); strings.Contains(out, agentHelpGuidedPluginsHeading) {
-				t.Errorf("guidance block printed:\n%s", out)
+			for _, p := range tc.plugins {
+				installReleaseTestPlugin(t, p.name, p.agentHelp)
+			}
+			if tc.localOver != "" {
+				src := t.TempDir()
+				bin := writePluginBinary(t, src, pluginBinaryPrefix+tc.localOver, filepath.Join(src, "args.txt"), 0)
+				if _, err := InstallPluginFromPath(t.Context(), InstallPluginOptions{SourcePath: bin, Force: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out := renderAgentHelpTop(NewRootCmd(), agentHelpTestRepo, true)
+
+			if len(tc.listed) == 0 {
+				if strings.Contains(out, agentHelpGuidedPluginsHeading) {
+					t.Errorf("guidance block printed:\n%s", out)
+				}
+				return
+			}
+			block := agentHelpGuidedPluginsHeading + "\n  entire agent-help " + strings.Join(tc.listed, "\n  entire agent-help ") + "\n"
+			if i := strings.Index(out, block); i < 0 || i > strings.Index(out, "When to use entire") {
+				t.Errorf("want this block before the commands:\n%s\ngot:\n%s", block, out)
+			}
+			for _, p := range tc.plugins {
+				if !slices.Contains(tc.listed, p.name) && strings.Contains(out, "entire agent-help "+p.name) {
+					t.Errorf("%q is named:\n%s", p.name, out)
+				}
 			}
 		})
 	}
@@ -121,28 +113,5 @@ func TestParsePluginMetadataAgentHelp(t *testing.T) {
 		if bool(meta.AgentHelp) != want {
 			t.Errorf("ParsePluginMetadata(%q).AgentHelp = %v, want %v", in, meta.AgentHelp, want)
 		}
-	}
-}
-
-// The block hands each name to agents inside a command to run, so a name
-// validatePluginName accepts but a shell would split or interpret is left
-// out.
-func TestAgentHelpLeavesOutShellUnsafeNames(t *testing.T) { //nolint:paralleltest // mutates ENTIRE_PLUGIN_DIR via t.Setenv
-	withPluginDir(t)
-	for _, name := range []string{"foo;bar", "foo bar"} {
-		if err := validatePluginName(name); err != nil {
-			t.Fatalf("%q is refused earlier (%v); pick a name validatePluginName accepts", name, err)
-		}
-		installReleaseTestPlugin(t, name, true)
-	}
-	installReleaseTestPlugin(t, "ok", true)
-
-	out := agentHelpTopText(t)
-
-	if !strings.Contains(out, "\n  entire agent-help ok\n") {
-		t.Fatalf("the safe name is missing:\n%s", out)
-	}
-	if strings.Contains(out, "foo") {
-		t.Errorf("a shell-unsafe name is listed:\n%s", out)
 	}
 }

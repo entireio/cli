@@ -189,8 +189,8 @@ func TestInstallPluginFromRepo_CopiesDescription(t *testing.T) { //nolint:parall
 	if saved.Description != "Demo plugin for tests" {
 		t.Errorf("saved manifest description = %q, want it copied from %s", saved.Description, pluginMetadataFileName)
 	}
-	if !saved.AgentHelp {
-		t.Errorf("saved manifest agent_help = false, want it copied from %s", pluginMetadataFileName)
+	if saved.AgentHelp == nil || !*saved.AgentHelp {
+		t.Errorf("saved manifest agent_help = %v, want true, copied from %s", saved.AgentHelp, pluginMetadataFileName)
 	}
 }
 
@@ -295,15 +295,19 @@ func TestUpgradeInstalledPlugin_BackfillIsBestEffort(t *testing.T) { //nolint:pa
 	}
 }
 
-// An install whose manifest predates agent_help (it has a description) picks
-// the declaration up on a no-op upgrade, from the installed tag's metadata;
-// a plugin that doesn't declare it, or whose repository can't be read, keeps
-// the manifest as it was.
+// An install whose manifest predates agent_help (it has a description, and no
+// agent_help at all) gets it on a no-op upgrade from the installed tag's
+// metadata, true or false, so a plugin that doesn't declare it isn't fetched
+// again. A repository that can't be read leaves it unrecorded, to retry.
 func TestUpgradeInstalledPlugin_BackfillsAgentHelp(t *testing.T) { //nolint:paralleltest // mutates env
 	for name, tc := range map[string]struct {
-		declared, unreachable, want bool
+		declared, unreachable bool
+		want                  *bool
+		fetches               int // over two upgrades
 	}{
-		"declared": {declared: true, want: true}, "not declared": {}, "repository gone": {declared: true, unreachable: true},
+		"declared":        {declared: true, want: new(true), fetches: 1},
+		"not declared":    {want: new(false), fetches: 1},
+		"repository gone": {declared: true, unreachable: true, fetches: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			withIsolatedPluginEnv(t)
@@ -317,10 +321,10 @@ func TestUpgradeInstalledPlugin_BackfillsAgentHelp(t *testing.T) { //nolint:para
 				t.Fatalf("InstallPluginFromRepo: %v", err)
 			}
 			m, err := LoadPluginManifest("demo")
-			if err != nil || m == nil {
-				t.Fatalf("LoadPluginManifest = %v, %v", m, err)
+			if err != nil || m == nil || m.AgentHelp == nil || *m.AgentHelp != tc.declared {
+				t.Fatalf("install recorded agent_help %v (%v); want %v", m, err, tc.declared)
 			}
-			m.AgentHelp = false // as an older CLI recorded it
+			m.AgentHelp = nil // as an older CLI wrote it
 			if err := SavePluginManifest(m); err != nil {
 				t.Fatal(err)
 			}
@@ -329,14 +333,30 @@ func TestUpgradeInstalledPlugin_BackfillsAgentHelp(t *testing.T) { //nolint:para
 					t.Fatal(err)
 				}
 			}
+			fetches := 0
+			prev := pluginMetadataBackfillFetch
+			pluginMetadataBackfillFetch = func(ctx context.Context, repoURL, tag string) (*PluginMetadata, error) {
+				fetches++
+				return prev(ctx, repoURL, tag)
+			}
+			t.Cleanup(func() { pluginMetadataBackfillFetch = prev })
 
-			if o, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil || !o.Pinned {
-				t.Fatalf("UpgradeInstalledPlugin = %+v, %v", o, err)
+			for range 2 {
+				if o, err := UpgradeInstalledPlugin(ctx, "demo"); err != nil || !o.Pinned {
+					t.Fatalf("UpgradeInstalledPlugin = %+v, %v", o, err)
+				}
 			}
 			got, err := LoadPluginManifest("demo")
-			if err != nil || got == nil || got.AgentHelp != tc.want || got.Description != "Demo plugin for tests" {
+			if err != nil || got == nil || got.Description != "Demo plugin for tests" || !equalBoolPtr(got.AgentHelp, tc.want) {
 				t.Errorf("manifest after upgrade = %+v, %v; want agent_help %v and the description kept", got, err, tc.want)
+			}
+			if fetches != tc.fetches {
+				t.Errorf("metadata fetched %d times over two upgrades, want %d", fetches, tc.fetches)
 			}
 		})
 	}
+}
+
+func equalBoolPtr(a, b *bool) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
 }

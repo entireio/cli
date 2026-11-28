@@ -38,7 +38,7 @@ func agentHelpGuidedPlugins(rootCmd *cobra.Command) []string {
 		if c, _, err := rootCmd.Find([]string{p.Name}); err == nil && c != rootCmd {
 			continue
 		}
-		if m, err := LoadPluginManifest(p.Name); err != nil || m == nil || !m.AgentHelp || !managedEntryIsPkgBinary(p.Path, p.Name) {
+		if m, err := LoadPluginManifest(p.Name); err != nil || m == nil || m.AgentHelp == nil || !*m.AgentHelp || !managedEntryIsPkgBinary(p.Path, p.Name) {
 			continue
 		}
 		names = append(names, p.Name)

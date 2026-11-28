@@ -112,10 +112,12 @@ type PluginManifest struct {
 	// pluginHelpEntries), so it is recorded here to keep `entire --help`
 	// offline and free of plugin execution.
 	Description string `yaml:"description,omitempty"`
-	// AgentHelp records entire-plugin.yml's agent_help at the installed tag:
-	// the plugin answers `entire-<name> agent-help`, so `entire agent-help`
-	// points agents at it.
-	AgentHelp bool `yaml:"agent_help,omitempty"`
+	// AgentHelp records entire-plugin.yml's agent_help at the installed tag
+	// (true: the plugin answers `entire-<name> agent-help`, so
+	// `entire agent-help` points agents at it). nil when never recorded, as
+	// in a manifest written before the field existed, which a no-op upgrade
+	// fills in (backfillManifestMetadata); false is a recorded "no".
+	AgentHelp *bool `yaml:"agent_help,omitempty"`
 }
 
 // PluginRequirement declares a dependency on another plugin. Shared between

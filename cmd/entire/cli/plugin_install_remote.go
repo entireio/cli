@@ -203,10 +203,12 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		Pinned:      opts.Pin != "",
 		InstalledAt: time.Now().UTC(),
 	}
+	// Recorded either way, so a no-op upgrade never fetches it again.
+	agentHelp := meta != nil && bool(meta.AgentHelp)
+	manifest.AgentHelp = &agentHelp
 	if meta != nil {
 		manifest.Requires = meta.Requires
 		manifest.Description = meta.Description
-		manifest.AgentHelp = bool(meta.AgentHelp)
 	}
 	// End the step before placement: it may wait for the plugin tree lock,
 	// which announces that wait on the same writer, and two spinners would
@@ -562,27 +564,31 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 //
 // The tag is the installed one, not the newest, so the text describes the
 // binary that runs. Best effort: the upgrade outcome must not depend on it, so
-// failures are logged and dropped. A plugin whose metadata lacks either pays
-// one metadata fetch per upgrade; upgrade is already a networked command.
+// failures are logged and dropped, to be retried on the next upgrade.
+// agent_help is recorded true or false, so an install fetches for it at most
+// once; a plugin whose metadata has no description still pays one fetch per
+// upgrade for that, as before.
 // The caller holds the plugin's lock.
 func backfillManifestMetadata(ctx context.Context, m *PluginManifest) {
-	if m.Description != "" && m.AgentHelp {
+	if m.Description != "" && m.AgentHelp != nil {
 		return
 	}
-	meta, err := fetchPluginMetadataAtTag(ctx, m.RepoURL, m.Tag)
+	meta, err := pluginMetadataBackfillFetch(ctx, m.RepoURL, m.Tag)
 	if err != nil {
 		logging.Debug(ctx, "plugin upgrade: metadata backfill fetch failed", "plugin", m.Name, "error", err.Error())
 		return
 	}
-	if meta == nil || (meta.Name != "" && meta.Name != m.Name) {
+	if meta != nil && meta.Name != "" && meta.Name != m.Name {
 		return
 	}
 	changed := false
-	if m.Description == "" && meta.Description != "" {
+	if m.Description == "" && meta != nil && meta.Description != "" {
 		m.Description, changed = meta.Description, true
 	}
-	if !m.AgentHelp && bool(meta.AgentHelp) {
-		m.AgentHelp, changed = true, true
+	if m.AgentHelp == nil {
+		// Recorded true or false, so the tag isn't fetched for it again.
+		agentHelp := meta != nil && bool(meta.AgentHelp)
+		m.AgentHelp, changed = &agentHelp, true
 	}
 	if !changed {
 		return
@@ -591,6 +597,10 @@ func backfillManifestMetadata(ctx context.Context, m *PluginManifest) {
 		logging.Debug(ctx, "plugin upgrade: metadata backfill save failed", "plugin", m.Name, "error", err.Error())
 	}
 }
+
+// pluginMetadataBackfillFetch is backfillManifestMetadata's fetch, a seam
+// for tests.
+var pluginMetadataBackfillFetch = fetchPluginMetadataAtTag
 
 // noUpgradeManifestError explains why name, which has no install manifest,
 // cannot be upgraded: it is not installed at all (perhaps removed meanwhile),
