@@ -165,6 +165,12 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`GET /project-resolver/{forge_prefix}/{project}` (`resolveProject`) replaces
+`GET /projects/resolve/{host}/{project}`, verbatim from the published spec
+except that its `automationToken` security alternative is dropped: the vendored
+spec does not define that scheme yet, and ogen aborts on a dangling one. Core
+still serves the old path.
+
 `CreateServiceAccountInputBody`, `ServiceAccount`, `ServiceAccountWithGrants`
 and `GET /service-accounts` are spliced verbatim from the published spec. They
 carry `project_id`: service accounts belong to a project, and `orgId` is
@@ -181,6 +187,41 @@ at the next spec refresh.
 https://entire.com/gh/entirehq/-/trails/23479. A core without it ignores the
 field and assigns the default cell, so `project create` prints the cell the
 server chose.
+
+The three add operations, `POST /orgs/{orgId}/members` (`addOrgMember`),
+`POST /projects/{projectId}/grants` (`grantProjectAccess`) and
+`POST /repos/{repoId}/grants` (`grantRepoAccess`), are spliced *ahead* of the
+deployed spec from the ENT-2652 branch of entiredb#5546 at
+`77278396ace5e41f97e8955d21fcbc39ca63850d`: the whole `post`
+operation of each, the `allow_invitation` property of `AddOrgMemberInputBody`
+and `GrantAccessBody`, and the new `AccountInvited` schema (the 202 body). The
+421 responses reference `JurisdictionRedirectError`, which the deployed spec
+already has, so it is copied verbatim. Every piece is the branch's generated
+`/api/v1/openapi.json`, not hand-written. Core answers the old 201 to a request
+that carries `allow_invitation`, so the client works on either side of the
+deploy. Once entiredb#5546 ships, a normal refresh reproduces these parts; drop
+this paragraph then.
+
+`GET /projects/{projectId}/invitations` (`listProjectInvitations`),
+`DELETE /projects/{projectId}/invitations/{id}` (`revokeProjectInvitation`),
+`GET /repos/{repoId}/invitations` (`listRepoInvitations`) and
+`DELETE /repos/{repoId}/invitations/{id}` (`revokeRepoInvitation`), with
+`ListResourceInvitationsOutputBody` and `ResourceInvitation`, are spliced
+verbatim from the published spec for `project invite` and `repo invite`. So is
+its `Invitation`, which makes `email` optional and adds `inviteeAccountId` and
+`inviteeIdentity`: Core lists account-targeted invitations with no email, and
+the older schema required one, so `org invite list` failed to decode them. The
+create operations on those two paths are not spliced; the CLI does not call
+them. A normal refresh carries all of it.
+
+The eight team operations under `/orgs/{orgId}/teams` (`createTeam`,
+`listTeams`, `getTeam`, `updateTeam`, `deleteTeam`, `listTeamMembers`,
+`addTeamMember`, `removeTeamMember`), their schemas (`Team`, `TeamMember`,
+`ListTeamsOutputBody`, `ListTeamMembersOutputBody`, `CreateTeamInputBody`,
+`UpdateTeamInputBody`) and `GrantAccessBody` (the `team` grantee type and
+`team_id`) are spliced verbatim from the published spec for `org team` and
+`team:<name>` grantees. `TeamMember.status` is in `readModelEnumFields`. A
+normal refresh carries all of it.
 
 The legacy Buildkite routes are spliced *out* the same way. Core no longer
 serves them (entiredb#4868, #4982). The splice removes the seven

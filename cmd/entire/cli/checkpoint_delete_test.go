@@ -111,6 +111,13 @@ type deleteCmdFixture struct {
 
 func newDeleteCmdFixture(t *testing.T) deleteCmdFixture {
 	t.Helper()
+	return newDeleteCmdFixtureWithSession(t, "sess-1", "Claude Code")
+}
+
+// newDeleteCmdFixtureWithSession is newDeleteCmdFixture with the stored
+// session's ID and agent chosen by the caller.
+func newDeleteCmdFixtureWithSession(t *testing.T, sessionID string, agentType types.AgentType) deleteCmdFixture {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "README.md", "# test")
@@ -134,9 +141,9 @@ func newDeleteCmdFixture(t *testing.T) deleteCmdFixture {
 	require.NoError(t, err)
 	require.NoError(t, stores.Persistent.Write(context.Background(), checkpoint.Session{
 		CheckpointID: cid,
-		SessionID:    "sess-1",
+		SessionID:    sessionID,
 		Strategy:     "manual-commit",
-		Agent:        "Claude Code",
+		Agent:        agentType,
 		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
 		Prompts:      []string{"do it"},
 		AuthorName:   "Test",
@@ -434,4 +441,24 @@ func TestBuildCheckpointDeleteJSON_TrackingV1AndHistoryFlag(t *testing.T) {
 	printCheckpointDeletePlan(&buf, plan, nil, true)
 	assert.Contains(t, buf.String(), "refs/remotes/origin/"+paths.MetadataBranchName)
 	assert.Contains(t, buf.String(), "until origin's copy is deleted")
+}
+
+// A checkpoint split across both shard spellings has two local refs, and the
+// delete removes both. The JSON names both, as the text plan does.
+func TestBuildCheckpointDeleteJSON_NamesBothRefsOfASplitCheckpoint(t *testing.T) {
+	t.Parallel()
+	plan := &strategy.CheckpointDeletePlan{
+		CheckpointID:     id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B"),
+		LocalRef:         "refs/entire/checkpoints/6B/01M2DCHJCHTR9T9MZTSB7WV76B",
+		LocalRefOID:      plumbing.NewHash("1111111111111111111111111111111111111111"),
+		OtherLocalRef:    "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B",
+		OtherLocalRefOID: plumbing.NewHash("2222222222222222222222222222222222222222"),
+	}
+
+	doc := buildCheckpointDeleteJSON(plan, nil, nil, true, true)
+
+	assert.Equal(t, plan.LocalRef.String(), doc.Local.Ref)
+	assert.Equal(t, plan.LocalRefOID.String(), doc.Local.RefOID)
+	assert.Equal(t, plan.OtherLocalRef.String(), doc.Local.OtherRef)
+	assert.Equal(t, plan.OtherLocalRefOID.String(), doc.Local.OtherRefOID)
 }

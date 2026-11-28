@@ -5,6 +5,7 @@ package tuiutil
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -37,10 +38,14 @@ func SanitizeDisplayText(s string) string {
 	}, stripped)
 }
 
-// SanitizeDisplayLine is SanitizeDisplayText for server text shown inline in
-// a one-line message: it also drops bidi controls (U+202A–U+202E,
-// U+2066–U+2069, and the other Bidi_Control runes), which are format
-// characters rather than controls and could visually reorder the line.
+// SanitizeDisplayLine is SanitizeDisplayText for server text or stored
+// metadata shown inline in a one-line message: it also drops bidi controls
+// (U+202A–U+202E, U+2066–U+2069, and the other Bidi_Control runes), which are
+// format characters rather than controls and could visually reorder the line.
+// It keeps emoji sequences intact, so it suits prompts as well as labels such
+// as session IDs, agents, models and branch names. Use it at the text
+// rendering boundary only: JSON output escapes control characters itself and
+// must keep the stored value.
 func SanitizeDisplayLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Bidi_Control, r) {
@@ -76,6 +81,17 @@ func SanitizeTerminalText(s string) string {
 		}
 	}
 	return result.String()
+}
+
+// FprintfTerminalText formats like fmt.Fprintf and writes the result through
+// SanitizeTerminalText. It is for messages a command prints itself in place of
+// an error it would otherwise have returned to main.go, which sanitizes those:
+// a self-printed message naming a stored session ID, a path or server text
+// needs the same filter. Line breaks and tabs survive; escape sequences, other
+// control runes and bidi controls do not. Styled output must not go through
+// it, since the styling escapes would be stripped too.
+func FprintfTerminalText(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, SanitizeTerminalText(fmt.Sprintf(format, args...)))
 }
 
 // SanitizeTerminalLabel is SanitizeTerminalText for width-aligned list labels:

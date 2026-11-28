@@ -34,8 +34,10 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project get":    true,
 		"project delete": false,
 		// list and add render the agents.
-		"project agent list": true,
-		"project agent add":  true,
+		"project agent list":  true,
+		"project agent add":   true,
+		"project agent setup": true,  // prints binding IDs, never credentials
+		"project agent serve": false, // foreground progress, not a JSON document
 		// each prints the run the server returns, or a page of runs.
 		"project agent run list":   true,
 		"project agent run show":   true,
@@ -70,15 +72,28 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"org grant remove": false,
 		// invite send renders the invitation it created or resent, invite list
 		// the listing; invite revoke only reports, like remove.
-		"org invite send":      true,
-		"org invite list":      true,
-		"org invite revoke":    false,
-		"project grant add":    true,
-		"project grant list":   true,
-		"project grant remove": false,
-		"repo grant add":       true,
-		"repo grant list":      true,
-		"repo grant remove":    false,
+		"org invite send":   true,
+		"org invite list":   true,
+		"org invite revoke": false,
+		// team create/rename render the team; member add the added members.
+		"org team list":          true,
+		"org team create":        true,
+		"org team rename":        true,
+		"org team delete":        false,
+		"org team member list":   true,
+		"org team member add":    true,
+		"org team member remove": false,
+		"project grant add":      true,
+		"project grant list":     true,
+		"project grant remove":   false,
+		"repo grant add":         true,
+		"repo grant list":        true,
+		"repo grant remove":      false,
+		// project and repo invite mirror org invite's list and revoke.
+		"project invite list":   true,
+		"project invite revoke": false,
+		"repo invite list":      true,
+		"repo invite revoke":    false,
 	}
 
 	got := map[string]bool{}

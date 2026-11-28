@@ -20,8 +20,8 @@ import (
 const (
 	trailMergeTestRepoID = "repo_example"
 	trailMergeTestHead   = "head-example"
-	trailMergeRepoPath   = "/api/v1/repos/" + trailMergeTestRepoID + "/trails/7"
-	trailMergeLookupBase = "/api/v1/repos/repo_example/trails"
+	trailMergeRepoPath   = "/api/v1/repos/" + trailMergeTestRepoID + "/changes/7"
+	trailMergeLookupBase = "/api/v1/repos/repo_example/changes"
 )
 
 // trailMergeability builds a mergeability body in the server's shape
@@ -247,7 +247,7 @@ func TestTrailMerge_FallbackBlockersReportCI(t *testing.T) {
 
 func TestTrailMerge_ForceSendsBypass(t *testing.T) {
 	for _, target := range []struct{ repo, lookupBase string }{
-		{"gh/acme/widget", "/api/v1/trails/gh/acme/widget"},
+		{"gh/acme/widget", "/api/v1/repos/repo_example/changes"},
 		{"et/acme/widget", trailMergeLookupBase},
 	} {
 		t.Run(target.repo, func(t *testing.T) {
@@ -367,7 +367,7 @@ func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 // neither outcome, and the CLI prints none.
 func TestTrailMerge_GitHubTrailReportsNoBranchOutcome(t *testing.T) {
 	stub := &trailMergeStub{
-		t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
+		t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
 		mergeBody: `{"ok":true,"mergeCommitSha":"merge-example","branchDeleted":false}`,
 	}
 	out, err := runTrailMergeTest(t, stub, "gh/acme/widget")
@@ -385,7 +385,7 @@ func TestTrailMerge_GitHubTrailReportsNoBranchOutcome(t *testing.T) {
 func TestTrailMerge_GitHubTrailRefusesDeleteBranchFlags(t *testing.T) {
 	for _, flag := range []string{"--delete-branch", "--no-delete-branch", "--delete-branch=false"} {
 		t.Run(flag, func(t *testing.T) {
-			stub := &trailMergeStub{t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
+			stub := &trailMergeStub{t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
 			_, err := runTrailMergeTest(t, stub, "gh/acme/widget", flag)
 
 			require.ErrorContains(t, err, "--delete-branch and --no-delete-branch apply to native trails only")
@@ -765,7 +765,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 	})
 	t.Run("github trail omits the repo setting", func(t *testing.T) {
 		// The server reports null for a GitHub-backed repo, where GitHub decides.
-		stub := &trailMergeStub{t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
+		stub := &trailMergeStub{t: t, lookupBase: "/api/v1/repos/repo_example/changes", mergeability: trailMergeability(t, withField("delete_branch_on_merge", nil)),
 			mergeBody: `{"ok":true,"mergeCommitSha":"merge-example","branchDeleted":false}`}
 		out, err := runTrailMergeTest(t, stub, "gh/acme/widget", "--json")
 

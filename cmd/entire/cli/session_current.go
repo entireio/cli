@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
 
@@ -145,7 +146,7 @@ func reportNoSessionEnvelope(cmd *cobra.Command, machineReadable bool, sentinel 
 		out = cmd.ErrOrStderr()
 	}
 	for _, line := range lines {
-		fmt.Fprintln(out, line)
+		tuiutil.FprintfTerminalText(out, "%s\n", line)
 	}
 	if machineReadable {
 		return NewSilentError(sentinel)

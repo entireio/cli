@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -325,16 +326,16 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, ref string, no
 		}
 	}
 	if waitErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s. Readiness was not confirmed: %v\n", shown, renderRepoReadError(waitErr))
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Repository creation succeeded: %s. Readiness was not confirmed: %v\n", shown, renderRepoReadError(waitErr))
 		// The PATH, because that is what `repo view` takes — a ULID is not a
 		// repository's name and the verb no longer accepts one. With no path
 		// yet there is no ref to offer, so the inspection lines are dropped
 		// rather than naming a command that would fail; the rest of the advice
 		// does not depend on them.
 		if viewRef != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo view %s\nCheck readiness with: entire repo view %s --authoritative\nWhen that command reports the primary as ready, retry the intended push or mirror creation.\n", viewRef, viewRef)
+			tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "Inspect repository details with: entire repo view %s\nCheck readiness with: entire repo view %s --authoritative\nWhen that command reports the primary as ready, retry the intended push or mirror creation.\n", viewRef, viewRef)
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "If readiness remains unavailable, contact support with this repository ID (%s). Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID)
+		tuiutil.FprintfTerminalText(cmd.ErrOrStderr(), "If readiness remains unavailable, contact support with this repository ID (%s). Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID)
 		return NewSilentError(errors.Join(waitErr, outputErr))
 	}
 	if noWait && (result.State.Or("") != repoStateActive || result.Foreign.Or(false)) {

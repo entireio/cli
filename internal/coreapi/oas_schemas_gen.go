@@ -257,6 +257,119 @@ func (s *AccountIdentityAdditional) init() AccountIdentityAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/AccountInvited
+type AccountInvited struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// When the invitation stops being valid.
+	ExpiresAt time.Time `json:"expires_at"`
+	// The open invitation for the account.
+	InvitationID string `json:"invitation_id"`
+	// Always invited.
+	Status          AccountInvitedStatus `json:"status"`
+	AdditionalProps AccountInvitedAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *AccountInvited) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *AccountInvited) GetExpiresAt() time.Time {
+	return s.ExpiresAt
+}
+
+// GetInvitationID returns the value of InvitationID.
+func (s *AccountInvited) GetInvitationID() string {
+	return s.InvitationID
+}
+
+// GetStatus returns the value of Status.
+func (s *AccountInvited) GetStatus() AccountInvitedStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountInvited) GetAdditionalProps() AccountInvitedAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *AccountInvited) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *AccountInvited) SetExpiresAt(val time.Time) {
+	s.ExpiresAt = val
+}
+
+// SetInvitationID sets the value of InvitationID.
+func (s *AccountInvited) SetInvitationID(val string) {
+	s.InvitationID = val
+}
+
+// SetStatus sets the value of Status.
+func (s *AccountInvited) SetStatus(val AccountInvitedStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountInvited) SetAdditionalProps(val AccountInvitedAdditional) {
+	s.AdditionalProps = val
+}
+
+func (*AccountInvited) addOrgMemberRes()       {}
+func (*AccountInvited) grantProjectAccessRes() {}
+func (*AccountInvited) grantRepoAccessRes()    {}
+
+type AccountInvitedAdditional map[string]jx.Raw
+
+func (s *AccountInvitedAdditional) init() AccountInvitedAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Always invited.
+type AccountInvitedStatus string
+
+const (
+	AccountInvitedStatusInvited AccountInvitedStatus = "invited"
+)
+
+// AllValues returns all AccountInvitedStatus values.
+func (AccountInvitedStatus) AllValues() []AccountInvitedStatus {
+	return []AccountInvitedStatus{
+		AccountInvitedStatusInvited,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AccountInvitedStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case AccountInvitedStatusInvited:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AccountInvitedStatus) UnmarshalText(data []byte) error {
+	switch AccountInvitedStatus(data) {
+	case AccountInvitedStatusInvited:
+		*s = AccountInvitedStatusInvited
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/AccountProfile
 type AccountProfile struct {
 	// A URL to the JSON Schema for this object.
@@ -486,9 +599,14 @@ func (s *AccountProfileOrganizationAdditional) init() AccountProfileOrganization
 // Ref: #/components/schemas/AddOrgMemberInputBody
 type AddOrgMemberInputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema         OptURI `json:"$schema"`
-	Provider       string `json:"provider"`
-	ProviderUserId string `json:"providerUserId"`
+	Schema OptURI `json:"$schema"`
+	// Set true to let the add invite an account that is outside the organization. The add then answers
+	// 202 with an invitation, unless the organization refuses invitations; the operation names that
+	// refusal. Without it, that add answers 409 with type https://entire.com/errors/invitation/required
+	// and writes nothing. The platform-admin routes ignore it: they always add directly.
+	AllowInvitation OptBool `json:"allow_invitation"`
+	Provider        string  `json:"provider"`
+	ProviderUserId  string  `json:"providerUserId"`
 	// Role at the org; defaults to member.
 	Role            OptAddOrgMemberInputBodyRole `json:"role"`
 	AdditionalProps AddOrgMemberInputBodyAdditional
@@ -497,6 +615,11 @@ type AddOrgMemberInputBody struct {
 // GetSchema returns the value of Schema.
 func (s *AddOrgMemberInputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetAllowInvitation returns the value of AllowInvitation.
+func (s *AddOrgMemberInputBody) GetAllowInvitation() OptBool {
+	return s.AllowInvitation
 }
 
 // GetProvider returns the value of Provider.
@@ -522,6 +645,11 @@ func (s *AddOrgMemberInputBody) GetAdditionalProps() AddOrgMemberInputBodyAdditi
 // SetSchema sets the value of Schema.
 func (s *AddOrgMemberInputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetAllowInvitation sets the value of AllowInvitation.
+func (s *AddOrgMemberInputBody) SetAllowInvitation(val OptBool) {
+	s.AllowInvitation = val
 }
 
 // SetProvider sets the value of Provider.
@@ -603,6 +731,9 @@ func (s *AddOrgMemberInputBodyRole) UnmarshalText(data []byte) error {
 		return errors.Errorf("invalid value: %q", data)
 	}
 }
+
+// AddTeamMemberNoContent is response for AddTeamMember operation.
+type AddTeamMemberNoContent struct{}
 
 // Ref: #/components/schemas/AuditEvent
 type AuditEvent struct {
@@ -4242,6 +4373,56 @@ func (s *CreateServiceAccountSecretOutputBodyAdditional) init() CreateServiceAcc
 	return m
 }
 
+// Ref: #/components/schemas/CreateTeamInputBody
+type CreateTeamInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Lowercase letters, digits, and '-'. Unique in the organization.
+	Name            string `json:"name"`
+	AdditionalProps CreateTeamInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateTeamInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetName returns the value of Name.
+func (s *CreateTeamInputBody) GetName() string {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateTeamInputBody) GetAdditionalProps() CreateTeamInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateTeamInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetName sets the value of Name.
+func (s *CreateTeamInputBody) SetName(val string) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateTeamInputBody) SetAdditionalProps(val CreateTeamInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateTeamInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateTeamInputBodyAdditional) init() CreateTeamInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/CreatedOrg
 type CreatedOrg struct {
 	// A URL to the JSON Schema for this object.
@@ -5170,6 +5351,9 @@ type DeleteServiceAccountNoContent struct{}
 
 // DeleteServiceAccountSecretNoContent is response for DeleteServiceAccountSecret operation.
 type DeleteServiceAccountSecretNoContent struct{}
+
+// DeleteTeamNoContent is response for DeleteTeam operation.
+type DeleteTeamNoContent struct{}
 
 // Ref: #/components/schemas/DeletionBlocker
 type DeletionBlocker struct {
@@ -7198,13 +7382,23 @@ type GrantAccessBody struct {
 	Schema OptURI `json:"$schema"`
 	// Entire account ULID to grant directly. Mutually exclusive with provider/providerUserId; the
 	// account must exist.
-	AccountId   OptString                     `json:"accountId"`
-	GranteeType OptGrantAccessBodyGranteeType `json:"granteeType"`
+	AccountId OptString `json:"accountId"`
+	// Set true to let the grant invite an account that is outside the parent scope. The grant then
+	// answers 202 with an invitation, unless the scope refuses invitations; the operation names those
+	// refusals. Without it, that grant answers 409 with type https://entire.
+	// com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they
+	// always grant directly.
+	AllowInvitation OptBool                       `json:"allow_invitation"`
+	GranteeType     OptGrantAccessBodyGranteeType `json:"granteeType"`
 	// Legacy identity selector; requires providerUserId and must not be combined with accountId.
 	Provider OptString `json:"provider"`
 	// Legacy provider user ID; requires provider and must not be combined with accountId.
-	ProviderUserId  OptString           `json:"providerUserId"`
-	Role            GrantAccessBodyRole `json:"role"`
+	ProviderUserId OptString           `json:"providerUserId"`
+	Role           GrantAccessBodyRole `json:"role"`
+	// Entire team ULID to grant. Required when granteeType is team, and refused otherwise. Must not be
+	// combined with accountId, provider/providerUserId or allow_invitation. The team must belong to the
+	// organization that owns the resource; any other team answers 404.
+	TeamID          OptString `json:"team_id"`
 	AdditionalProps GrantAccessBodyAdditional
 }
 
@@ -7216,6 +7410,11 @@ func (s *GrantAccessBody) GetSchema() OptURI {
 // GetAccountId returns the value of AccountId.
 func (s *GrantAccessBody) GetAccountId() OptString {
 	return s.AccountId
+}
+
+// GetAllowInvitation returns the value of AllowInvitation.
+func (s *GrantAccessBody) GetAllowInvitation() OptBool {
+	return s.AllowInvitation
 }
 
 // GetGranteeType returns the value of GranteeType.
@@ -7238,6 +7437,11 @@ func (s *GrantAccessBody) GetRole() GrantAccessBodyRole {
 	return s.Role
 }
 
+// GetTeamID returns the value of TeamID.
+func (s *GrantAccessBody) GetTeamID() OptString {
+	return s.TeamID
+}
+
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *GrantAccessBody) GetAdditionalProps() GrantAccessBodyAdditional {
 	return s.AdditionalProps
@@ -7251,6 +7455,11 @@ func (s *GrantAccessBody) SetSchema(val OptURI) {
 // SetAccountId sets the value of AccountId.
 func (s *GrantAccessBody) SetAccountId(val OptString) {
 	s.AccountId = val
+}
+
+// SetAllowInvitation sets the value of AllowInvitation.
+func (s *GrantAccessBody) SetAllowInvitation(val OptBool) {
+	s.AllowInvitation = val
 }
 
 // SetGranteeType sets the value of GranteeType.
@@ -7273,6 +7482,11 @@ func (s *GrantAccessBody) SetRole(val GrantAccessBodyRole) {
 	s.Role = val
 }
 
+// SetTeamID sets the value of TeamID.
+func (s *GrantAccessBody) SetTeamID(val OptString) {
+	s.TeamID = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *GrantAccessBody) SetAdditionalProps(val GrantAccessBodyAdditional) {
 	s.AdditionalProps = val
@@ -7293,12 +7507,14 @@ type GrantAccessBodyGranteeType string
 
 const (
 	GrantAccessBodyGranteeTypeAccount GrantAccessBodyGranteeType = "account"
+	GrantAccessBodyGranteeTypeTeam    GrantAccessBodyGranteeType = "team"
 )
 
 // AllValues returns all GrantAccessBodyGranteeType values.
 func (GrantAccessBodyGranteeType) AllValues() []GrantAccessBodyGranteeType {
 	return []GrantAccessBodyGranteeType{
 		GrantAccessBodyGranteeTypeAccount,
+		GrantAccessBodyGranteeTypeTeam,
 	}
 }
 
@@ -7306,6 +7522,8 @@ func (GrantAccessBodyGranteeType) AllValues() []GrantAccessBodyGranteeType {
 func (s GrantAccessBodyGranteeType) MarshalText() ([]byte, error) {
 	switch s {
 	case GrantAccessBodyGranteeTypeAccount:
+		return []byte(s), nil
+	case GrantAccessBodyGranteeTypeTeam:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -7317,6 +7535,9 @@ func (s *GrantAccessBodyGranteeType) UnmarshalText(data []byte) error {
 	switch GrantAccessBodyGranteeType(data) {
 	case GrantAccessBodyGranteeTypeAccount:
 		*s = GrantAccessBodyGranteeTypeAccount
+		return nil
+	case GrantAccessBodyGranteeTypeTeam:
+		*s = GrantAccessBodyGranteeTypeTeam
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -7409,6 +7630,8 @@ func (s *GrantProjectAccessOutputBody) SetAdditionalProps(val GrantProjectAccess
 	s.AdditionalProps = val
 }
 
+func (*GrantProjectAccessOutputBody) grantProjectAccessRes() {}
+
 type GrantProjectAccessOutputBodyAdditional map[string]jx.Raw
 
 func (s *GrantProjectAccessOutputBodyAdditional) init() GrantProjectAccessOutputBodyAdditional {
@@ -7457,6 +7680,8 @@ func (s *GrantRepoAccessOutputBody) SetStatus(val string) {
 func (s *GrantRepoAccessOutputBody) SetAdditionalProps(val GrantRepoAccessOutputBodyAdditional) {
 	s.AdditionalProps = val
 }
+
+func (*GrantRepoAccessOutputBody) grantRepoAccessRes() {}
 
 type GrantRepoAccessOutputBodyAdditional map[string]jx.Raw
 
@@ -7689,16 +7914,20 @@ type Invitation struct {
 	AcceptedByIdentity OptAccountIdentity `json:"acceptedByIdentity"`
 	CreatedAt          time.Time          `json:"createdAt"`
 	DeclinedAt         OptDateTime        `json:"declinedAt"`
-	// The invited address, normalized to lowercase.
-	Email     string    `json:"email"`
+	// The invited address, normalized to lowercase. Empty for an account-targeted invitation.
+	Email     OptString `json:"email"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	ID        string    `json:"id"`
 	// Account ID of the manager who created the invitation. Empty when that account has been erased.
 	InvitedBy string `json:"invitedBy"`
 	// Resolved identity for InvitedBy. Absent when it cannot be resolved.
 	InvitedByIdentity OptAccountIdentity `json:"invitedByIdentity"`
-	RevokedAt         OptDateTime        `json:"revokedAt"`
-	Role              string             `json:"role"`
+	// The invited account. Empty for an email invitation.
+	InviteeAccountId OptString `json:"inviteeAccountId"`
+	// Resolved identity for InviteeAccountID. Absent when it cannot be resolved.
+	InviteeIdentity OptAccountIdentity `json:"inviteeIdentity"`
+	RevokedAt       OptDateTime        `json:"revokedAt"`
+	Role            string             `json:"role"`
 	// Derived from the outcome columns at read time.
 	Status          string `json:"status"`
 	AdditionalProps InvitationAdditional
@@ -7735,7 +7964,7 @@ func (s *Invitation) GetDeclinedAt() OptDateTime {
 }
 
 // GetEmail returns the value of Email.
-func (s *Invitation) GetEmail() string {
+func (s *Invitation) GetEmail() OptString {
 	return s.Email
 }
 
@@ -7757,6 +7986,16 @@ func (s *Invitation) GetInvitedBy() string {
 // GetInvitedByIdentity returns the value of InvitedByIdentity.
 func (s *Invitation) GetInvitedByIdentity() OptAccountIdentity {
 	return s.InvitedByIdentity
+}
+
+// GetInviteeAccountId returns the value of InviteeAccountId.
+func (s *Invitation) GetInviteeAccountId() OptString {
+	return s.InviteeAccountId
+}
+
+// GetInviteeIdentity returns the value of InviteeIdentity.
+func (s *Invitation) GetInviteeIdentity() OptAccountIdentity {
+	return s.InviteeIdentity
 }
 
 // GetRevokedAt returns the value of RevokedAt.
@@ -7810,7 +8049,7 @@ func (s *Invitation) SetDeclinedAt(val OptDateTime) {
 }
 
 // SetEmail sets the value of Email.
-func (s *Invitation) SetEmail(val string) {
+func (s *Invitation) SetEmail(val OptString) {
 	s.Email = val
 }
 
@@ -7832,6 +8071,16 @@ func (s *Invitation) SetInvitedBy(val string) {
 // SetInvitedByIdentity sets the value of InvitedByIdentity.
 func (s *Invitation) SetInvitedByIdentity(val OptAccountIdentity) {
 	s.InvitedByIdentity = val
+}
+
+// SetInviteeAccountId sets the value of InviteeAccountId.
+func (s *Invitation) SetInviteeAccountId(val OptString) {
+	s.InviteeAccountId = val
+}
+
+// SetInviteeIdentity sets the value of InviteeIdentity.
+func (s *Invitation) SetInviteeIdentity(val OptAccountIdentity) {
+	s.InviteeIdentity = val
 }
 
 // SetRevokedAt sets the value of RevokedAt.
@@ -9452,6 +9701,76 @@ func (s *ListProjectCollaboratorsOutputBodyHeaders) SetResponse(val ListProjectC
 	s.Response = val
 }
 
+// Lifecycle state to return; all returns every state.
+type ListProjectInvitationsStatus string
+
+const (
+	ListProjectInvitationsStatusOpen     ListProjectInvitationsStatus = "open"
+	ListProjectInvitationsStatusAccepted ListProjectInvitationsStatus = "accepted"
+	ListProjectInvitationsStatusRevoked  ListProjectInvitationsStatus = "revoked"
+	ListProjectInvitationsStatusExpired  ListProjectInvitationsStatus = "expired"
+	ListProjectInvitationsStatusDeclined ListProjectInvitationsStatus = "declined"
+	ListProjectInvitationsStatusAll      ListProjectInvitationsStatus = "all"
+)
+
+// AllValues returns all ListProjectInvitationsStatus values.
+func (ListProjectInvitationsStatus) AllValues() []ListProjectInvitationsStatus {
+	return []ListProjectInvitationsStatus{
+		ListProjectInvitationsStatusOpen,
+		ListProjectInvitationsStatusAccepted,
+		ListProjectInvitationsStatusRevoked,
+		ListProjectInvitationsStatusExpired,
+		ListProjectInvitationsStatusDeclined,
+		ListProjectInvitationsStatusAll,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListProjectInvitationsStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case ListProjectInvitationsStatusOpen:
+		return []byte(s), nil
+	case ListProjectInvitationsStatusAccepted:
+		return []byte(s), nil
+	case ListProjectInvitationsStatusRevoked:
+		return []byte(s), nil
+	case ListProjectInvitationsStatusExpired:
+		return []byte(s), nil
+	case ListProjectInvitationsStatusDeclined:
+		return []byte(s), nil
+	case ListProjectInvitationsStatusAll:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListProjectInvitationsStatus) UnmarshalText(data []byte) error {
+	switch ListProjectInvitationsStatus(data) {
+	case ListProjectInvitationsStatusOpen:
+		*s = ListProjectInvitationsStatusOpen
+		return nil
+	case ListProjectInvitationsStatusAccepted:
+		*s = ListProjectInvitationsStatusAccepted
+		return nil
+	case ListProjectInvitationsStatusRevoked:
+		*s = ListProjectInvitationsStatusRevoked
+		return nil
+	case ListProjectInvitationsStatusExpired:
+		*s = ListProjectInvitationsStatusExpired
+		return nil
+	case ListProjectInvitationsStatusDeclined:
+		*s = ListProjectInvitationsStatusDeclined
+		return nil
+	case ListProjectInvitationsStatusAll:
+		*s = ListProjectInvitationsStatusAll
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ListProjectMembersOutputBody
 type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -10291,6 +10610,76 @@ func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAddi
 	return m
 }
 
+// Lifecycle state to return; all returns every state.
+type ListRepoInvitationsStatus string
+
+const (
+	ListRepoInvitationsStatusOpen     ListRepoInvitationsStatus = "open"
+	ListRepoInvitationsStatusAccepted ListRepoInvitationsStatus = "accepted"
+	ListRepoInvitationsStatusRevoked  ListRepoInvitationsStatus = "revoked"
+	ListRepoInvitationsStatusExpired  ListRepoInvitationsStatus = "expired"
+	ListRepoInvitationsStatusDeclined ListRepoInvitationsStatus = "declined"
+	ListRepoInvitationsStatusAll      ListRepoInvitationsStatus = "all"
+)
+
+// AllValues returns all ListRepoInvitationsStatus values.
+func (ListRepoInvitationsStatus) AllValues() []ListRepoInvitationsStatus {
+	return []ListRepoInvitationsStatus{
+		ListRepoInvitationsStatusOpen,
+		ListRepoInvitationsStatusAccepted,
+		ListRepoInvitationsStatusRevoked,
+		ListRepoInvitationsStatusExpired,
+		ListRepoInvitationsStatusDeclined,
+		ListRepoInvitationsStatusAll,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListRepoInvitationsStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case ListRepoInvitationsStatusOpen:
+		return []byte(s), nil
+	case ListRepoInvitationsStatusAccepted:
+		return []byte(s), nil
+	case ListRepoInvitationsStatusRevoked:
+		return []byte(s), nil
+	case ListRepoInvitationsStatusExpired:
+		return []byte(s), nil
+	case ListRepoInvitationsStatusDeclined:
+		return []byte(s), nil
+	case ListRepoInvitationsStatusAll:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListRepoInvitationsStatus) UnmarshalText(data []byte) error {
+	switch ListRepoInvitationsStatus(data) {
+	case ListRepoInvitationsStatusOpen:
+		*s = ListRepoInvitationsStatusOpen
+		return nil
+	case ListRepoInvitationsStatusAccepted:
+		*s = ListRepoInvitationsStatusAccepted
+		return nil
+	case ListRepoInvitationsStatusRevoked:
+		*s = ListRepoInvitationsStatusRevoked
+		return nil
+	case ListRepoInvitationsStatusExpired:
+		*s = ListRepoInvitationsStatusExpired
+		return nil
+	case ListRepoInvitationsStatusDeclined:
+		*s = ListRepoInvitationsStatusDeclined
+		return nil
+	case ListRepoInvitationsStatusAll:
+		*s = ListRepoInvitationsStatusAll
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Asc (default) or desc. desc reverses the order, but people without a name stay last on the name
 // and handle sorts.
 type ListRepoPeopleOrder string
@@ -10858,6 +11247,67 @@ func (s *ListReposVisibility) UnmarshalText(data []byte) error {
 	}
 }
 
+// Ref: #/components/schemas/ListResourceInvitationsOutputBody
+type ListResourceInvitationsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema      OptURI               `json:"$schema"`
+	Invitations []ResourceInvitation `json:"invitations"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	AdditionalProps ListResourceInvitationsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListResourceInvitationsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetInvitations returns the value of Invitations.
+func (s *ListResourceInvitationsOutputBody) GetInvitations() []ResourceInvitation {
+	return s.Invitations
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListResourceInvitationsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListResourceInvitationsOutputBody) GetAdditionalProps() ListResourceInvitationsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListResourceInvitationsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetInvitations sets the value of Invitations.
+func (s *ListResourceInvitationsOutputBody) SetInvitations(val []ResourceInvitation) {
+	s.Invitations = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListResourceInvitationsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListResourceInvitationsOutputBody) SetAdditionalProps(val ListResourceInvitationsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListResourceInvitationsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListResourceInvitationsOutputBodyAdditional) init() ListResourceInvitationsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ListServiceAccountGrantsOutputBody
 type ListServiceAccountGrantsOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -11033,6 +11483,128 @@ func (s *ListServiceAccountsOutputBody) SetAdditionalProps(val ListServiceAccoun
 type ListServiceAccountsOutputBodyAdditional map[string]jx.Raw
 
 func (s *ListServiceAccountsOutputBodyAdditional) init() ListServiceAccountsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListTeamMembersOutputBody
+type ListTeamMembersOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema  OptURI       `json:"$schema"`
+	Members []TeamMember `json:"members"`
+	// Present only when more members remain.
+	NextCursor      OptString `json:"next_cursor"`
+	AdditionalProps ListTeamMembersOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListTeamMembersOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMembers returns the value of Members.
+func (s *ListTeamMembersOutputBody) GetMembers() []TeamMember {
+	return s.Members
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListTeamMembersOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListTeamMembersOutputBody) GetAdditionalProps() ListTeamMembersOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListTeamMembersOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMembers sets the value of Members.
+func (s *ListTeamMembersOutputBody) SetMembers(val []TeamMember) {
+	s.Members = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListTeamMembersOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListTeamMembersOutputBody) SetAdditionalProps(val ListTeamMembersOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListTeamMembersOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListTeamMembersOutputBodyAdditional) init() ListTeamMembersOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListTeamsOutputBody
+type ListTeamsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Present only when more teams remain.
+	NextCursor      OptString `json:"next_cursor"`
+	Teams           []Team    `json:"teams"`
+	AdditionalProps ListTeamsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListTeamsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *ListTeamsOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetTeams returns the value of Teams.
+func (s *ListTeamsOutputBody) GetTeams() []Team {
+	return s.Teams
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListTeamsOutputBody) GetAdditionalProps() ListTeamsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListTeamsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *ListTeamsOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetTeams sets the value of Teams.
+func (s *ListTeamsOutputBody) SetTeams(val []Team) {
+	s.Teams = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListTeamsOutputBody) SetAdditionalProps(val ListTeamsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListTeamsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListTeamsOutputBodyAdditional) init() ListTeamsOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -11749,6 +12321,8 @@ func (s *Membership) SetWorkosOrgMembershipId(val OptString) {
 func (s *Membership) SetAdditionalProps(val MembershipAdditional) {
 	s.AdditionalProps = val
 }
+
+func (*Membership) addOrgMemberRes() {}
 
 type MembershipAdditional map[string]jx.Raw
 
@@ -14275,6 +14849,52 @@ func (o OptListOrgPeopleStatus) Or(d ListOrgPeopleStatus) ListOrgPeopleStatus {
 	return d
 }
 
+// NewOptListProjectInvitationsStatus returns new OptListProjectInvitationsStatus with value set to v.
+func NewOptListProjectInvitationsStatus(v ListProjectInvitationsStatus) OptListProjectInvitationsStatus {
+	return OptListProjectInvitationsStatus{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListProjectInvitationsStatus is optional ListProjectInvitationsStatus.
+type OptListProjectInvitationsStatus struct {
+	Value ListProjectInvitationsStatus
+	Set   bool
+}
+
+// IsSet returns true if OptListProjectInvitationsStatus was set.
+func (o OptListProjectInvitationsStatus) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListProjectInvitationsStatus) Reset() {
+	var v ListProjectInvitationsStatus
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListProjectInvitationsStatus) SetTo(v ListProjectInvitationsStatus) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListProjectInvitationsStatus) Get() (v ListProjectInvitationsStatus, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListProjectInvitationsStatus) Or(d ListProjectInvitationsStatus) ListProjectInvitationsStatus {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptListProjectPeopleOrder returns new OptListProjectPeopleOrder with value set to v.
 func NewOptListProjectPeopleOrder(v ListProjectPeopleOrder) OptListProjectPeopleOrder {
 	return OptListProjectPeopleOrder{
@@ -14499,6 +15119,52 @@ func (o OptListRepoCIDeliveriesDirection) Get() (v ListRepoCIDeliveriesDirection
 
 // Or returns value if set, or given parameter if does not.
 func (o OptListRepoCIDeliveriesDirection) Or(d ListRepoCIDeliveriesDirection) ListRepoCIDeliveriesDirection {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListRepoInvitationsStatus returns new OptListRepoInvitationsStatus with value set to v.
+func NewOptListRepoInvitationsStatus(v ListRepoInvitationsStatus) OptListRepoInvitationsStatus {
+	return OptListRepoInvitationsStatus{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListRepoInvitationsStatus is optional ListRepoInvitationsStatus.
+type OptListRepoInvitationsStatus struct {
+	Value ListRepoInvitationsStatus
+	Set   bool
+}
+
+// IsSet returns true if OptListRepoInvitationsStatus was set.
+func (o OptListRepoInvitationsStatus) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListRepoInvitationsStatus) Reset() {
+	var v ListRepoInvitationsStatus
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListRepoInvitationsStatus) SetTo(v ListRepoInvitationsStatus) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListRepoInvitationsStatus) Get() (v ListRepoInvitationsStatus, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListRepoInvitationsStatus) Or(d ListRepoInvitationsStatus) ListRepoInvitationsStatus {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -15741,6 +16407,52 @@ func (o OptRepoReference) Get() (v RepoReference, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptRepoReference) Or(d RepoReference) RepoReference {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptResolveProjectCapabilities returns new OptResolveProjectCapabilities with value set to v.
+func NewOptResolveProjectCapabilities(v ResolveProjectCapabilities) OptResolveProjectCapabilities {
+	return OptResolveProjectCapabilities{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptResolveProjectCapabilities is optional ResolveProjectCapabilities.
+type OptResolveProjectCapabilities struct {
+	Value ResolveProjectCapabilities
+	Set   bool
+}
+
+// IsSet returns true if OptResolveProjectCapabilities was set.
+func (o OptResolveProjectCapabilities) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptResolveProjectCapabilities) Reset() {
+	var v ResolveProjectCapabilities
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptResolveProjectCapabilities) SetTo(v ResolveProjectCapabilities) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptResolveProjectCapabilities) Get() (v ResolveProjectCapabilities, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptResolveProjectCapabilities) Or(d ResolveProjectCapabilities) ResolveProjectCapabilities {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -18213,6 +18925,9 @@ type RemoveOrgMemberNoContent struct{}
 // RemovePluginInstallationRepositoryNoContent is response for RemovePluginInstallationRepository operation.
 type RemovePluginInstallationRepositoryNoContent struct{}
 
+// RemoveTeamMemberNoContent is response for RemoveTeamMember operation.
+type RemoveTeamMemberNoContent struct{}
+
 // Ref: #/components/schemas/Repo
 type Repo struct {
 	// A URL to the JSON Schema for this object.
@@ -20051,27 +20766,29 @@ func (s *ResolvePlacementsOutputBodyAdditional) init() ResolvePlacementsOutputBo
 	return m
 }
 
-type ResolveProjectHost string
+// Optional: live (default) checks GitHub namespace authority now. display may answer from a roster
+// up to 70 minutes old; never use a display capability to authorize a write.
+type ResolveProjectCapabilities string
 
 const (
-	ResolveProjectHostEt ResolveProjectHost = "et"
-	ResolveProjectHostGh ResolveProjectHost = "gh"
+	ResolveProjectCapabilitiesLive    ResolveProjectCapabilities = "live"
+	ResolveProjectCapabilitiesDisplay ResolveProjectCapabilities = "display"
 )
 
-// AllValues returns all ResolveProjectHost values.
-func (ResolveProjectHost) AllValues() []ResolveProjectHost {
-	return []ResolveProjectHost{
-		ResolveProjectHostEt,
-		ResolveProjectHostGh,
+// AllValues returns all ResolveProjectCapabilities values.
+func (ResolveProjectCapabilities) AllValues() []ResolveProjectCapabilities {
+	return []ResolveProjectCapabilities{
+		ResolveProjectCapabilitiesLive,
+		ResolveProjectCapabilitiesDisplay,
 	}
 }
 
 // MarshalText implements encoding.TextMarshaler.
-func (s ResolveProjectHost) MarshalText() ([]byte, error) {
+func (s ResolveProjectCapabilities) MarshalText() ([]byte, error) {
 	switch s {
-	case ResolveProjectHostEt:
+	case ResolveProjectCapabilitiesLive:
 		return []byte(s), nil
-	case ResolveProjectHostGh:
+	case ResolveProjectCapabilitiesDisplay:
 		return []byte(s), nil
 	default:
 		return nil, errors.Errorf("invalid value: %q", s)
@@ -20079,13 +20796,54 @@ func (s ResolveProjectHost) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
-func (s *ResolveProjectHost) UnmarshalText(data []byte) error {
-	switch ResolveProjectHost(data) {
-	case ResolveProjectHostEt:
-		*s = ResolveProjectHostEt
+func (s *ResolveProjectCapabilities) UnmarshalText(data []byte) error {
+	switch ResolveProjectCapabilities(data) {
+	case ResolveProjectCapabilitiesLive:
+		*s = ResolveProjectCapabilitiesLive
 		return nil
-	case ResolveProjectHostGh:
-		*s = ResolveProjectHostGh
+	case ResolveProjectCapabilitiesDisplay:
+		*s = ResolveProjectCapabilitiesDisplay
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+type ResolveProjectForgePrefix string
+
+const (
+	ResolveProjectForgePrefixEt ResolveProjectForgePrefix = "et"
+	ResolveProjectForgePrefixGh ResolveProjectForgePrefix = "gh"
+)
+
+// AllValues returns all ResolveProjectForgePrefix values.
+func (ResolveProjectForgePrefix) AllValues() []ResolveProjectForgePrefix {
+	return []ResolveProjectForgePrefix{
+		ResolveProjectForgePrefixEt,
+		ResolveProjectForgePrefixGh,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResolveProjectForgePrefix) MarshalText() ([]byte, error) {
+	switch s {
+	case ResolveProjectForgePrefixEt:
+		return []byte(s), nil
+	case ResolveProjectForgePrefixGh:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResolveProjectForgePrefix) UnmarshalText(data []byte) error {
+	switch ResolveProjectForgePrefix(data) {
+	case ResolveProjectForgePrefixEt:
+		*s = ResolveProjectForgePrefixEt
+		return nil
+	case ResolveProjectForgePrefixGh:
+		*s = ResolveProjectForgePrefixGh
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -20518,6 +21276,240 @@ func (s *ResolvedPlacement) SetAdditionalProps(val ResolvedPlacementAdditional) 
 type ResolvedPlacementAdditional map[string]jx.Raw
 
 func (s *ResolvedPlacementAdditional) init() ResolvedPlacementAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ResourceInvitation
+type ResourceInvitation struct {
+	// A URL to the JSON Schema for this object.
+	Schema     OptURI      `json:"$schema"`
+	AcceptedAt OptDateTime `json:"acceptedAt"`
+	// Account ID that used the token. Empty until the invitation is accepted.
+	AcceptedBy OptString `json:"acceptedBy"`
+	// Resolved identity for AcceptedBy. Absent when it cannot be resolved.
+	AcceptedByIdentity OptAccountIdentity `json:"acceptedByIdentity"`
+	CreatedAt          time.Time          `json:"createdAt"`
+	DeclinedAt         OptDateTime        `json:"declinedAt"`
+	// The invited address, normalized to lowercase. Empty for an account-targeted invitation.
+	Email     OptString `json:"email"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	ID        string    `json:"id"`
+	// Account ID of the manager who created the invitation. Empty when that account has been erased.
+	InvitedBy string `json:"invitedBy"`
+	// Resolved identity for InvitedBy. Absent when it cannot be resolved.
+	InvitedByIdentity OptAccountIdentity `json:"invitedByIdentity"`
+	// The invited account. Empty for an email invitation.
+	InviteeAccountId OptString `json:"inviteeAccountId"`
+	// Resolved identity for InviteeAccountID. Absent when it cannot be resolved.
+	InviteeIdentity OptAccountIdentity `json:"inviteeIdentity"`
+	RevokedAt       OptDateTime        `json:"revokedAt"`
+	Role            string             `json:"role"`
+	Scope           string             `json:"scope"`
+	// Project ID or repository ID.
+	ScopeId string `json:"scopeId"`
+	// Derived from the outcome columns at read time.
+	Status          string `json:"status"`
+	AdditionalProps ResourceInvitationAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResourceInvitation) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAcceptedAt returns the value of AcceptedAt.
+func (s *ResourceInvitation) GetAcceptedAt() OptDateTime {
+	return s.AcceptedAt
+}
+
+// GetAcceptedBy returns the value of AcceptedBy.
+func (s *ResourceInvitation) GetAcceptedBy() OptString {
+	return s.AcceptedBy
+}
+
+// GetAcceptedByIdentity returns the value of AcceptedByIdentity.
+func (s *ResourceInvitation) GetAcceptedByIdentity() OptAccountIdentity {
+	return s.AcceptedByIdentity
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *ResourceInvitation) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetDeclinedAt returns the value of DeclinedAt.
+func (s *ResourceInvitation) GetDeclinedAt() OptDateTime {
+	return s.DeclinedAt
+}
+
+// GetEmail returns the value of Email.
+func (s *ResourceInvitation) GetEmail() OptString {
+	return s.Email
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *ResourceInvitation) GetExpiresAt() time.Time {
+	return s.ExpiresAt
+}
+
+// GetID returns the value of ID.
+func (s *ResourceInvitation) GetID() string {
+	return s.ID
+}
+
+// GetInvitedBy returns the value of InvitedBy.
+func (s *ResourceInvitation) GetInvitedBy() string {
+	return s.InvitedBy
+}
+
+// GetInvitedByIdentity returns the value of InvitedByIdentity.
+func (s *ResourceInvitation) GetInvitedByIdentity() OptAccountIdentity {
+	return s.InvitedByIdentity
+}
+
+// GetInviteeAccountId returns the value of InviteeAccountId.
+func (s *ResourceInvitation) GetInviteeAccountId() OptString {
+	return s.InviteeAccountId
+}
+
+// GetInviteeIdentity returns the value of InviteeIdentity.
+func (s *ResourceInvitation) GetInviteeIdentity() OptAccountIdentity {
+	return s.InviteeIdentity
+}
+
+// GetRevokedAt returns the value of RevokedAt.
+func (s *ResourceInvitation) GetRevokedAt() OptDateTime {
+	return s.RevokedAt
+}
+
+// GetRole returns the value of Role.
+func (s *ResourceInvitation) GetRole() string {
+	return s.Role
+}
+
+// GetScope returns the value of Scope.
+func (s *ResourceInvitation) GetScope() string {
+	return s.Scope
+}
+
+// GetScopeId returns the value of ScopeId.
+func (s *ResourceInvitation) GetScopeId() string {
+	return s.ScopeId
+}
+
+// GetStatus returns the value of Status.
+func (s *ResourceInvitation) GetStatus() string {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResourceInvitation) GetAdditionalProps() ResourceInvitationAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResourceInvitation) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAcceptedAt sets the value of AcceptedAt.
+func (s *ResourceInvitation) SetAcceptedAt(val OptDateTime) {
+	s.AcceptedAt = val
+}
+
+// SetAcceptedBy sets the value of AcceptedBy.
+func (s *ResourceInvitation) SetAcceptedBy(val OptString) {
+	s.AcceptedBy = val
+}
+
+// SetAcceptedByIdentity sets the value of AcceptedByIdentity.
+func (s *ResourceInvitation) SetAcceptedByIdentity(val OptAccountIdentity) {
+	s.AcceptedByIdentity = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *ResourceInvitation) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetDeclinedAt sets the value of DeclinedAt.
+func (s *ResourceInvitation) SetDeclinedAt(val OptDateTime) {
+	s.DeclinedAt = val
+}
+
+// SetEmail sets the value of Email.
+func (s *ResourceInvitation) SetEmail(val OptString) {
+	s.Email = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *ResourceInvitation) SetExpiresAt(val time.Time) {
+	s.ExpiresAt = val
+}
+
+// SetID sets the value of ID.
+func (s *ResourceInvitation) SetID(val string) {
+	s.ID = val
+}
+
+// SetInvitedBy sets the value of InvitedBy.
+func (s *ResourceInvitation) SetInvitedBy(val string) {
+	s.InvitedBy = val
+}
+
+// SetInvitedByIdentity sets the value of InvitedByIdentity.
+func (s *ResourceInvitation) SetInvitedByIdentity(val OptAccountIdentity) {
+	s.InvitedByIdentity = val
+}
+
+// SetInviteeAccountId sets the value of InviteeAccountId.
+func (s *ResourceInvitation) SetInviteeAccountId(val OptString) {
+	s.InviteeAccountId = val
+}
+
+// SetInviteeIdentity sets the value of InviteeIdentity.
+func (s *ResourceInvitation) SetInviteeIdentity(val OptAccountIdentity) {
+	s.InviteeIdentity = val
+}
+
+// SetRevokedAt sets the value of RevokedAt.
+func (s *ResourceInvitation) SetRevokedAt(val OptDateTime) {
+	s.RevokedAt = val
+}
+
+// SetRole sets the value of Role.
+func (s *ResourceInvitation) SetRole(val string) {
+	s.Role = val
+}
+
+// SetScope sets the value of Scope.
+func (s *ResourceInvitation) SetScope(val string) {
+	s.Scope = val
+}
+
+// SetScopeId sets the value of ScopeId.
+func (s *ResourceInvitation) SetScopeId(val string) {
+	s.ScopeId = val
+}
+
+// SetStatus sets the value of Status.
+func (s *ResourceInvitation) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResourceInvitation) SetAdditionalProps(val ResourceInvitationAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResourceInvitationAdditional map[string]jx.Raw
+
+func (s *ResourceInvitationAdditional) init() ResourceInvitationAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -21255,11 +22247,17 @@ type RevokeProjectAccessByProviderNoContent struct{}
 // RevokeProjectAccessNoContent is response for RevokeProjectAccess operation.
 type RevokeProjectAccessNoContent struct{}
 
+// RevokeProjectInvitationNoContent is response for RevokeProjectInvitation operation.
+type RevokeProjectInvitationNoContent struct{}
+
 // RevokeRepoAccessByProviderNoContent is response for RevokeRepoAccessByProvider operation.
 type RevokeRepoAccessByProviderNoContent struct{}
 
 // RevokeRepoAccessNoContent is response for RevokeRepoAccess operation.
 type RevokeRepoAccessNoContent struct{}
+
+// RevokeRepoInvitationNoContent is response for RevokeRepoInvitation operation.
+type RevokeRepoInvitationNoContent struct{}
 
 // RevokeServiceAccountAccessNoContent is response for RevokeServiceAccountAccess operation.
 type RevokeServiceAccountAccessNoContent struct{}
@@ -22159,6 +23157,218 @@ func (s *SetRepoVisibilityOutputBodyVisibility) UnmarshalText(data []byte) error
 	}
 }
 
+// Ref: #/components/schemas/Team
+type Team struct {
+	// A URL to the JSON Schema for this object.
+	Schema    OptURI    `json:"$schema"`
+	CreatedAt time.Time `json:"created_at"`
+	// True when directory sync owns the team. Such a team is read-only here.
+	DirectoryManaged bool      `json:"directory_managed"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	OrgID            string    `json:"org_id"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	AdditionalProps  TeamAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *Team) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *Team) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetDirectoryManaged returns the value of DirectoryManaged.
+func (s *Team) GetDirectoryManaged() bool {
+	return s.DirectoryManaged
+}
+
+// GetID returns the value of ID.
+func (s *Team) GetID() string {
+	return s.ID
+}
+
+// GetName returns the value of Name.
+func (s *Team) GetName() string {
+	return s.Name
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *Team) GetOrgID() string {
+	return s.OrgID
+}
+
+// GetUpdatedAt returns the value of UpdatedAt.
+func (s *Team) GetUpdatedAt() time.Time {
+	return s.UpdatedAt
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *Team) GetAdditionalProps() TeamAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *Team) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *Team) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetDirectoryManaged sets the value of DirectoryManaged.
+func (s *Team) SetDirectoryManaged(val bool) {
+	s.DirectoryManaged = val
+}
+
+// SetID sets the value of ID.
+func (s *Team) SetID(val string) {
+	s.ID = val
+}
+
+// SetName sets the value of Name.
+func (s *Team) SetName(val string) {
+	s.Name = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *Team) SetOrgID(val string) {
+	s.OrgID = val
+}
+
+// SetUpdatedAt sets the value of UpdatedAt.
+func (s *Team) SetUpdatedAt(val time.Time) {
+	s.UpdatedAt = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *Team) SetAdditionalProps(val TeamAdditional) {
+	s.AdditionalProps = val
+}
+
+type TeamAdditional map[string]jx.Raw
+
+func (s *TeamAdditional) init() TeamAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/TeamMember
+type TeamMember struct {
+	AccountID string `json:"account_id"`
+	// Public avatar URL.
+	AvatarURL OptString `json:"avatar_url"`
+	// Account-level public display name.
+	DisplayName OptString `json:"display_name"`
+	Handle      OptString `json:"handle"`
+	Provider    OptString `json:"provider"`
+	// Membership status in the organization.
+	Status string `json:"status"`
+	// The member's Entire username. Omitted until claimed.
+	Username        OptString `json:"username"`
+	AdditionalProps TeamMemberAdditional
+}
+
+// GetAccountID returns the value of AccountID.
+func (s *TeamMember) GetAccountID() string {
+	return s.AccountID
+}
+
+// GetAvatarURL returns the value of AvatarURL.
+func (s *TeamMember) GetAvatarURL() OptString {
+	return s.AvatarURL
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *TeamMember) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandle returns the value of Handle.
+func (s *TeamMember) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetProvider returns the value of Provider.
+func (s *TeamMember) GetProvider() OptString {
+	return s.Provider
+}
+
+// GetStatus returns the value of Status.
+func (s *TeamMember) GetStatus() string {
+	return s.Status
+}
+
+// GetUsername returns the value of Username.
+func (s *TeamMember) GetUsername() OptString {
+	return s.Username
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *TeamMember) GetAdditionalProps() TeamMemberAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountID sets the value of AccountID.
+func (s *TeamMember) SetAccountID(val string) {
+	s.AccountID = val
+}
+
+// SetAvatarURL sets the value of AvatarURL.
+func (s *TeamMember) SetAvatarURL(val OptString) {
+	s.AvatarURL = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *TeamMember) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *TeamMember) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *TeamMember) SetProvider(val OptString) {
+	s.Provider = val
+}
+
+// SetStatus sets the value of Status.
+func (s *TeamMember) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetUsername sets the value of Username.
+func (s *TeamMember) SetUsername(val OptString) {
+	s.Username = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *TeamMember) SetAdditionalProps(val TeamMemberAdditional) {
+	s.AdditionalProps = val
+}
+
+type TeamMemberAdditional map[string]jx.Raw
+
+func (s *TeamMemberAdditional) init() TeamMemberAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/TopologyCluster
 type TopologyCluster struct {
 	// DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirror-requests.
@@ -22522,6 +23732,56 @@ func (s *UpdateOrgMemberRoleInputBodyRole) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/UpdateTeamInputBody
+type UpdateTeamInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Lowercase letters, digits, and '-'. Unique in the organization. Omitted keeps the name.
+	Name            OptString `json:"name"`
+	AdditionalProps UpdateTeamInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *UpdateTeamInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetName returns the value of Name.
+func (s *UpdateTeamInputBody) GetName() OptString {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *UpdateTeamInputBody) GetAdditionalProps() UpdateTeamInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *UpdateTeamInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetName sets the value of Name.
+func (s *UpdateTeamInputBody) SetName(val OptString) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *UpdateTeamInputBody) SetAdditionalProps(val UpdateTeamInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type UpdateTeamInputBodyAdditional map[string]jx.Raw
+
+func (s *UpdateTeamInputBodyAdditional) init() UpdateTeamInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/ValidatePluginInstallRedirectOutputBody

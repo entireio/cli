@@ -514,8 +514,7 @@ func runNativeRepoView(cmd *cobra.Command, ref, clusterHost string, authoritativ
 			// reporting the failure as a warning instead of an error. Promising
 			// it "without a readiness check" named a recovery step that does
 			// not exist.
-			fmt.Fprintf(cmd.ErrOrStderr(), "%v\nRun entire repo view %s without --authoritative to see the repository with its STATUS unknown.\n", renderRepoReadError(aerr), ref)
-			return NewSilentError(aerr)
+			return printSilentErrorf(cmd.ErrOrStderr(), aerr, "%v\nRun entire repo view %s without --authoritative to see the repository with its STATUS unknown.\n", renderRepoReadError(aerr), ref)
 		case authoritative:
 			// Any other failure of the authoritative read is a real error under
 			// the flag, and reads better as itself than as a readiness hint.

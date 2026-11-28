@@ -239,8 +239,31 @@ always runnable in every build.
   row. The catalog carries no health, capacity or usage data — nothing
   server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
-  grantee, roles owner/admin/member (default member)
+  plus `grant` (`list`/`remove`): org membership for a `provider:handle`
+  grantee, roles owner/admin/member (default member). `invite`
+  (`send`/`list`/`revoke`) manages the org's invitations. `send` takes
+  `--email <address>` or `--account <provider:handle>`, exactly one: the
+  account form is the org add with the invitation allowed. On the customer API
+  no org add is direct (a non-member is invited, a member refused), so
+  `invite send --account` is the one documented way to add someone. `org grant
+  add` makes the same call and is a **hidden** spelling of it
+  (`grantTarget.addDocumentedAs`, cobra `Hidden`): it keeps its arguments,
+  output lines and exit codes for scripts, is absent from `org grant --help`,
+  completions and `agent-help`, and its own help and the `org grant` help name
+  `invite send`. The repo has no alias helper; a compatibility spelling is a
+  hidden command, as `trail delete` is.
+  `team` (`list`/`create`/`rename`/`delete`, and `member`
+  `list`/`add`/`remove`) manages the org's teams. A team is addressed by name.
+  Core routes take the team ULID, so each command resolves the name through
+  the org's team list (`resolveOrgTeam`). A member is a `provider:handle`,
+  resolved to its account ULID. `member add` without a user opens a picker of
+  the org's active members who are not on the team (`teamMemberPicker`).
+  Without a terminal it is refused before any request. `member remove`
+  confirms on a terminal unless `--yes` is given; without a terminal it
+  removes unprompted, like a typed `grant remove`. `delete` confirms like
+  `org delete`. Core's 409 types (`team/name-in-use`,
+  `team/directory-managed`, `invitation/required`) become messages that say
+  what to do next
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `agent` (`list`/`add`): the project's review agents, configured in
   entire-api rather than repository files (they replaced the trail runners).
@@ -253,10 +276,17 @@ always runnable in every build.
   `/{host}/{project}/runs`; `list` prints one page with its cursor, run IDs
   must be ULIDs before any request, `retry` sends an `Idempotency-Key`, and
   `--json` passes the server's runs through. What the agents did on one trail
-  change is `trail finding`, and `trail rerun-review` starts them. Also
+  change is `trail finding`, and `trail rerun-review` starts them.
+  `agent setup` explicitly confirms a service-account repository grant and managed
+  self-hosted Environment binding; `agent serve` executes claimed jobs in the
+  foreground (`--once` processes at most one). These are user-owned commands,
+  separate from local `entire agent` integrations. See
+  [self-hosted project Agents](../architecture/self-hosted-project-agents.md)
+  for identity, isolation and recovery contracts. Also
   `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
-  optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
+  optionally (see the grant-subtree notes below), and `invite` (`list`/`revoke`)
+  for the project's invitations. `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
   to the server's jurisdiction. Without `--owner`, `--owner-type` or
   `--region` (bare, or with just the name as the name field's starting text),
@@ -313,9 +343,9 @@ always runnable in every build.
   like `project delete`.
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
-  `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
-  `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
-  `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
+  `visibility`, `protection`, `grant` and `invite` subtrees (`repo grant` and
+  `repo invite` mirror their `project` counterparts, addressing the repo by its
+  `/et/<project>/<repo>` path; `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
   **A targeting `--cluster` names a cluster by its public host**
@@ -376,7 +406,15 @@ always runnable in every build.
   every named cluster in parallel through one engine — `mirrorTargets` →
   `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
   exactly like the wizard. A failure on one cluster never stops the others; the
-  command exits non-zero naming the ones that failed. `add` defaults to one
+  command exits non-zero naming the ones that failed. An `add` whose wait ends
+  while the latest poll still saw the initial clone `processing` (and no poll
+  failed since) is not a failure: the row reads `still syncing`, the command
+  names `entire repo view <repo>` to check on it, and it exits 0 like
+  `--no-wait`'s `registered`. A deadline in any other state stays `timed out`
+  and fails. A poll interrupted by the wait's own deadline preserves the last
+  answer; a credential failure clears it even if its independent timeout returns
+  after the wait's deadline.
+  `add` defaults to one
   fixed cluster without a terminal so scripts stay stable; `remove` has no
   default at all, because which clusters a repo is on is a property of the repo
   and guessing one would delete a copy nobody named — a terminal gets a
@@ -556,11 +594,34 @@ always runnable in every build.
   rewrite the ref as the one shape that repository can never have. The branch is one optional `listBranch` field on
   `grantTarget`, so the shared builder stays forge-unaware for `org` and
   `project`.
-  **A repository is named `/<forge>/<a>/<b>` and no other way**, across the
-  mirror subtree and `clone` alike: a bare `<a>/<b>` is refused because both
-  forges take that shape, and a GitHub URL is refused because it would be a
-  second spelling for one repo. Both are recognised only to name the ref they
-  should have been. One parser reads both grammars, `parseMirrorRepoRef`, and
+  **A repository is named `/<forge>/<a>/<b>`, or by its `entire.com` URL**,
+  across the mirror subtree and `clone` alike. `https://entire.com/et/<project>/<repo>`
+  and the scheme-less `entire.com/gh/<owner>/<repo>` are an accepted second
+  spelling of the `/et/...` and `/gh/...` paths: it is the product's own origin
+  and what a browser shows, so refusing it costs more than the extra spelling.
+  The host is exactly `entire.com`, read from `api.DefaultWebBaseURL`;
+  `ENTIRE_WEB_BASE_URL` is not honored, and `http://`, `www.` or any subdomain,
+  userinfo, a port, and extra path segments are refused. A bare `<a>/<b>` is
+  still refused because both forges take that shape, and a `https://github.com/...`
+  URL is still refused because it is another vendor's origin and `/gh/` is how
+  a mirror is named. Both are recognised only to name the ref they should have
+  been. The URL names its forge like any other ref, so `entire.com/foo/bar` is
+  refused with the usual hint (see the namesquatting guard below). The URL
+  spelling covers the typed repo refs of the commands named here only: `trail`,
+  `search` and `experts` `--repo` and the org and project grant refs do not
+  take it.
+
+  A typed ref is canonicalized **once, at the command's typed argument**
+  (`newTypedRef`, over `canonicalizeRepoRef`), before anything dispatches on its
+  forge. The strict parsers (`parseNativeCloneRef`, `parseMirrorCloneRef`) and
+  every parser of server text (detached answers, `entire://` clone URLs) never
+  accept the URL form, so a URL in a server answer is never read as a ref the
+  user typed. `TestCanonicalizeRepoRefSitesAreAudited` keeps the list of
+  canonicalizing files: add a site there with a reason, and do not
+  canonicalize deeper. Errors echo the ref as typed, with credentials
+  redacted; success output is the canonical path.
+
+  One parser reads both grammars, `parseMirrorRepoRef`, and
   it takes the forges the *calling verb* serves — the same contract
   `bareRefSuggestions` uses, so a verb can never suggest a ref it refuses on the
   next line. A ref naming a forge the verb does not serve is refused **without
@@ -579,7 +640,8 @@ always runnable in every build.
   its own change.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
-  ref, or a full `entire://` URL passed through verbatim. **Every ref names its
+  ref (either also as its `entire.com` URL), or a full `entire://` URL passed
+  through verbatim. **Every ref names its
   forge**: the leading token alone decides which grammar is tried, and the bare
   `<project>/<repo>` shorthand was removed because both forges take that shape
   and nothing in it says which was meant (#2252).
@@ -596,7 +658,7 @@ always runnable in every build.
   The native `/et/<project>/<repo>` path is **not** clone-only: it is the
   `path` the API returns, and `resolveRepoRef` accepts it for every command
   that takes a repo ref — `view`, `edit`, `delete`, and the `visibility` and
-  `protection` subtrees (COR-1632). `repo grant` takes that path and nothing else — no
+  `protection` subtrees (COR-1632). `repo grant` takes that path or its `entire.com` URL spelling — no
   `--project`, no bare name, no ULID (its `list` reads a `/gh/` mirror ref from
   the mirror endpoint instead, never through this resolver) — through
   `resolveRepoPath`, which parses
@@ -690,6 +752,14 @@ always runnable in every build.
   generic builder plus three target descriptions in `grant.go`; a new target is
   a `grantTarget` value, not a fourth copy of the leaves.
 
+  **A project or repo grantee can be a team, spelled `team:<name>`.** The name
+  resolves in the org that owns the target (`owningOrg`), so an account-owned
+  target refuses a team before any write. A team grant is always direct and
+  sends no `allow_invitation`. `remove` revokes it through the typed-id route
+  with `granteeType=team`, and the remove picker offers direct team grants.
+  `grant list` shows a team row as `team:<name>`. `org grant` refuses a team
+  before any request (`grantTeam` is nil there).
+
   **`add` and `remove` take the grantee optionally**: omitted on a terminal,
   they open a multi-select (`grant_picker.go`). `add` then collects a role **per
   grantee**, so one run can add a reader and an admin; `--role` fixes every row,
@@ -707,6 +777,12 @@ always runnable in every build.
   read for this. `remove` also drops the `owner` row, the owning org itself,
   which holds the target through the authz schema rather than a grant.
 
+  **The `list` table shows one row per grantee; `--json` shows one per source.**
+  ROLE is the effective (strongest) role. SOURCE names every source, strongest
+  first and `direct` first among equals; a weaker source carries its own role,
+  e.g. `project:web, direct (reader)`. `effectiveGrants` does the fold; org
+  membership has one row per member already.
+
   Both earlier versions of the add pool were wrong in opposite directions, so do
   not "simplify" back to either. Subtracting every holder emptied the pool on any
   repo whose project already covered the org, and subtracting none meant every
@@ -714,7 +790,40 @@ always runnable in every build.
   a direct holder has nothing to add and why changing a role is the typed form's
   job.
 
-  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  **An add can invite instead of grant** (ENT-2652). Core grants directly only
+  to an account already inside the parent scope (an active member of the
+  owning org, or a project grant for a repo); any other account, and on the
+  org add (`org invite send --account`, or the hidden `org grant add`) every
+  non-member, gets an invitation it must accept. All three adds send `allow_invitation: true`, so Core answers 202 with
+  `AccountInvited` rather than refusing with the `invitation/required` 409.
+  The text line then says `Invited … No access until they accept` with the
+  invitation id and expiry, and `--json` emits the 202 body (`status:
+  "invited"`, `invitation_id`, `expires_at`) where a grant emits its 201 body.
+  An invitation is a success for the exit code. Refusals (open invitation with
+  another role, SSO-only org, invitation mail cooldown, already a member) are
+  Core's problem `detail`. A typed grantee's refusal is the command's error. A
+  picker run **continues past a refusal**, because each is a condition of that
+  person: it prints `✗ <grantee> was not added to <scope>: <detail>` on stderr
+  and moves on. It stops only at a failure that would repeat for every grantee
+  (`grantFailureIsFatal`: 401, a 403 other than `sso-required`, an unfollowed
+  421, 5xx, and anything that is not a Core problem response, such as a
+  transport failure). It ends with a `N granted, N invited, N refused` tally
+  (`N failed, N not attempted` after a fatal failure) and exits 1 unless
+  everyone was granted or invited. `--json` prints the array of what landed;
+  refusals and the tally go to stderr. The role-mismatch refusal is followed by
+  a line naming `entire <noun> invite list <ref>` and `entire <noun> invite
+  revoke <ref> --id <id>`.
+
+  **`invite list` and `invite revoke`** are one builder over three scopes
+  (`invite_scope.go`), as the grant subtrees are. A listing's INVITEE is the
+  email address, or for an account-targeted invitation the account's primary
+  handle from `inviteeIdentity`, or its `inviteeAccountId` when Core resolved
+  no identity. `revoke` takes `--id` (what `invite list` and the `✓ Invited …
+  (<id>)` line print) or `--email`, exactly one; an email is matched only
+  against open email invitations.
+
+  **The org add has no picker** (it never had one, so hiding `org grant add`
+  removed no way to reach one) (`candidates` is nil, which also keeps it at
   two required args): everyone eligible is by definition absent from the only
   list there is. `org grant remove` does have one, because the members to remove
   ARE that list. There is no user search or global account listing in the API —
@@ -847,12 +956,12 @@ cluster host rather than inventing a forge host. The legacy `/git/` prefix is
 excluded because `repo clone` cannot act on such a ref.
 
 **Being a forge token says nothing about which route accepts it** — the name
-says syntax on purpose. Trails are the current example: a mirror is addressed by
-`forge/owner/repo`, a native repo only by its ULID, so `trailRepoBasePath`
-switches on the forge *after* `IsForgePathToken` has answered yes, and a native
-ref with no resolved repo ID fails there rather than at the grammar. That
-narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
-and inferred from the origin remote — and the inferred one is the common path.
+says syntax on purpose. Repository Changes are addressed by the resolved
+processing-placement ID for **both** GitHub and native repositories:
+`api.RepoChangesPath` builds `/api/v1/repos/{repo_id}/changes` and rejects a
+missing ID, never falling back to a forge/name route. Resolution covers both
+explicit `--repo` references and the origin remote. Project Trail APIs and
+browser URLs keep their separate routing conventions.
 
 Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden

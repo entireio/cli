@@ -6,7 +6,8 @@ import (
 )
 
 const mirrorRepoRefHelp = "Repository references name their forge: /gh/<owner>/<repo> for a GitHub " +
-	"mirror, /et/<project>/<repo> for an Entire-native repository."
+	"mirror, /et/<project>/<repo> for an Entire-native repository. An entire.com " +
+	"URL such as https://entire.com/gh/<owner>/<repo> names the same repository."
 
 // mirrorRepoRef is a repository named the one way this subtree names one:
 // /<forge>/<a>/<b>. The pair reads owner/repo on GitHub and project/repo on
@@ -37,9 +38,11 @@ var (
 )
 
 // parseMirrorRepoRef separates repository syntax from the forges a given verb
-// serves. A repository is named /<forge>/<a>/<b> and no other way, so a bare
-// pair cannot select a forge implicitly and a GitHub URL is recognised only to
-// say which ref it should have been — the same trade `repo clone` makes in
+// serves. A repository is named /<forge>/<a>/<b>, or by its entire.com URL
+// spelling, which the command's typed argument has already canonicalized
+// (newTypedRef) — this parser never sees the URL form. A bare pair cannot
+// select a forge implicitly and a GitHub URL is recognised only to say which
+// ref it should have been — the same trade `repo clone` makes in
 // invalidCloneRefError.
 //
 // forges narrows the answer to the grammars the CALLING verb acts on, exactly

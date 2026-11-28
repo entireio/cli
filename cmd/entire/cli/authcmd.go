@@ -60,6 +60,5 @@ func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if subject == "" {
 		subject = "This repository"
 	}
-	fmt.Fprintf(errW, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror add'.\n", subject)
-	return NewSilentError(err)
+	return printSilentErrorf(errW, err, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror add'.\n", subject)
 }

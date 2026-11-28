@@ -73,6 +73,42 @@
         ],
         "type": "object"
       },
+      "AccountInvited": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AccountInvited.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "When the invitation stops being valid.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "invitation_id": {
+            "description": "The open invitation for the account.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Always invited.",
+            "enum": [
+              "invited"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "invitation_id",
+          "expires_at"
+        ],
+        "type": "object"
+      },
       "AccountProfile": {
         "additionalProperties": true,
         "properties": {
@@ -161,6 +197,10 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "allow_invitation": {
+            "description": "Set true to let the add invite an account that is outside the organization. The add then answers 202 with an invitation, unless the organization refuses invitations; the operation names that refusal. Without it, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they always add directly.",
+            "type": "boolean"
           },
           "provider": {
             "minLength": 1,
@@ -1435,6 +1475,30 @@
         ],
         "type": "object"
       },
+      "CreateTeamInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateTeamInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "Lowercase letters, digits, and '-'. Unique in the organization.",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "CreatedOrg": {
         "additionalProperties": true,
         "properties": {
@@ -2440,10 +2504,15 @@
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           },
+          "allow_invitation": {
+            "description": "Set true to let the grant invite an account that is outside the parent scope. The grant then answers 202 with an invitation, unless the scope refuses invitations; the operation names those refusals. Without it, that grant answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The platform-admin routes ignore it: they always grant directly.",
+            "type": "boolean"
+          },
           "granteeType": {
             "default": "account",
             "enum": [
-              "account"
+              "account",
+              "team"
             ],
             "type": "string"
           },
@@ -2463,6 +2532,11 @@
               "writer",
               "admin"
             ],
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Entire team ULID to grant. Required when granteeType is team, and refused otherwise. Must not be combined with accountId, provider/providerUserId or allow_invitation. The team must belong to the organization that owns the resource; any other team answers 404.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           }
         },
@@ -2606,7 +2680,7 @@
             "type": "string"
           },
           "email": {
-            "description": "The invited address, normalized to lowercase.",
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
             "type": "string"
           },
           "expiresAt": {
@@ -2623,6 +2697,14 @@
           "invitedByIdentity": {
             "$ref": "#/components/schemas/AccountIdentity",
             "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
           },
           "revokedAt": {
             "format": "date-time",
@@ -2650,12 +2732,39 @@
         },
         "required": [
           "id",
-          "email",
           "role",
           "status",
           "invitedBy",
           "createdAt",
           "expiresAt"
+        ],
+        "type": "object"
+      },
+      "JurisdictionRedirectError": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/JurisdictionRedirectError.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "home_core_url": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "home_core_url"
         ],
         "type": "object"
       },
@@ -3398,6 +3507,34 @@
         ],
         "type": "object"
       },
+      "ListResourceInvitationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListResourceInvitationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/ResourceInvitation"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invitations"
+        ],
+        "type": "object"
+      },
       "ListServiceAccountGrantsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3451,6 +3588,62 @@
         },
         "required": [
           "serviceAccounts"
+        ],
+        "type": "object"
+      },
+      "ListTeamMembersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListTeamMembersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/TeamMember"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Present only when more members remain.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "members"
+        ],
+        "type": "object"
+      },
+      "ListTeamsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListTeamsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present only when more teams remain.",
+            "type": "string"
+          },
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/Team"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams"
         ],
         "type": "object"
       },
@@ -5596,6 +5789,112 @@
         ],
         "type": "object"
       },
+      "ResourceInvitation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResourceInvitation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "acceptedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "acceptedBy": {
+            "description": "Account ID that used the token. Empty until the invitation is accepted.",
+            "type": "string"
+          },
+          "acceptedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for AcceptedBy. Absent when it cannot be resolved."
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "declinedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "email": {
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invitedBy": {
+            "description": "Account ID of the manager who created the invitation. Empty when that account has been erased.",
+            "type": "string"
+          },
+          "invitedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
+          },
+          "revokedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "scopeId": {
+            "description": "Project ID or repository ID.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Derived from the outcome columns at read time.",
+            "enum": [
+              "open",
+              "accepted",
+              "revoked",
+              "expired",
+              "declined"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "scopeId",
+          "role",
+          "status",
+          "invitedBy",
+          "createdAt",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
       "ResourcePeopleOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -5933,6 +6232,90 @@
         ],
         "type": "object"
       },
+      "Team": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/Team.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "directory_managed": {
+            "description": "True when directory sync owns the team. Such a team is read-only here.",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "directory_managed",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "TeamMember": {
+        "additionalProperties": true,
+        "properties": {
+          "account_id": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "description": "Public avatar URL.",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "Account-level public display name.",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Membership status in the organization.",
+            "enum": [
+              "active",
+              "inactive",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "username": {
+            "description": "The member's Entire username. Omitted until claimed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "status"
+        ],
+        "type": "object"
+      },
       "TopologyCluster": {
         "additionalProperties": true,
         "properties": {
@@ -6067,6 +6450,27 @@
         "required": [
           "role"
         ],
+        "type": "object"
+      },
+      "UpdateTeamInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateTeamInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "Lowercase letters, digits, and '-'. Unique in the organization. Omitted keeps the name.",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "ValidatePluginInstallRedirectOutputBody": {
@@ -10822,6 +11226,7 @@
         ]
       },
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 no add to an organization is direct. Any other account is outside this organization and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation before the refusals that apply only to an invitation. A retry with allow_invitation therefore invites the account unless this organization refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the organization's home core: another core answers 421.",
         "operationId": "addOrgMember",
         "parameters": [
           {
@@ -10853,7 +11258,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "400": {
             "content": {
@@ -10883,7 +11298,7 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden. Type https://entire.com/errors/invitation/sso-required means that the organization requires single sign-on and the account is outside it; no invitation is created, and the account joins by signing in through that single sign-on. Other refusals carry no type."
           },
           "404": {
             "content": {
@@ -10903,7 +11318,17 @@
                 }
               }
             },
-            "description": "Conflict"
+            "description": "Conflict. Type https://entire.com/errors/invitation/required means that the account is outside this organization and the request did not set allow_invitation. A retry with allow_invitation invites the account unless this organization refuses invitations: the retry then answers 403 with type https://entire.com/errors/invitation/sso-required for an organization that enforces single sign-on. The retry can also answer the 421, the 429 and the role-mismatch 409 of an invitation. Type https://entire.com/errors/invitation/role-mismatch means that an invitation with another role is open; revoke it first. Other conflicts carry another type or none."
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JurisdictionRedirectError"
+                }
+              }
+            },
+            "description": "Only for a request that sets allow_invitation. Retry against home_core_url in the indicated jurisdiction."
           },
           "422": {
             "content": {
@@ -10914,6 +11339,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {
@@ -10940,7 +11375,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Add a member to an organization",
+        "summary": "Add a member to an organization, or invite the account",
         "tags": [
           "orgs"
         ]
@@ -11854,6 +12289,1037 @@
         "summary": "List projects owned by an organization",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams": {
+      "get": {
+        "description": "Requires organization view permission. Returns teams in name order, directory-sync teams included.",
+        "operationId": "listTeams",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Teams per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Teams per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTeamsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List teams of an organization",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "post": {
+        "description": "Requires organization management permission. The name holds lowercase letters, digits, and '-', and is unique in the organization: a taken name answers 409 with type https://entire.com/errors/team/name-in-use.",
+        "operationId": "createTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Create a team in an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}": {
+      "delete": {
+        "description": "Requires organization management permission. Removes the team's members with the team. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "deleteTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "get": {
+        "description": "Requires organization view permission. A team of another organization answers 404.",
+        "operationId": "getTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "patch": {
+        "description": "Requires organization management permission. The body is a JSON Merge Patch (RFC 7396) of name: an omitted or null field keeps its value, and an empty patch returns the team unchanged. The name holds lowercase letters, digits, and '-', and is unique in the organization: a taken name answers 409 with type https://entire.com/errors/team/name-in-use. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "updateTeam",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTeamInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Team"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update a team",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}/members": {
+      "get": {
+        "description": "Requires organization view permission. Returns members with their global public profile. Each member carries the status of its organization membership: a pending or inactive member stays listed and can be removed.",
+        "operationId": "listTeamMembers",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Members per page.",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Members per page.",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTeamMembersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List members of a team",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/teams/{team_id}/members/{account_id}": {
+      "delete": {
+        "description": "Requires organization management permission. The removal is idempotent and answers 204. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "removeTeamMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's ID.",
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "description": "The account's ID.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Remove an account from a team",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "put": {
+        "description": "Requires organization management permission. The add is idempotent and answers 204. Only an active member of the organization can be added: any other account answers 409 with type https://entire.com/errors/invitation/required and nothing is written. A service account answers 403. A team that directory sync owns is read-only here: the write answers 409 with type https://entire.com/errors/team/directory-managed.",
+        "operationId": "addTeamMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's ID.",
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "description": "The account's ID.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Add an account to a team",
+        "tags": [
+          "orgs"
         ]
       }
     },
@@ -13328,14 +14794,14 @@
         ]
       }
     },
-    "/projects/resolve/{host}/{project}": {
+    "/project-resolver/{forge_prefix}/{project}": {
       "get": {
-        "description": "Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. An existing native (et) project the caller cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects, and inaccessible GitHub (gh) namespaces, return 404.",
+        "description": "**Accepted credentials:** User token.\n\nCase-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. An existing native (et) project the caller cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects, and inaccessible GitHub (gh) namespaces, return 404. An automation token always receives 404.",
         "operationId": "resolveProject",
         "parameters": [
           {
             "in": "path",
-            "name": "host",
+            "name": "forge_prefix",
             "required": true,
             "schema": {
               "enum": [
@@ -13352,6 +14818,20 @@
             "schema": {
               "maxLength": 39,
               "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: live (default) checks GitHub namespace authority now. display may answer from a roster up to 70 minutes old; never use a display capability to authorize a write.",
+            "explode": false,
+            "in": "query",
+            "name": "capabilities",
+            "schema": {
+              "description": "Optional: live (default) checks GitHub namespace authority now. display may answer from a roster up to 70 minutes old; never use a display capability to authorize a write.",
+              "enum": [
+                "live",
+                "display"
+              ],
               "type": "string"
             }
           }
@@ -13445,7 +14925,14 @@
         "summary": "Resolve a canonical project reference",
         "tags": [
           "projects"
-        ]
+        ],
+        "x-entire-audience": [
+          "user"
+        ],
+        "x-entire-credentials": [
+          "user-token"
+        ],
+        "x-entire-published": true
       }
     },
     "/projects/{projectId}": {
@@ -13850,6 +15337,7 @@
     },
     "/projects/{projectId}/grants": {
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct for an active member of the owning organization, an account that already holds a grant on the project, and a service account. Any other account is outside this project and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation before the refusals that apply only to an invitation. A retry with allow_invitation therefore invites the account unless this project refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the project's home core: another core answers 421.",
         "operationId": "grantProjectAccess",
         "parameters": [
           {
@@ -13881,7 +15369,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "400": {
             "content": {
@@ -13911,7 +15409,7 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden. Type https://entire.com/errors/invitation/sso-required means that the organization requires single sign-on and the account is outside it; no invitation is created, and the account joins by signing in through that single sign-on. Other refusals carry no type."
           },
           "404": {
             "content": {
@@ -13931,7 +15429,17 @@
                 }
               }
             },
-            "description": "Conflict"
+            "description": "Conflict. Type https://entire.com/errors/invitation/required means that the account is outside this project and the request did not set allow_invitation. A retry with allow_invitation invites the account unless this project refuses invitations: the retry then answers 403 with type https://entire.com/errors/invitation/sso-required for an organization that enforces single sign-on. The retry can also answer the 421, the 429 and the role-mismatch 409 of an invitation. Type https://entire.com/errors/invitation/role-mismatch means that an invitation with another role is open; revoke it first. Other conflicts carry another type or none."
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JurisdictionRedirectError"
+                }
+              }
+            },
+            "description": "Only for a request that sets allow_invitation. Retry against home_core_url in the indicated jurisdiction."
           },
           "422": {
             "content": {
@@ -13942,6 +15450,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {
@@ -13968,7 +15486,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Grant project access to an identity",
+        "summary": "Grant project access to an account, or invite the account",
         "tags": [
           "projects"
         ]
@@ -14223,6 +15741,358 @@
           }
         ],
         "summary": "Revoke project access by grantee id",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/invitations": {
+      "get": {
+        "operationId": "listProjectInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a project's invitations",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeProjectInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "detail": {
+                      "description": "A human-readable explanation specific to this occurrence of the problem.",
+                      "examples": [
+                        "Property foo is required but is missing."
+                      ],
+                      "type": "string"
+                    },
+                    "errors": {
+                      "description": "Optional list of individual error details",
+                      "items": {
+                        "$ref": "#/components/schemas/ErrorDetail"
+                      },
+                      "type": "array"
+                    },
+                    "instance": {
+                      "description": "A URI reference that identifies the specific occurrence of the problem.",
+                      "examples": [
+                        "https://example.com/error-log/abc123"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "accepted: the invitation was accepted; revoke the access instead. Absent for other conflicts.",
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "HTTP status code",
+                      "examples": [
+                        400
+                      ],
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+                      "examples": [
+                        "Bad Request"
+                      ],
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "about:blank",
+                      "description": "A URI reference to human-readable documentation for the error.",
+                      "examples": [
+                        "https://example.com/errors/example"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a project invitation",
         "tags": [
           "projects"
         ]
@@ -17896,6 +19766,7 @@
         ]
       },
       "post": {
+        "description": "The add is direct, and answers 201, when no invitation is needed. On /api/v1 the grant is direct for an account with a grant on the owning project, an active member of the owning organization, an account that already holds a grant on the repository, and a service account. Any other account is outside this repository and joins only by an invitation that it accepts. Set allow_invitation to create that invitation: the add then answers 202 with invitation_id and expires_at, and the account holds no access until it accepts. Without allow_invitation, that add answers 409 with type https://entire.com/errors/invitation/required and writes nothing. The add checks allow_invitation before the refusals that apply only to an invitation. A retry with allow_invitation therefore invites the account unless this repository refuses invitations; the sentences below name those refusals. 201 never carries an invitation. A repeat add reuses an open invitation for the same role and sends no second mail; another role answers 409 with type https://entire.com/errors/invitation/role-mismatch until the invitation is revoked. An organization that enforces single sign-on admits no account by invitation: an add that would invite into it answers 403 with type https://entire.com/errors/invitation/sso-required, and the account joins by signing in through that single sign-on. The add also answers 409, with no type, for a repository of an organization linked to GitHub or outside its project's region: such a repository admits no account by invitation. Invitation mail to one account is limited: 429 carries Retry-After. The invitation is created on the repository's home core: another core answers 421.",
         "operationId": "grantRepoAccess",
         "parameters": [
           {
@@ -17927,7 +19798,17 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Granted. The body is unchanged from before invitations existed."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInvited"
+                }
+              }
+            },
+            "description": "Invited. Only a request that sets allow_invitation receives this."
           },
           "400": {
             "content": {
@@ -17957,7 +19838,7 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden. Type https://entire.com/errors/invitation/sso-required means that the organization requires single sign-on and the account is outside it; no invitation is created, and the account joins by signing in through that single sign-on. Other refusals carry no type."
           },
           "404": {
             "content": {
@@ -17977,7 +19858,17 @@
                 }
               }
             },
-            "description": "Conflict"
+            "description": "Conflict. Type https://entire.com/errors/invitation/required means that the account is outside this repository and the request did not set allow_invitation. A retry with allow_invitation invites the account unless this repository refuses invitations: the retry then answers 403 with type https://entire.com/errors/invitation/sso-required for an organization that enforces single sign-on, or 409 with no type for a repository of an organization linked to GitHub or outside its project's region. The retry can also answer the 421, the 429 and the role-mismatch 409 of an invitation. Type https://entire.com/errors/invitation/role-mismatch means that an invitation with another role is open; revoke it first. Other conflicts carry another type or none."
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JurisdictionRedirectError"
+                }
+              }
+            },
+            "description": "Only for a request that sets allow_invitation. Retry against home_core_url in the indicated jurisdiction."
           },
           "422": {
             "content": {
@@ -17988,6 +19879,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "500": {
             "content": {
@@ -18014,7 +19915,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Grant repo access to an identity",
+        "summary": "Grant repo access to an account, or invite the account",
         "tags": [
           "repos"
         ]
@@ -18269,6 +20170,358 @@
           }
         ],
         "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations": {
+      "get": {
+        "operationId": "listRepoInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repository's invitations",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeRepoInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "detail": {
+                      "description": "A human-readable explanation specific to this occurrence of the problem.",
+                      "examples": [
+                        "Property foo is required but is missing."
+                      ],
+                      "type": "string"
+                    },
+                    "errors": {
+                      "description": "Optional list of individual error details",
+                      "items": {
+                        "$ref": "#/components/schemas/ErrorDetail"
+                      },
+                      "type": "array"
+                    },
+                    "instance": {
+                      "description": "A URI reference that identifies the specific occurrence of the problem.",
+                      "examples": [
+                        "https://example.com/error-log/abc123"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    },
+                    "reason": {
+                      "description": "accepted: the invitation was accepted; revoke the access instead. Absent for other conflicts.",
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "HTTP status code",
+                      "examples": [
+                        400
+                      ],
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+                      "examples": [
+                        "Bad Request"
+                      ],
+                      "type": "string"
+                    },
+                    "type": {
+                      "default": "about:blank",
+                      "description": "A URI reference to human-readable documentation for the error.",
+                      "examples": [
+                        "https://example.com/errors/example"
+                      ],
+                      "format": "uri",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a repository invitation",
         "tags": [
           "repos"
         ]

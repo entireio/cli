@@ -113,7 +113,7 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 		if headErr != nil || worktreeHead != resolved.HeadSHA {
 			cmd.SilenceUsage = true
 			fmt.Fprintf(errOut, "Not run: the worktree for %s at %s is not at %s.\n",
-				sanitizeDisplay(req.Target), resolved.ExistingWorktree, shortSHA(resolved.HeadSHA))
+				sanitizeDisplay(req.Target), sanitizeDisplay(resolved.ExistingWorktree), shortSHA(resolved.HeadSHA))
 			return wrapReviewSilentError(deps.NewSilentError, errors.New("reused worktree out of sync"))
 		}
 		source = TrustSource{WorktreeRoot: resolved.ExistingWorktree}

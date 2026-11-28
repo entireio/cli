@@ -15,7 +15,7 @@ import (
 
 func TestTrailCollectionsFollowOpaqueCursors(t *testing.T) {
 	t.Parallel()
-	for _, base := range []string{"/api/v1/trails/gh/acme/widget", "/api/v1/repos/repo_example/trails"} {
+	for _, base := range []string{"/api/v1/repos/repo_example/changes"} {
 		t.Run(base, func(t *testing.T) {
 			t.Parallel()
 			for _, collection := range []string{"trails", "discussions"} {

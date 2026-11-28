@@ -302,7 +302,7 @@ type trailStack struct {
 }
 
 type trailStackPullRequest struct {
-	PRNumber    int     `json:"pr_number"`
+	PRNumber    *int    `json:"pr_number"`
 	TrailNumber *int    `json:"trail_number"`
 	Title       *string `json:"title"`
 	Status      *string `json:"status"`
@@ -310,9 +310,8 @@ type trailStackPullRequest struct {
 }
 
 func newTrailStackCmd(mode *trailMode) *cobra.Command {
-	return newTrailWorkingReadCmd(mode, "stack", "Show the pull request stack a trail belongs to",
-		"Show the stack of pull requests a trail's pull request belongs to, bottom (closest to the base) first. "+
-			"Only GitHub-backed trails in a stack have one.",
+	return newTrailWorkingReadCmd(mode, "stack", "Show the stack a trail's Change belongs to",
+		"Show the stack a trail's Change belongs to, bottom first.",
 		func(cmd *cobra.Command, selected *trailWorkingContext, jsonOut bool) error {
 			var raw json.RawMessage
 			if err := getTrailRepoIDResource(cmd.Context(), selected, "/stack", "stack", &raw); err != nil {
@@ -327,7 +326,7 @@ func newTrailStackCmd(mode *trailMode) *cobra.Command {
 			}
 			w := cmd.OutOrStdout()
 			if out.Stack == nil {
-				fmt.Fprintf(w, "%s is not in a pull request stack\n", selected.description())
+				fmt.Fprintf(w, "%s is not in a stack\n", selected.description())
 				return nil
 			}
 			printTrailStack(w, selected, out.Stack)
@@ -362,7 +361,12 @@ func printTrailStack(w io.Writer, selected *trailWorkingContext, stack *trailSta
 		if pr.TrailNumber != nil {
 			trailRef = selected.Repo + "/" + strconv.Itoa(*pr.TrailNumber)
 		}
-		fmt.Fprintf(w, "%s#%-6d %-10s %-20s %s\n", marker, pr.PRNumber, tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)),
-			tuiutil.SanitizeTerminalLabel(trailRef), tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title)))
+		prLabel := ""
+		if pr.PRNumber != nil {
+			prLabel = fmt.Sprintf(" (PR #%d)", *pr.PRNumber)
+		}
+		line := fmt.Sprintf("%s%-20s %-10s %s", marker, tuiutil.SanitizeTerminalLabel(trailRef),
+			tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Status)), strings.TrimSpace(tuiutil.SanitizeTerminalLabel(stringPtrValue(pr.Title))+prLabel))
+		fmt.Fprintln(w, strings.TrimRight(line, " "))
 	}
 }

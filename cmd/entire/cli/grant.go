@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -24,8 +26,8 @@ import (
 // Grantees are addressed by a provider-qualified handle (e.g. github:alice),
 // which the CLI resolves to the provider account behind the scenes, and by
 // nothing else: ensureGranteeIsHandle refuses an account ULID on all three
-// targets, before any lookup, on add and remove alike. A user account is the
-// only grantee kind the API grants to today.
+// targets, before any lookup, on add and remove alike. Project and repo
+// targets also take a team of the owning org as team:<name>.
 
 // grantTarget describes one resource kind the shared `<noun> grant` subtree
 // manages. Row is the wire type of one listing entry.
@@ -36,22 +38,31 @@ type grantTarget[Row any] struct {
 	roles       []string // accepted --role values, in help order
 	leastRole   string   // the least-privileged of roles; help order runs least-first for access but most-first for org, so it is named rather than indexed
 	defaultRole string   // "" means --role is required; else the server default applied when --role is omitted
-	columns     []string
-	row         func(Row) []string
+	outsider    string   // who `add` invites rather than grants, for Long: reads after "An account that is"
+	// Keep add runnable for scripts, but point help to this command.
+	addDocumentedAs string
+	columns         []string
+	row             func(Row) []string
+	// fold merges the `list` table to one row per grantee; nil prints rows as sent.
+	fold func([]Row) []Row
 
 	// resolve turns the user's target ref into its ULID. project and repo wrap
 	// theirs because those resolvers take an interface, not *coreapi.Client.
 	resolve func(ctx context.Context, c *coreapi.Client, ref string) (string, error)
-	// grant gives the provider account the role on the resolved target and
-	// returns the effective role: the server's, when role was left to default.
-	grant            func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (granted string, wire any, err error)
+	// grant gives the provider account the role on the resolved target, or
+	// invites it when it is outside the target's parent scope.
+	grant            func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error)
 	list             func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]Row, coreapi.OptString, error)
 	revokeByProvider func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID string) error
 	// revokeByID revokes by the grantee ULID a listing row carries, which needs
 	// no handle lookup and survives a rename. Only the remove picker reaches
 	// it — a typed ULID is refused — so it is nil on org, whose rows are
 	// addressed by handle because org membership has no such route.
-	revokeByID func(ctx context.Context, c *coreapi.Client, id, granteeID string) error
+	revokeByID func(ctx context.Context, c *coreapi.Client, id, granteeType, granteeID string) error
+	// owningOrg returns the org whose teams can hold the target. It and
+	// grantTeam are nil on org, which takes no team grantee.
+	owningOrg func(ctx context.Context, c *coreapi.Client, id string) (string, error)
+	grantTeam func(ctx context.Context, c *coreapi.Client, id, teamID, role string) (grantOutcome, error)
 	// candidates lists who could be granted this target for the interactive
 	// picker: members of the owning org with no direct grant on it, plus the
 	// counts an empty pool needs to say why. nil where no pool is enumerable
@@ -82,6 +93,23 @@ type grantTarget[Row any] struct {
 	// or a GitHub mirror, and only the first has grants. nil for org and
 	// project, which have one kind of target each.
 	listBranch *grantListBranch
+
+	// webURLRefs reads a pasted entire.com URL as the path it spells
+	// (canonicalizeRepoRef) before anything classifies the ref. Set for the
+	// repo target alone: org and project refs are names, which no entire.com
+	// URL spells.
+	webURLRefs bool
+}
+
+// typedRef is the target ref every leaf works from, computed once from the
+// argument before claims, unwritableRef or resolve sees it: they all read
+// canon, and errors are passed through wrapErr so they echo what was typed.
+// Without webURLRefs the argument is used exactly as given.
+func (t grantTarget[Row]) typedRef(arg string) typedRef {
+	if !t.webURLRefs {
+		return typedRef{typed: arg, canon: arg}
+	}
+	return newTypedRef(arg)
 }
 
 // grantListBranch is the second answer a `list` leaf can give: claims reports
@@ -105,6 +133,9 @@ func newGrantSubtreeCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Use:   cmdGrant,
 		Short: "Manage " + t.noun + " access",
 	}
+	if t.addDocumentedAs != "" {
+		cmd.Long = fmt.Sprintf("List and remove %s access. To give someone access, invite them with `%s`.", t.noun, t.addDocumentedAs)
+	}
 	cmd.AddCommand(newGrantAddCmd(t), newGrantListCmd(t), newGrantRemoveCmd(t))
 	return requireSubcommand(cmd)
 }
@@ -124,16 +155,25 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 	// cobra reports a missing grantee exactly as it always has.
 	use := fmt.Sprintf("add <%s> <grantee>", t.noun)
 	long := fmt.Sprintf("Grant a user (addressed as provider:handle, e.g. github:alice) %s access. The %s is addressed by %s.", t.noun, t.noun, t.refUsage)
+	long += fmt.Sprintf(" An account that is %s is invited instead: it has no access until it accepts, and the command prints the invitation and when it expires.", t.outsider)
 	args := cobra.ExactArgs(2)
 	if t.candidates != nil {
 		use = fmt.Sprintf("add <%s> [grantee]", t.noun)
 		long += fmt.Sprintf(" Omit the grantee on a terminal to choose from the members of the owning org who do not have %s access yet, and set a role for each.", t.noun)
 		args = cobra.RangeArgs(1, 2)
 	}
+	if t.grantTeam != nil {
+		long += " To grant a team of the owning org, name it as team:<name>; a team grant is always direct."
+		example += fmt.Sprintf("\n  entire %s grant add %s team:platform --role %s", t.noun, t.exampleRef, t.leastRole)
+	}
+	if t.addDocumentedAs != "" {
+		long += fmt.Sprintf(" This spelling is kept for scripts; `%s` is the documented command.", t.addDocumentedAs)
+	}
 	cmd := &cobra.Command{
 		Use:     use,
-		Short:   fmt.Sprintf("Grant a user %s access", t.noun),
+		Short:   fmt.Sprintf("Grant %s %s access", granteeNoun(t), t.noun),
 		Long:    long,
+		Hidden:  t.addDocumentedAs != "",
 		Example: example,
 		Args:    args,
 		PreRunE: refuseUnwritableRef(t),
@@ -148,11 +188,14 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return err
 				}
 			}
-			pt := grantPickerTarget{noun: t.noun, ref: args[0], roles: t.roles, least: t.leastRole}
+			tr := t.typedRef(args[0])
+			// The canonical path is what later output names the repo by; a
+			// ref left URL-shaped is redacted, since it is echoed unquoted.
+			pt := grantPickerTarget{noun: t.noun, ref: redactRefForError(tr.canon), roles: t.roles, least: t.leastRole}
 			grantee := ""
 			if len(args) == 2 {
 				grantee = args[1]
-				if err := ensureGranteeIsHandle(grantee); err != nil {
+				if err := ensureGranteeAccepted(t, grantee); err != nil {
 					return err
 				}
 			}
@@ -169,8 +212,8 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return missingRoleErr(t.roles)
 				}
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				id, err := t.resolve(ctx, c, args[0])
+			return tr.wrapErr(runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return err
 				}
@@ -179,12 +222,80 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					return err
 				}
 				return grantEach(ctx, cmd, c, t, pt, id, picked, grantee != "")
-			})
+			}))
 		},
 	}
 	cmd.Flags().StringVar(&role, "role", "", roleHelp)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+const (
+	granteeTypeTeam   = "team"
+	teamGranteePrefix = granteeTypeTeam + ":"
+)
+
+// granteeNoun names who can hold a grant on the target.
+func granteeNoun[Row any](t grantTarget[Row]) string {
+	if t.grantTeam != nil {
+		return "a user or team"
+	}
+	return "a user"
+}
+
+// teamGranteeName reports whether a grantee is team:<name>, and the name. The
+// name can be empty, so the caller can refuse it as a team.
+func teamGranteeName(ref string) (string, bool) {
+	return strings.CutPrefix(ref, teamGranteePrefix)
+}
+
+// ensureGranteeAccepted checks a typed grantee before any request: a team
+// where the target takes teams, and otherwise a provider-qualified handle.
+func ensureGranteeAccepted[Row any](t grantTarget[Row], grantee string) error {
+	if name, ok := teamGranteeName(grantee); ok {
+		// A target that takes no team refuses every team: form alike, as
+		// ensureMemberIsHandle does. Only a target that takes teams asks for a name.
+		if t.grantTeam == nil {
+			return fmt.Errorf("%s is a team; a team cannot hold %s access, so grant it a project or repo instead", grantee, t.noun)
+		}
+		if name == "" {
+			return fmt.Errorf("%s names no team; write team:<name>, e.g. team:platform", grantee)
+		}
+		return nil
+	}
+	return ensureGranteeIsHandle(grantee)
+}
+
+// resolveGrantTeam finds a team by name in the org that owns the target.
+func resolveGrantTeam[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id, name string) (string, error) {
+	orgID, err := t.owningOrg(ctx, c, id)
+	if err != nil {
+		var notOrg *ownerNotOrgError
+		if errors.As(err, &notOrg) {
+			return "", fmt.Errorf("%w; only an org's projects and repos take team grants", err)
+		}
+		return "", err
+	}
+	team, ok, err := findTeam(ctx, c, orgID, name)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no team named %q in the org that owns %s (run `entire org team list %s` to see team names)", name, pt.describe(), orgID)
+	}
+	return team.ID, nil
+}
+
+// teamGrantErr names the team and the target in Core's 404 for a team grant.
+// resolveGrantTeam already refused a target that no org owns.
+//
+// Core's message goes in as text, not wrapped: the renderer prints only the
+// message of a Core error it finds anywhere in the chain.
+func teamGrantErr(err error, pt grantPickerTarget, name string) error {
+	if coreapi.APIErrorStatus(err) == http.StatusNotFound {
+		return fmt.Errorf("team %s is not a team of the org that owns %s: %s", name, pt.describe(), coreapi.APIError(err))
+	}
+	return err
 }
 
 // resolveGrantSelections turns the command line into the grantee/role pairs to
@@ -263,26 +374,155 @@ func reportNothingToAdd(cmd *cobra.Command, reason string) {
 	fmt.Fprintln(w, reason)
 }
 
-// grantEach grants every pair in turn. On a failure it stops and returns,
-// having reported the grants that already landed: those are real, and the CLI
-// cannot undo them, so the user needs to know which ones to skip on a retry.
+type grantOutcome struct {
+	role    string
+	invited *coreapi.AccountInvited
+	wire    any
+}
+
+func grantedOutcome(role string, wire any) grantOutcome {
+	return grantOutcome{role: role, wire: wire}
+}
+
+func invitedOutcome(role string, inv *coreapi.AccountInvited) grantOutcome {
+	// Keep undeclared invitation fields out of --json.
+	inv.AdditionalProps = nil
+	return grantOutcome{role: role, invited: inv, wire: inv}
+}
+
+func unexpectedGrantResponse(res any) error {
+	return fmt.Errorf("unexpected response %T from the control plane", res)
+}
+
+// A refusal for one account fails the command but doesn't stop the batch.
 func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id string, picked []grantSelection, single bool) error {
 	wires := make([]any, 0, len(picked))
-	for _, p := range picked {
-		provider, providerUserID, err := resolveGranteeProvider(ctx, c, p.handle)
+	var tally grantTally
+	for i, p := range picked {
+		outcome, err := grantOne(ctx, c, t, pt, id, p)
 		if err != nil {
-			return errors.Join(err, emitGrantJSON(cmd, wires, single))
+			if single {
+				return errors.Join(withRoleMismatchHint(t, pt, err), emitGrantJSON(cmd, wires, single))
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s was not added to %s: %v\n", displayGranteeName(p.handle), pt.describe(), renderCoreError(err))
+			if hint := roleMismatchHint(t, pt, err); hint != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "  "+hint)
+			}
+			if grantFailureIsFatal(err) {
+				tally.failed, tally.skipped = 1, len(picked)-i-1
+				break
+			}
+			tally.refused++
+			continue
 		}
-		granted, wire, err := t.grant(ctx, c, id, provider, providerUserID, p.role)
-		if err != nil {
-			return errors.Join(err, emitGrantJSON(cmd, wires, single))
+		wires = append(wires, outcome.wire)
+		if outcome.invited != nil {
+			tally.invited++
+		} else {
+			tally.granted++
 		}
-		wires = append(wires, wire)
 		if !jsonRequested(cmd) {
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Granted %s %s access to %s\n", displayGranteeName(p.handle), granted, pt.describe())
+			fmt.Fprintln(cmd.OutOrStdout(), grantOutcomeLine(p.handle, pt, outcome))
 		}
 	}
-	return emitGrantJSON(cmd, wires, single)
+	if single || len(picked) == 0 {
+		return emitGrantJSON(cmd, wires, single)
+	}
+	tally.report(cmd)
+	if err := emitGrantJSON(cmd, wires, single); err != nil {
+		return err
+	}
+	if tally.refused+tally.failed > 0 {
+		return NewSilentError(fmt.Errorf("%d of %d grantees were not added to %s", tally.refused+tally.failed+tally.skipped, len(picked), pt.describe()))
+	}
+	return nil
+}
+
+func grantOne[Row any](ctx context.Context, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id string, p grantSelection) (grantOutcome, error) {
+	if name, ok := teamGranteeName(p.handle); ok {
+		teamID, err := resolveGrantTeam(ctx, c, t, pt, id, name)
+		if err != nil {
+			return grantOutcome{}, err
+		}
+		outcome, err := t.grantTeam(ctx, c, id, teamID, p.role)
+		if err != nil {
+			return grantOutcome{}, teamGrantErr(err, pt, name)
+		}
+		return outcome, nil
+	}
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, p.handle, t.grantTeam != nil)
+	if err != nil {
+		return grantOutcome{}, err
+	}
+	return t.grant(ctx, c, id, provider, providerUserID, p.role)
+}
+
+const problemTypeRoleMismatch = "https://entire.com/errors/invitation/role-mismatch"
+
+func roleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) string {
+	if coreapi.APIErrorType(err) != problemTypeRoleMismatch {
+		return ""
+	}
+	return inviteHint(t.noun, pt.ref)
+}
+
+func withRoleMismatchHint[Row any](t grantTarget[Row], pt grantPickerTarget, err error) error {
+	hint := roleMismatchHint(t, pt, err)
+	if hint == "" {
+		return err
+	}
+	return errors.New(renderCoreError(err).Error() + "\n" + hint)
+}
+
+const problemTypeSSORequired = "https://entire.com/errors/invitation/sso-required"
+
+// The scope was already resolved: a 404 here is about the grantee, not the scope.
+func grantFailureIsFatal(err error) bool {
+	status := coreapi.APIErrorStatus(err)
+	switch {
+	case status == 0:
+		var unresolved *granteeUnresolvedError
+		return !errors.As(err, &unresolved)
+	case status == http.StatusUnauthorized, status == http.StatusMisdirectedRequest, status >= http.StatusInternalServerError:
+		return true
+	case status == http.StatusForbidden:
+		return coreapi.APIErrorType(err) != problemTypeSSORequired
+	default:
+		return false
+	}
+}
+
+func grantOutcomeLine(handle string, pt grantPickerTarget, o grantOutcome) string {
+	name := displayGranteeName(handle)
+	if o.invited == nil {
+		return fmt.Sprintf("✓ Granted %s %s access to %s", name, o.role, pt.describe())
+	}
+	return fmt.Sprintf("✓ Invited %s to %s as %s (%s). No access until they accept; the invitation expires %s.",
+		name, pt.describe(), o.role, o.invited.InvitationID, o.invited.ExpiresAt.Format("2006-01-02"))
+}
+
+type grantTally struct {
+	granted, invited, refused, failed, skipped int
+}
+
+// report writes the tally where the per-grantee lines went, or to stderr under
+// --json so stdout stays parseable.
+func (g grantTally) report(cmd *cobra.Command) {
+	w := cmd.OutOrStdout()
+	if jsonRequested(cmd) {
+		w = cmd.ErrOrStderr()
+	}
+	line := fmt.Sprintf("%d granted, %d invited", g.granted, g.invited)
+	if g.refused > 0 {
+		line += fmt.Sprintf(", %d refused", g.refused)
+	}
+	if g.failed > 0 {
+		line += fmt.Sprintf(", %d failed, %d not attempted", g.failed, g.skipped)
+	}
+	if g.invited > 0 {
+		line += " (an invitation counts as done: access starts when it is accepted)"
+	}
+	fmt.Fprintln(w, line)
 }
 
 // emitGrantJSON writes the wire objects for --json; text mode has already
@@ -327,18 +567,25 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: fmt.Sprintf("List who has %s access", t.noun),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if t.listBranch != nil && t.listBranch.claims(args[0]) {
-				return t.listBranch.list(cmd, args[0])
+			// Canonical before claims: a raw https://entire.com/et/... URL
+			// declares no forge, so the mirror branch would claim it.
+			tr := t.typedRef(args[0])
+			if t.listBranch != nil && t.listBranch.claims(tr.canon) {
+				return tr.wrapErr(t.listBranch.list(cmd, tr.canon))
 			}
-			return runCoreList(cmd, "No grants found.", t.columns, t.row, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
-				id, err := t.resolve(ctx, c, args[0])
+			view := listView[Row]{
+				table: func([]Row) ([]string, func(Row) []string) { return t.columns, t.row },
+				fold:  t.fold,
+			}
+			return tr.wrapErr(runCoreListShaped(cmd, "No grants found.", view, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return nil, err
 				}
 				return pagedList(ctx, func(ctx context.Context, pageToken coreapi.OptString) ([]Row, coreapi.OptString, error) {
 					return t.list(ctx, c, id, pageToken)
 				})
-			})
+			}))
 		},
 	}
 	addJSONFlag(cmd)
@@ -348,21 +595,33 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 	return cmd
 }
 
+func grantRemoveHelp[Row any](t grantTarget[Row]) (long, example string) {
+	long = fmt.Sprintf("Revoke a grantee's %s access. The %s is addressed by %s; the grantee is a "+
+		"provider-qualified handle (e.g. github:alice). Omit the grantee on a terminal to choose "+
+		"from who holds %s access now.", t.noun, t.noun, t.refUsage, t.noun)
+	example = fmt.Sprintf("  entire %s grant remove %s github:alice", t.noun, t.exampleRef)
+	if t.grantTeam != nil {
+		long += " A team is named as team:<name>."
+		example += fmt.Sprintf("\n  entire %s grant remove %s team:platform", t.noun, t.exampleRef)
+	}
+	return long, example
+}
+
 func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
+	long, example := grantRemoveHelp(t)
 	cmd := &cobra.Command{
-		Use:   fmt.Sprintf("remove <%s> [grantee]", t.noun),
-		Short: fmt.Sprintf("Revoke a user's %s access", t.noun),
-		Long: fmt.Sprintf("Revoke a grantee's %s access. The %s is addressed by %s; the grantee is a "+
-			"provider-qualified handle (e.g. github:alice). Omit the grantee on a terminal to choose "+
-			"from who holds %s access now.", t.noun, t.noun, t.refUsage, t.noun),
-		Example: fmt.Sprintf("  entire %s grant remove %s github:alice", t.noun, t.exampleRef),
+		Use:     fmt.Sprintf("remove <%s> [grantee]", t.noun),
+		Short:   fmt.Sprintf("Revoke %s access from %s", t.noun, granteeNoun(t)),
+		Long:    long,
+		Example: example,
 		Args:    cobra.RangeArgs(1, 2),
 		PreRunE: refuseUnwritableRef(t),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			pt := grantPickerTarget{noun: t.noun, ref: args[0], roles: t.roles, least: t.leastRole}
+			tr := t.typedRef(args[0])
+			pt := grantPickerTarget{noun: t.noun, ref: redactRefForError(tr.canon), roles: t.roles, least: t.leastRole}
 			if len(args) == 2 {
-				if err := ensureGranteeIsHandle(args[1]); err != nil {
+				if err := ensureGranteeAccepted(t, args[1]); err != nil {
 					return err
 				}
 			}
@@ -371,8 +630,8 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 			if len(args) == 1 && !interactive.CanPromptInteractively() {
 				return granteeRequiredErr(pt)
 			}
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				id, err := t.resolve(ctx, c, args[0])
+			return tr.wrapErr(runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				id, err := t.resolve(ctx, c, tr.canon)
 				if err != nil {
 					return err
 				}
@@ -422,7 +681,7 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 					}
 				}
 				return nil
-			})
+			}))
 		},
 	}
 	return cmd
@@ -489,10 +748,19 @@ func pickGrantsToRevoke[Row any](ctx context.Context, cmd *cobra.Command, c *cor
 func revokeOne[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Client, t grantTarget[Row], pt grantPickerTarget, id string, g grantCandidate) error {
 	if g.byID {
 		return revokeGrant(cmd, g.label+" from "+pt.describe(), func() error {
-			return t.revokeByID(ctx, c, id, g.ref)
+			return t.revokeByID(ctx, c, id, cmp.Or(g.granteeType, granteeTypeAccount), g.ref)
 		})
 	}
-	provider, providerUserID, err := resolveGranteeProvider(ctx, c, g.ref)
+	if name, ok := teamGranteeName(g.ref); ok {
+		teamID, err := resolveGrantTeam(ctx, c, t, pt, id, name)
+		if err != nil {
+			return err
+		}
+		return revokeGrant(cmd, g.label+" from "+pt.describe(), func() error {
+			return t.revokeByID(ctx, c, id, granteeTypeTeam, teamID)
+		})
+	}
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, g.ref, t.grantTeam != nil)
 	if err != nil {
 		return err
 	}
@@ -519,9 +787,10 @@ func refuseUnwritableRef[Row any](t grantTarget[Row]) func(*cobra.Command, []str
 		return nil
 	}
 	return func(cmd *cobra.Command, args []string) error {
-		if err := t.unwritableRef(args[0]); err != nil {
+		tr := t.typedRef(args[0])
+		if err := t.unwritableRef(tr.canon); err != nil {
 			cmd.SilenceUsage = true
-			return err
+			return tr.wrapErr(err)
 		}
 		return nil
 	}
@@ -543,9 +812,14 @@ func validateChoice(flag, value string, allowed []string) error {
 // as a no-op rather than surfaced as a raw error, matching runControlPlaneDelete.
 // subject describes the grant, e.g. "github:alice from repo /et/acme/web".
 func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error {
+	return revokeResource(cmd, subject, "grant", revoke)
+}
+
+// revokeResource reports a missing grant or invitation as a successful no-op.
+func revokeResource(cmd *cobra.Command, subject, kind string, revoke func() error) error {
 	if err := revoke(); err != nil {
 		if isCoreNotFound(err) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: no such grant; nothing to revoke\n", subject)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: no such %s; nothing to revoke\n", subject, kind)
 			return nil
 		}
 		return err
@@ -583,18 +857,85 @@ func granteeDisplayName(name coreapi.OptString) string {
 }
 
 func projectGrantRow(g coreapi.ProjectGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
+	return []string{grantRowName(g.GranteeType, g.GranteeName.Or(""), g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
 // repoGrantRow mirrors projectGrantRow; RepoGrant and ProjectGrant share the
 // grantee/name/role/source shape, so both reuse grantColumns.
 func repoGrantRow(g coreapi.RepoGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
+	return []string{grantRowName(g.GranteeType, g.GranteeName.Or(""), g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
+}
+
+// grantRowName is a listing row's grantee in the spelling the grant commands
+// take: team:<name> for a team, else granteeNameOr.
+func grantRowName(granteeType, name, granteeID string) string {
+	if granteeType == granteeTypeTeam && name != "" {
+		return teamGranteePrefix + name
+	}
+	return granteeNameOr(name, granteeID)
+}
+
+// grantRoleOrder ranks grant roles weakest first; the owning org's row outranks
+// them all and an unknown role ranks below all.
+var grantRoleOrder = append(slices.Clone(accessRoles), roleOwner)
+
+// effectiveGrants folds a listing to one row per grantee, in first-seen order.
+// The kept row is the grantee's strongest source, so ROLE is the effective role.
+// SOURCE names every source, strongest first and direct first among equals; a
+// source weaker than the effective role carries its own role, e.g.
+// "project:web, direct (reader)".
+func effectiveGrants[Row any](rows []Row, to func(Row) grantRow, setSource func(*Row, string)) []Row {
+	grants := mapRows(rows, to)
+	var order []string
+	byGrantee := make(map[string][]int)
+	for i, g := range grants {
+		key := g.granteeType + "/" + g.granteeID
+		if _, seen := byGrantee[key]; !seen {
+			order = append(order, key)
+		}
+		byGrantee[key] = append(byGrantee[key], i)
+	}
+	out := make([]Row, 0, len(order))
+	for _, key := range order {
+		idx := byGrantee[key]
+		slices.SortStableFunc(idx, func(a, b int) int { return compareGrantSources(grants[a], grants[b]) })
+		top := rows[idx[0]]
+		setSource(&top, joinGrantSources(grants, idx))
+		out = append(out, top)
+	}
+	return out
+}
+
+// compareGrantSources orders the stronger role first, then the direct source.
+func compareGrantSources(a, b grantRow) int {
+	if c := cmp.Compare(slices.Index(grantRoleOrder, b.role), slices.Index(grantRoleOrder, a.role)); c != 0 {
+		return c
+	}
+	aDirect, bDirect := a.source == grantSourceDirect, b.source == grantSourceDirect
+	switch {
+	case aDirect == bDirect:
+		return 0
+	case aDirect:
+		return -1
+	default:
+		return 1
+	}
+}
+
+func joinGrantSources(grants []grantRow, idx []int) string {
+	effective := grants[idx[0]].role
+	parts := make([]string, len(idx))
+	for i, j := range idx {
+		parts[i] = grants[j].source
+		if grants[j].role != effective {
+			parts[i] += " (" + grants[j].role + ")"
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // granteeName returns the friendly name when the server resolved one, in the
-// spelling users type (see displayGranteeName), falling back to the ULID for
-// grantees it couldn't label (e.g. teams).
+// spelling users type (see displayGranteeName), falling back to the ULID.
 func granteeName(name coreapi.OptString, granteeID string) string {
 	return granteeNameOr(name.Or(""), granteeID)
 }
@@ -607,15 +948,12 @@ func granteeNameOr(name, granteeID string) string {
 	return granteeID
 }
 
-// granteeTypeAccount is the only grantee kind the revoke-by-id calls take; the
-// provider-qualified variant has its own endpoint.
 const granteeTypeAccount = "account"
 
 // accessRoles are the project and repo grant roles; the two targets share the
 // set because the server's SpiceDB relations are the same for both. They are
-// listed least-privileged first, which leastAccessRole names so nothing has to
-// rely on that order holding.
-var accessRoles = []string{"reader", "writer", "admin"}
+// listed least-privileged first: grantRoleOrder ranks roles by this order.
+var accessRoles = []string{leastAccessRole, "writer", roleAdmin}
 
 const leastAccessRole = "reader"
 
@@ -633,11 +971,25 @@ const (
 // share. Provider and providerUserId are optional on the wire because the
 // route also accepts an accountId; the CLI always addresses a grantee by
 // provider handle, so it always sends the pair.
+//
+// Every add allows an invitation (here and on the org add): the CLI reads the
+// 202, and without the opt-in Core refuses an account outside the parent scope.
 func grantAccessBody(provider, providerUserID, role string) *coreapi.GrantAccessBody {
 	return &coreapi.GrantAccessBody{
-		Provider:       coreapi.NewOptString(provider),
-		ProviderUserId: coreapi.NewOptString(providerUserID),
-		Role:           coreapi.GrantAccessBodyRole(role),
+		Provider:        coreapi.NewOptString(provider),
+		ProviderUserId:  coreapi.NewOptString(providerUserID),
+		Role:            coreapi.GrantAccessBodyRole(role),
+		AllowInvitation: coreapi.NewOptBool(true),
+	}
+}
+
+// teamGrantBody grants a team. Core refuses allow_invitation on it: a team
+// grant is always direct.
+func teamGrantBody(teamID, role string) *coreapi.GrantAccessBody {
+	return &coreapi.GrantAccessBody{
+		GranteeType: coreapi.NewOptGrantAccessBodyGranteeType(coreapi.GrantAccessBodyGranteeTypeTeam),
+		TeamID:      coreapi.NewOptString(teamID),
+		Role:        coreapi.GrantAccessBodyRole(role),
 	}
 }
 
@@ -651,19 +1003,31 @@ var orgGrantTarget = grantTarget[coreapi.OrgMemberListItem]{
 	roles:       orgRoles,
 	leastRole:   orgRoleMember,
 	defaultRole: orgRoleMember,
-	columns:     orgMemberColumns,
-	row:         orgMemberRow,
-	resolve:     resolveOrgRef,
-	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (string, any, error) {
-		body := &coreapi.AddOrgMemberInputBody{Provider: provider, ProviderUserId: providerUserID}
+	outsider:    "not a member of the org yet",
+	// On the customer API no org add is direct: a non-member is invited and a
+	// member is refused. `org invite send --account` makes the same call under
+	// the name for what it does, so this add is its hidden spelling.
+	addDocumentedAs: "entire org invite send <org> --account <provider:handle>",
+	columns:         orgMemberColumns,
+	row:             orgMemberRow,
+	resolve:         resolveOrgRef,
+	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error) {
+		body := &coreapi.AddOrgMemberInputBody{Provider: provider, ProviderUserId: providerUserID, AllowInvitation: coreapi.NewOptBool(true)}
 		if role != "" {
 			body.Role = coreapi.NewOptAddOrgMemberInputBodyRole(coreapi.AddOrgMemberInputBodyRole(role))
 		}
-		m, err := c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: id})
+		res, err := c.AddOrgMember(ctx, body, coreapi.AddOrgMemberParams{OrgId: id})
 		if err != nil {
-			return "", nil, err
+			return grantOutcome{}, err
 		}
-		return m.Role, m, nil
+		switch out := res.(type) {
+		case *coreapi.Membership:
+			return grantedOutcome(out.Role, out), nil
+		case *coreapi.AccountInvited:
+			return invitedOutcome(cmp.Or(role, orgRoleMember), out), nil
+		default:
+			return grantOutcome{}, unexpectedGrantResponse(res)
+		}
 	},
 	list: func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]coreapi.OrgMemberListItem, coreapi.OptString, error) {
 		out, err := c.ListOrgMembers(ctx, coreapi.ListOrgMembersParams{OrgId: id, PageToken: pageToken})
@@ -686,8 +1050,12 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 	exampleRef: "widgets",
 	roles:      accessRoles,
 	leastRole:  leastAccessRole,
+	outsider:   "neither a member of the owning org nor granted on the project",
 	columns:    grantColumns,
 	row:        projectGrantRow,
+	fold: func(gs []coreapi.ProjectGrant) []coreapi.ProjectGrant {
+		return effectiveGrants(gs, projectGrantRowOf, func(g *coreapi.ProjectGrant, s string) { g.Source = s })
+	},
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveProjectRef(ctx, c, ref)
 	},
@@ -698,12 +1066,12 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 		// already in pt.ref and the error's copy would just repeat it.
 		return pt.describe() + " is owned by an account, so it has no member list to choose from"
 	},
-	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (string, any, error) {
-		out, err := c.GrantProjectAccess(ctx, grantAccessBody(provider, providerUserID, role), coreapi.GrantProjectAccessParams{ProjectId: id})
-		if err != nil {
-			return "", nil, err
-		}
-		return role, out, nil
+	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error) {
+		return grantProject(ctx, c, id, role, grantAccessBody(provider, providerUserID, role))
+	},
+	owningOrg: owningOrgOf,
+	grantTeam: func(ctx context.Context, c *coreapi.Client, id, teamID, role string) (grantOutcome, error) {
+		return grantProject(ctx, c, id, role, teamGrantBody(teamID, role))
 	},
 	list: func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]coreapi.ProjectGrant, coreapi.OptString, error) {
 		out, err := c.ListProjectMembers(ctx, coreapi.ListProjectMembersParams{ProjectId: id, PageToken: pageToken})
@@ -715,25 +1083,46 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 	revokeByProvider: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID string) error {
 		return c.RevokeProjectAccessByProvider(ctx, coreapi.RevokeProjectAccessByProviderParams{ProjectId: id, Provider: provider, ProviderUserId: providerUserID})
 	},
-	revokeByID: func(ctx context.Context, c *coreapi.Client, id, granteeID string) error {
-		return c.RevokeProjectAccess(ctx, coreapi.RevokeProjectAccessParams{ProjectId: id, GranteeType: granteeTypeAccount, GranteeId: granteeID})
+	revokeByID: func(ctx context.Context, c *coreapi.Client, id, granteeType, granteeID string) error {
+		return c.RevokeProjectAccess(ctx, coreapi.RevokeProjectAccessParams{ProjectId: id, GranteeType: granteeType, GranteeId: granteeID})
 	},
 }
 
+func grantProject(ctx context.Context, c *coreapi.Client, id, role string, body *coreapi.GrantAccessBody) (grantOutcome, error) {
+	res, err := c.GrantProjectAccess(ctx, body, coreapi.GrantProjectAccessParams{ProjectId: id})
+	if err != nil {
+		return grantOutcome{}, err
+	}
+	switch out := res.(type) {
+	case *coreapi.GrantProjectAccessOutputBody:
+		return grantedOutcome(role, out), nil
+	case *coreapi.AccountInvited:
+		return invitedOutcome(role, out), nil
+	default:
+		return grantOutcome{}, unexpectedGrantResponse(res)
+	}
+}
+
 // repoGrantTarget is repo access: roles reader/writer/admin, required, on a
-// repo addressed by its /et/<project>/<repo> path and nothing else. `list`
+// repo addressed by its /et/<project>/<repo> path or its entire.com URL
+// spelling. `list`
 // alone also answers a GitHub mirror ref, from the upstream collaborators the
 // placement materializes — see mirrorGrantListing.
 var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	noun:          cmdRepo,
-	refUsage:      "its /" + nativeCloneForge + "/<project>/<repo> path",
+	refUsage:      "its /" + nativeCloneForge + "/<project>/<repo> path or entire.com URL",
 	exampleRef:    "/" + nativeCloneForge + "/acme/web",
 	roles:         accessRoles,
 	leastRole:     leastAccessRole,
+	outsider:      "neither a member of the owning org nor granted on the repo or its project",
 	columns:       grantColumns,
 	row:           repoGrantRow,
 	listBranch:    mirrorGrantListing,
 	unwritableRef: mirrorGrantsAreUpstream,
+	webURLRefs:    true,
+	fold: func(gs []coreapi.RepoGrant) []coreapi.RepoGrant {
+		return effectiveGrants(gs, repoGrantRowOf, func(g *coreapi.RepoGrant, s string) { g.Source = s })
+	},
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveRepoPath(ctx, c, ref)
 	},
@@ -744,12 +1133,12 @@ var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 		// project in between rather than leaving the user to find it.
 		return fmt.Sprintf("%s is in project %s, which is owned by an account, so it has no member list to choose from", pt.describe(), project)
 	},
-	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (string, any, error) {
-		out, err := c.GrantRepoAccess(ctx, grantAccessBody(provider, providerUserID, role), coreapi.GrantRepoAccessParams{RepoId: id})
-		if err != nil {
-			return "", nil, err
-		}
-		return role, out, nil
+	grant: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID, role string) (grantOutcome, error) {
+		return grantRepo(ctx, c, id, role, grantAccessBody(provider, providerUserID, role))
+	},
+	owningOrg: repoOwningOrg,
+	grantTeam: func(ctx context.Context, c *coreapi.Client, id, teamID, role string) (grantOutcome, error) {
+		return grantRepo(ctx, c, id, role, teamGrantBody(teamID, role))
 	},
 	list: func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]coreapi.RepoGrant, coreapi.OptString, error) {
 		out, err := c.ListRepoGrants(ctx, coreapi.ListRepoGrantsParams{RepoId: id, PageToken: pageToken})
@@ -761,7 +1150,22 @@ var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	revokeByProvider: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID string) error {
 		return c.RevokeRepoAccessByProvider(ctx, coreapi.RevokeRepoAccessByProviderParams{RepoId: id, Provider: provider, ProviderUserId: providerUserID})
 	},
-	revokeByID: func(ctx context.Context, c *coreapi.Client, id, granteeID string) error {
-		return c.RevokeRepoAccess(ctx, coreapi.RevokeRepoAccessParams{RepoId: id, GranteeType: granteeTypeAccount, GranteeId: granteeID})
+	revokeByID: func(ctx context.Context, c *coreapi.Client, id, granteeType, granteeID string) error {
+		return c.RevokeRepoAccess(ctx, coreapi.RevokeRepoAccessParams{RepoId: id, GranteeType: granteeType, GranteeId: granteeID})
 	},
+}
+
+func grantRepo(ctx context.Context, c *coreapi.Client, id, role string, body *coreapi.GrantAccessBody) (grantOutcome, error) {
+	res, err := c.GrantRepoAccess(ctx, body, coreapi.GrantRepoAccessParams{RepoId: id})
+	if err != nil {
+		return grantOutcome{}, err
+	}
+	switch out := res.(type) {
+	case *coreapi.GrantRepoAccessOutputBody:
+		return grantedOutcome(role, out), nil
+	case *coreapi.AccountInvited:
+		return invitedOutcome(role, out), nil
+	default:
+		return grantOutcome{}, unexpectedGrantResponse(res)
+	}
 }

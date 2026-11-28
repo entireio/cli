@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -80,6 +81,37 @@ func TestFetchCheckpointRef_PresentRefFetches(t *testing.T) {
 
 	out, err := exec.CommandContext(t.Context(), "git", "-C", workDir, "show-ref", "--verify", ref.String()).CombinedOutput()
 	require.NoError(t, err, "fetched ref must exist locally: %s", out)
+}
+
+// A remote keeps the canonical name; where git recorded a case-insensitive
+// filesystem the fetched ref is stored under the lowercase shard, so it never
+// creates a second spelling of a shard directory locally.
+func TestFetchCheckpointRef_StoresUnderTheLocalShardSpelling(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		ignoreCase string
+		reftable   bool
+		want       string
+	}{
+		{"ignorecase=true", "true", false, "refs/entire/checkpoints/z9/01KVBJCWYA4YW6J5M9GP655HZ9"},
+		{"ignorecase=false", "false", false, "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"},
+		// Reftable keeps exact names, so writes there use RefName and a
+		// fetch must too, whatever core.ignorecase says.
+		{"reftable", "true", true, "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir, ref := checkpointRefFixture(t, true)
+			if tt.reftable {
+				testutil.RunGit(t, workDir, "refs", "migrate", "--ref-format=reftable")
+			}
+			testutil.RunGit(t, workDir, "config", "core.ignorecase", tt.ignoreCase)
+
+			require.NoError(t, FetchCheckpointRef(context.Background(), ref))
+
+			got := testutil.RunGit(t, workDir, "for-each-ref", "--format=%(refname)", "refs/entire/checkpoints/")
+			require.Equal(t, tt.want, strings.TrimSpace(got))
+		})
+	}
 }
 
 // TestFetchCheckpointRef_FallbackTargetNeverClassifiesAbsence: when a

@@ -54,6 +54,9 @@ const tuiSinkQueueCap = 4096
 // goroutine is needed here.
 type TUISink struct {
 	program teaRunner
+	// background is the dashboard's answer to its background-colour query;
+	// nil for sinks built around an injected program.
+	background *terminalBackground
 
 	mu       sync.Mutex
 	started  bool
@@ -98,7 +101,9 @@ func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer, in
 		tea.WithInput(input),
 		tea.WithoutSignalHandler(), // SIGINT handled by cobra root; KeyCtrlC calls cancel directly
 	)
-	return newTUISinkWithProgram(prog)
+	sink := newTUISinkWithProgram(prog)
+	sink.background = model.background
+	return sink
 }
 
 // newTUISinkWithProgram wires a TUISink around any teaRunner; tests inject
@@ -128,6 +133,14 @@ func terminalMeasurer(output io.Writer) func() (int, int, bool) {
 		}
 		return width, height, true
 	}
+}
+
+// DarkBackground reports whether the terminal has a dark background, as the
+// dashboard learned it. Use it instead of probing the terminal while the
+// dashboard runs: a probe reads the reply from the tty and races the
+// dashboard's input reader, which can block the probe until the next keypress.
+func (s *TUISink) DarkBackground() bool {
+	return s.background.isDark()
 }
 
 // Start spawns the Bubble Tea program in its own goroutine. Must be called

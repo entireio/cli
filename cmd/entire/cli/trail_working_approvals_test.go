@@ -38,10 +38,10 @@ func TestSubmitTrailApprovalUsesHTTPStatusNotResponseBody(t *testing.T) {
 					posts := 0
 					setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 						switch r.Method + " " + r.URL.Path {
-						case "GET /api/v1/trails/gh/acme/widget/7":
+						case "GET /api/v1/repos/repo-id/changes/7":
 							assert.False(t, project, "project mode must resolve through its owned route")
 							assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
-						case "POST /api/v1/trails/gh/acme/widget/7/approvals":
+						case "POST /api/v1/repos/repo-id/changes/7/approvals":
 							posts++
 							var request api.TrailApprovalRequest
 							assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))

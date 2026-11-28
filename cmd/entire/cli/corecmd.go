@@ -114,7 +114,10 @@ func runControlPlaneDelete(
 		if !proceed {
 			return nil
 		}
-		if err := del(ctx, c, resolved.ID); err != nil {
+		stop := startSpinner(cmd.ErrOrStderr(), "Deleting "+label)
+		err = del(ctx, c, resolved.ID)
+		stop(false)
+		if err != nil {
 			// Idempotent delete: a resource that's already gone (a 404 from the
 			// delete call — e.g. a ULID passed straight through, or a concurrent
 			// delete) is the desired end state, not an error.
@@ -190,6 +193,8 @@ func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row 
 type listView[T any] struct {
 	table  func(items []T) (headers []string, row func(T) []string)
 	toJSON func(items []T) (any, error)
+	// fold, when set, merges items for the table only; --json keeps every item.
+	fold func(items []T) []T
 }
 
 // runCoreListShaped is runCoreList with the rendering decided after the fetch.
@@ -241,6 +246,9 @@ func renderCoreListShaped[T any](cmd *cobra.Command, empty string, view listView
 			return nil
 		}
 		headers, row := view.table(items)
+		if view.fold != nil {
+			items = view.fold(items)
+		}
 		return printTable(cmd.OutOrStdout(), headers, items, row)
 	}
 }

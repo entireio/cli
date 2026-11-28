@@ -29,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/internal/entireclient/userconfig"
 
@@ -67,7 +68,8 @@ Checks performed:
   For each installed agent that reports hook-config drift:
   5. Hook config: warn when the installed hooks no longer match what this
      CLI writes (e.g. an older release wrote Claude Code tool matchers that
-     no longer fire, or a committed Pi/OpenCode extension has gone stale).
+     no longer fire, a committed Pi/OpenCode extension has gone stale, or a
+     Windows hook was written before hooks resolved programs from PATH only).
      Fix by running 'entire agent add <agent>' (add --force if that does
      not fix it).
 
@@ -156,7 +158,7 @@ func checkUserConfig(cmd *cobra.Command) error {
 	}
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(w, "Per-user config: INVALID")
-	fmt.Fprintf(w, "  %v\n", err)
+	tuiutil.FprintfTerminalText(w, "  %v\n", err)
 	fmt.Fprintln(w, "  Most entire commands refuse to run until it is fixed.")
 	fmt.Fprintln(w)
 	return err //nolint:wrapcheck // already names the file
@@ -173,8 +175,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Check 2: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)
 	if metadataErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
-		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("metadata check failed: %w", metadataErr), "Error: metadata check failed: %v\n", metadataErr)
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout())
@@ -189,8 +190,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// the more fundamental one: if git hooks are broken, commits are not captured
 	// at all and agent-config drift is noise by comparison.
 	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
-		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("git hook check failed: %w", hooksErr), "Error: git hook check failed: %v\n", hooksErr)
 	}
 
 	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
@@ -234,13 +234,17 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
 
+	// Checkpoint refs whose shard directory case-collided. Before the
+	// destination note because it is about checkpoints already written here,
+	// not about where the next ones go.
+	checkCheckpointRefShardCase(cmd, force)
+
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
 
 	// Shadow branches older versions left behind: storage only, never read.
 	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
-		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
+		finalErr = printSilentErrorf(cmd.ErrOrStderr(), fmt.Errorf("legacy shadow branch check failed: %w", legacyErr), "Error: legacy shadow branch check failed: %v\n", legacyErr)
 	}
 
 	// Ahead of stuck sessions: a session refused on one of these can show as
@@ -302,16 +306,16 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		if force {
 			if canCondenseStuckSession(ss) {
 				if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID), err)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
+					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 				}
 			} else {
 				// Discard if we can't condense
 				if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID), err)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
+					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 				}
 			}
 			continue
@@ -344,15 +348,15 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		switch action {
 		case "condense":
 			if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID), err)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
+				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 			}
 		case "discard":
 			if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID), err)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
+				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 			}
 		case "skip":
 			fmt.Fprintf(cmd.OutOrStdout(), "  -> Skipped\n\n")
@@ -420,12 +424,12 @@ func classifySession(state *strategy.SessionState, now time.Time) *stuckSession 
 func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 	w := cmd.OutOrStdout()
 
-	fmt.Fprintf(w, "  Session: %s\n", ss.State.SessionID)
-	fmt.Fprintf(w, "  Phase:   %s\n", ss.State.Phase)
+	fmt.Fprintf(w, "  Session: %s\n", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
+	fmt.Fprintf(w, "  Phase:   %s\n", tuiutil.SanitizeDisplayLine(string(ss.State.Phase)))
 	fmt.Fprintf(w, "  Reason:  %s\n", ss.Reason)
 
 	if ss.State.AgentType != "" {
-		fmt.Fprintf(w, "  Agent:   %s\n", ss.State.AgentType)
+		fmt.Fprintf(w, "  Agent:   %s\n", tuiutil.SanitizeDisplayLine(string(ss.State.AgentType)))
 	}
 
 	if ss.State.LastInteractionTime != nil {
@@ -459,7 +463,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title(fmt.Sprintf("Fix session %s?", ss.State.SessionID)).
+				Title(stuckSessionPromptTitle(ss)).
 				Options(options...).
 				Value(&action),
 		),
@@ -470,6 +474,13 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	}
 
 	return action, nil
+}
+
+// stuckSessionPromptTitle names the session in the fix prompt. The ID comes
+// from the state file's body, which load does not check against the file
+// name, so it is sanitized like the rest of the doctor report.
+func stuckSessionPromptTitle(ss stuckSession) string {
+	return fmt.Sprintf("Fix session %s?", tuiutil.SanitizeDisplayLine(ss.State.SessionID))
 }
 
 // discardSession removes session state.
@@ -1421,6 +1432,13 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintf(w, "  Run `entire agent add %s` to update it.\n", ag.Name())
 			fmt.Fprintln(w, "  If that does not fix it, add --force, which rebuilds Entire's hooks and")
 			fmt.Fprintln(w, "  drops any changes you made to them.")
+		case agent.HooksForOtherHost:
+			fmt.Fprintf(w, "%s hooks: WRITTEN FOR ANOTHER OS\n", displayName)
+			fmt.Fprintln(w, "  The installed hook commands are the ones Entire writes on another OS, and")
+			fmt.Fprintln(w, "  this OS cannot run them, so no hooks fire here. This usually means the")
+			fmt.Fprintln(w, "  hook config was committed from a teammate's checkout on that OS.")
+			fmt.Fprintf(w, "  Run `entire agent add %s` to rewrite it for this OS. If the file is\n", ag.Name())
+			fmt.Fprintln(w, "  committed, that breaks it for teammates on the other OS.")
 		}
 	}
 }
@@ -1782,15 +1800,30 @@ func antigravityDoctorSubject(cmd *cobra.Command) (*antigravity.AntigravityAgent
 	return ag, true
 }
 
-// checkAntigravityTitleTee warns when Antigravity hooks are installed in this
-// repo but agy's global title slot — agy's only token-usage surface — is not
-// routed through Entire, which leaves token counts missing from checkpoints.
-// Warn-only.
+// checkAntigravityTitleTee warns, from any repository, when agy's global title
+// slot is routed through a Windows tee an earlier version wrote, which still
+// looks for `entire` in the folder agy was opened in. Where Antigravity hooks
+// are installed in this repo, it also warns when the slot — agy's only
+// token-usage surface — is not routed through Entire, which leaves token
+// counts missing from checkpoints. Both need agy on PATH, as the install that
+// rewrites the slot does. Warn-only.
 func checkAntigravityTitleTee(cmd *cobra.Command) {
+	w := cmd.OutOrStdout()
+	// The title command is global and runs in every folder agy opens, so an
+	// outdated one is reported from any repository, not only where
+	// Antigravity's hooks are enabled. The remedy installs Antigravity's hooks
+	// in the repository it runs in, so it names one that uses Antigravity.
+	if _, err := exec.LookPath("agy"); err == nil && antigravity.TitleTeeOutdated() {
+		fmt.Fprintln(w, "Antigravity title-tee: OUT OF DATE")
+		fmt.Fprintln(w, "  agy's title command was written by an earlier version and runs in every")
+		fmt.Fprintln(w, "  folder agy opens, looking for `entire` in that folder before PATH.")
+		fmt.Fprintln(w, "  In a repository that uses Antigravity, run `entire agent add antigravity`")
+		fmt.Fprintln(w, "  to update it.")
+		return
+	}
 	if _, ok := antigravityDoctorSubject(cmd); !ok {
 		return
 	}
-	w := cmd.OutOrStdout()
 	if antigravity.TitleTeeInstalled() {
 		fmt.Fprintln(w, "✓ Antigravity title-tee: OK")
 		return

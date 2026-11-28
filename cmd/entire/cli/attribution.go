@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1019,6 +1020,51 @@ func renderAttributionBlame(w io.Writer, result *fileAttributionResult, lineFlag
 	renderAttributionBlameCompact(w, result, lineFlag)
 }
 
+// attributionForTerminal returns a copy of result with every stored label
+// sanitized. Session IDs, agents and models come from checkpoint metadata and
+// authors from commits, all of which can arrive by fetch, so each text renderer
+// passes its input through here before printing. JSON output prints the
+// caller's result, which stays unchanged.
+func attributionForTerminal(result *fileAttributionResult) *fileAttributionResult {
+	out := *result
+	out.File = tuiutil.SanitizeDisplayLine(result.File)
+	out.Lines = make([]attributionLine, len(result.Lines))
+	for i, line := range result.Lines {
+		out.Lines[i] = attributionLineForTerminal(line)
+	}
+	if result.Checkpoints != nil {
+		out.Checkpoints = make(map[string]attributionCheckpointContext, len(result.Checkpoints))
+		for key, checkpointContext := range result.Checkpoints {
+			out.Checkpoints[key] = attributionContextForTerminal(checkpointContext)
+		}
+	}
+	return &out
+}
+
+// attributionLineForTerminal is attributionForTerminal for one line.
+func attributionLineForTerminal(line attributionLine) attributionLine {
+	line.SessionID = tuiutil.SanitizeDisplayLine(line.SessionID)
+	line.Agent = tuiutil.SanitizeDisplayLine(line.Agent)
+	line.Model = tuiutil.SanitizeDisplayLine(line.Model)
+	line.Author = tuiutil.SanitizeDisplayLine(line.Author)
+	line.Content = tuiutil.SanitizeTerminalText(line.Content)
+	if line.Candidates != nil {
+		candidates := make([]attributionCandidate, len(line.Candidates))
+		for i, candidate := range line.Candidates {
+			candidates[i] = attributionContextForTerminal(candidate)
+		}
+		line.Candidates = candidates
+	}
+	return line
+}
+
+func attributionContextForTerminal(checkpointContext attributionCheckpointContext) attributionCheckpointContext {
+	checkpointContext.SessionID = tuiutil.SanitizeDisplayLine(checkpointContext.SessionID)
+	checkpointContext.Agent = tuiutil.SanitizeDisplayLine(checkpointContext.Agent)
+	checkpointContext.Model = tuiutil.SanitizeDisplayLine(checkpointContext.Model)
+	return checkpointContext
+}
+
 // renderAttributionBlameTable renders the scaffolding shared by every blame
 // table — the file header, the empty-file short-circuit, and the trailing
 // summary — and delegates the column layout to body.
@@ -1041,6 +1087,7 @@ func renderAttributionBlameTable(w io.Writer, result *fileAttributionResult, lin
 }
 
 func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, lineFlag string) {
+	result = attributionForTerminal(result)
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		const agentWidth = 6
@@ -1078,6 +1125,7 @@ func renderAttributionBlameCompact(w io.Writer, result *fileAttributionResult, l
 }
 
 func renderAttributionBlameLong(w io.Writer, result *fileAttributionResult, lineFlag string) {
+	result = attributionForTerminal(result)
 	renderAttributionBlameTable(w, result, lineFlag, func(sty statusStyles) {
 		lineWidth := attributionLineColumnWidth(result.Lines)
 		// Size the Checkpoint/Session column to its content so a ULID checkpoint
@@ -1161,6 +1209,8 @@ func renderAttributionContentCompact(sty statusStyles, line attributionLine, wid
 }
 
 func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
+	line = attributionLineForTerminal(line)
+	file = tuiutil.SanitizeDisplayLine(file)
 	sty := newStatusStyles(w)
 	fmt.Fprintf(w, "\n  %s %d in %s\n", sty.render(sty.bold, "Line"), line.LineNumber, sty.render(sty.bold, file))
 	if line.Content != "" {
@@ -1251,6 +1301,7 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 }
 
 func renderAttributionFileWhy(w io.Writer, result *fileAttributionResult) {
+	result = attributionForTerminal(result)
 	sty := newStatusStyles(w)
 	summary := result.Summary
 	fmt.Fprintf(w, "\n  %s\n", sty.render(sty.bold, result.File))

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // pathSafeRegex matches alphanumeric characters, underscores, and hyphens only.
@@ -36,6 +37,11 @@ func ValidateFileNameComponent(name string) error {
 		return fmt.Errorf("invalid file name component %q: %s", name, reason)
 	}
 	return nil
+}
+
+// isTerminalControlRune reports C1 control characters and bidi controls.
+func isTerminalControlRune(r rune) bool {
+	return (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Bidi_Control, r)
 }
 
 func unsafeFileNameComponentReason(name string) string {
@@ -80,6 +86,14 @@ func ValidateSessionID(id string) error {
 	}
 	if reason := unsafeFileNameComponentReason(id); reason != "" {
 		return fmt.Errorf("invalid session ID %q: %s", id, reason)
+	}
+	// Session IDs are printed in reports and resume commands. The file-name
+	// rule above stops C0 controls; C1 controls (one of which, U+009B, is a
+	// CSI introducer) and bidi controls are valid in a file name but can drive
+	// or visually reorder a terminal line. Output still sanitizes, because
+	// metadata that arrives by fetch never passes through this check.
+	if strings.ContainsFunc(id, isTerminalControlRune) {
+		return fmt.Errorf("invalid session ID %q: contains terminal control character", id)
 	}
 	if strings.HasPrefix(id, "-") {
 		return fmt.Errorf("invalid session ID %q: starts with dash", id)

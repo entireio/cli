@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -115,7 +116,15 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 		return err
 	}
 
-	fmt.Fprintf(w, "Adopted session %s from %s\n", shortSessionID(adopted.SessionID), sourceWorktree)
+	writeAdoptResult(w, adopted, sourceWorktree, changes)
+	return nil
+}
+
+// writeAdoptResult reports an adoption. The session ID comes from the state
+// file's body, which load does not check against the file name, so it is
+// sanitized like every other stored label.
+func writeAdoptResult(w io.Writer, adopted *session.State, sourceWorktree string, changes adoptChanges) {
+	fmt.Fprintf(w, "Adopted session %s from %s\n", shortSessionID(tuiutil.SanitizeDisplayLine(adopted.SessionID)), tuiutil.SanitizeDisplayLine(sourceWorktree))
 	if changes.clearedTranscriptPaths > 0 {
 		fmt.Fprintf(w, "Dropped %d subagent transcript path(s) that do not belong to this session's agent; see the Entire log for details.\n",
 			changes.clearedTranscriptPaths)
@@ -123,11 +132,10 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	filesTouched := changes.filesTouched
 	if len(filesTouched) == 0 {
 		fmt.Fprintln(w, "No current file changes were detected, so the next commit may not link until hooks record changes.")
-		return nil
+		return
 	}
-	fmt.Fprintf(w, "Tracking %d file(s): %s\n", len(filesTouched), strings.Join(filesTouched, ", "))
+	fmt.Fprintf(w, "Tracking %d file(s): %s\n", len(filesTouched), tuiutil.SanitizeDisplayLine(strings.Join(filesTouched, ", ")))
 	fmt.Fprintln(w, "Review tracked files before committing; adoption attributes current changes in this repo to the adopted session.")
-	return nil
 }
 
 func adoptFromExternalSessionStore(
@@ -160,7 +168,7 @@ func adoptFromExternalSessionStore(
 		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
-				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
+				sessionID, tuiutil.SanitizeDisplayLine(adoptSessionWorktreeLabel(sourceState)), sourceWorktree)
 		}
 		home, err := validateAdoptSourceTranscript(sourceState, sourceWorktree)
 		if err != nil {
@@ -537,7 +545,7 @@ func selectAdoptSourceSession(ctx context.Context, store *session.StateStore, so
 		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return nil, fmt.Errorf("session %s belongs to %s, not %s",
-				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
+				sessionID, tuiutil.SanitizeDisplayLine(adoptSessionWorktreeLabel(sourceState)), sourceWorktree)
 		}
 		return sourceState, nil
 	}
@@ -564,7 +572,7 @@ func selectAdoptSourceSession(ctx context.Context, store *session.StateStore, so
 	default:
 		ids := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
-			ids = append(ids, candidate.SessionID)
+			ids = append(ids, tuiutil.SanitizeDisplayLine(candidate.SessionID))
 		}
 		return nil, fmt.Errorf("multiple recent active sessions found in %s; pass one of: %s",
 			sourceWorktree, strings.Join(ids, ", "))

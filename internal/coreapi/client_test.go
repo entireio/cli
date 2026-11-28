@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ogen-go/ogen/ogenerrors"
 
@@ -206,6 +207,37 @@ func TestProviderSource_BearerAuth(t *testing.T) {
 			t.Fatalf("error = %v, want the provider message surfaced verbatim", err)
 		}
 	})
+}
+
+func TestGetMirror_CredentialTimeout(t *testing.T) {
+	t.Parallel()
+	for _, afterDeadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_wait_deadline=%t", afterDeadline), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("credential failure must prevent the mirror request")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			src := &providerSource{provide: func(ctx context.Context) (string, error) {
+				if afterDeadline {
+					<-ctx.Done()
+				}
+				return "", fmt.Errorf("keyring timed out: %w", context.DeadlineExceeded)
+			}}
+			client, err := NewClient(server.URL, src, WithClient(server.Client()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			_, err = client.GetMirror(ctx, GetMirrorParams{MirrorId: "mirror-1"})
+			var credentialErr *CredentialError
+			if !errors.As(err, &credentialErr) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("credential provenance and deadline must survive the generated client: %v", err)
+			}
+		})
+	}
 }
 
 // providerSource must skip SessionAuth so no Cookie header is added — same
@@ -612,5 +644,31 @@ func TestListOrgMembers_UnknownEnumValuesPassThrough(t *testing.T) {
 	}
 	if member.Status != "suspended" {
 		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", member.Status, "suspended")
+	}
+}
+
+func TestListTeamMembers_UnknownStatusPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"members":[{"account_id":"01H0000000000000000000000A","status":"suspended"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListTeamMembers(context.Background(), ListTeamMembersParams{OrgId: "01H000000000000000000000O1", TeamID: "01H000000000000000000000T1"})
+	if err != nil {
+		t.Fatalf("ListTeamMembers with an unknown status must not fail, got: %v", err)
+	}
+	if len(out.Members) != 1 || out.Members[0].Status != "suspended" {
+		t.Fatalf("Members = %+v, want one member with status %q", out.Members, "suspended")
 	}
 }

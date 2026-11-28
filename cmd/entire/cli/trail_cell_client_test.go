@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
+	"github.com/stretchr/testify/require"
 )
 
 // trailsCellClient exists so its three callers do not each re-derive which
@@ -33,21 +38,28 @@ func TestTrailsCellClient_Contract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previous := trailRefreshAPIClient
-			trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
+			trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
 				if tc.clientErr != nil {
-					return nil, tc.clientErr
+					return nil, "", tc.clientErr
 				}
-				return &api.Client{}, nil
+				return &api.Client{}, "repo-placement-id", nil
 			}
 			t.Cleanup(func() { trailRefreshAPIClient = previous })
 
-			client, notOnboarded, err := trailsCellClient(context.Background(), false, "gh", "acme", "widget")
+			client, repoID, notOnboarded, err := trailsCellClient(context.Background(), false, "gh", "acme", "widget")
 
 			if notOnboarded != tc.wantNotOnboard {
 				t.Errorf("notOnboarded = %v, want %v", notOnboarded, tc.wantNotOnboard)
 			}
 			if (client != nil) != tc.wantClient {
 				t.Errorf("client != nil = %v, want %v", client != nil, tc.wantClient)
+			}
+			wantRepoID := ""
+			if tc.wantClient {
+				wantRepoID = "repo-placement-id"
+			}
+			if repoID != wantRepoID {
+				t.Errorf("repoID = %q, want %q", repoID, wantRepoID)
 			}
 			// err mirrors the client build in every branch, including the
 			// not-onboarded one where the caller ignores it in favour of the flag.
@@ -59,6 +71,91 @@ func TestTrailsCellClient_Contract(t *testing.T) {
 			}
 			if !errors.Is(err, tc.clientErr) {
 				t.Errorf("err = %v, want it to wrap the client-build failure %v", err, tc.clientErr)
+			}
+		})
+	}
+}
+
+// Not parallel: each entry changes cwd and the authenticated-client seam.
+func TestTrailEnablementRefresh_ResolvedRepoIDAndCacheScope(t *testing.T) {
+	for _, refresh := range []struct {
+		name string
+		run  func(context.Context, *api.Client, string, trailEnablementScope) error
+	}{
+		{"setup", func(ctx context.Context, _ *api.Client, _ string, scope trailEnablementScope) error {
+			probeAndCacheTrailsEnablement(ctx, false, &gitremote.Info{Forge: scope.Forge, Owner: scope.Owner, Repo: scope.Repo})
+			return nil
+		}},
+		{"agent help", func(ctx context.Context, _ *api.Client, _ string, scope trailEnablementScope) error {
+			return refreshAgentHelpTrailsEnabledCacheIfStaleForScope(ctx, scope)
+		}},
+		{"detached refresh", func(ctx context.Context, _ *api.Client, _ string, _ trailEnablementScope) error {
+			return runTrailEnablementRefresh(ctx)
+		}},
+		{"failed command", func(ctx context.Context, client *api.Client, repoID string, _ trailEnablementScope) error {
+			noteTrailCommandEnablement(ctx, client, repoID, errors.New("command failed"))
+			return nil
+		}},
+	} {
+		t.Run(refresh.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name   string
+				repoID string
+				status int
+				want   trailEnablementCacheStatus
+			}{
+				{"enabled", " placement/id? ", http.StatusOK, trailEnablementCacheEnabled},
+				{"disabled", " placement/id? ", http.StatusForbidden, trailEnablementCacheDisabled},
+				{"not found", " placement/id? ", http.StatusNotFound, trailEnablementCacheDisabled},
+				{"gone", " placement/id? ", http.StatusGone, trailEnablementCacheDisabled},
+				{"unauthorized", " placement/id? ", http.StatusUnauthorized, trailEnablementCacheUnknown},
+				{"transient error", " placement/id? ", http.StatusInternalServerError, trailEnablementCacheUnknown},
+				{"missing ID", " \t", http.StatusOK, trailEnablementCacheUnknown},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					setupStopTestRepo(t)
+					runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/acme/widget.git")
+					scope, err := currentTrailEnablementScope(t.Context())
+					require.NoError(t, err)
+
+					requests := 0
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						requests++
+						if r.RequestURI != "/api/v1/repos/placement%2Fid%3F/changes?per_page=1" {
+							t.Errorf("unexpected enablement probe: %s", r.RequestURI)
+						}
+						w.WriteHeader(tc.status)
+					}))
+					t.Cleanup(srv.Close)
+					client := api.NewClientWithBaseURL("tok", srv.URL)
+					previous := trailRefreshAPIClient
+					trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, string, error) {
+						require.Equal(t, scope.RepoKey, trailEnablementRepoKey(forge, owner, repo))
+						return client, tc.repoID, nil
+					}
+					t.Cleanup(func() { trailRefreshAPIClient = previous })
+
+					err = refresh.run(t.Context(), client, tc.repoID, scope)
+					if refresh.name == "agent help" && tc.want == trailEnablementCacheUnknown {
+						require.Error(t, err)
+					} else {
+						require.NoError(t, err)
+					}
+
+					wantRequests := 1
+					if tc.name == "missing ID" {
+						wantRequests = 0
+					}
+					require.Equal(t, wantRequests, requests)
+					require.Equal(t, tc.want, cachedTrailsEnablementForScope(t.Context(), scope, time.Now()))
+					for _, other := range []trailEnablementScope{
+						{RepoKey: "gh/other/repo", APIBase: scope.APIBase, AuthKey: scope.AuthKey},
+						{RepoKey: scope.RepoKey, APIBase: "https://other.example", AuthKey: scope.AuthKey},
+						{RepoKey: scope.RepoKey, APIBase: scope.APIBase, AuthKey: "other-identity"},
+					} {
+						require.Equal(t, trailEnablementCacheUnknown, cachedTrailsEnablementForScope(t.Context(), other, time.Now()))
+					}
+				})
 			}
 		})
 	}

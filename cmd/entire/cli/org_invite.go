@@ -22,174 +22,126 @@ import (
 // of the values the API declares, so there is one place where "an admin may not
 // mint owners" is decided.
 
-// invitationStatuses are the --status filter values. "all" is the API's own
-// name for "every state", not a client-side wildcard.
-var invitationStatuses = []string{"open", "accepted", "revoked", "expired", "all"}
-
-// invitationColumns leads with the invitation ULID, the stable handle for an
-// invitation, as the org columns lead with the org's.
-var invitationColumns = []string{"ID", "EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
-
-func invitationRow(i coreapi.Invitation) []string {
-	return []string{i.ID, i.Email, i.Role, i.Status, i.ExpiresAt.Format("2006-01-02")}
-}
-
 func newOrgInviteCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "invite",
-		Short: "Manage organization invitations",
-	}
-	cmd.AddCommand(newOrgInviteSendCmd(), newOrgInviteListCmd(), newOrgInviteRevokeCmd())
-	return requireSubcommand(cmd)
+	return newScopeInviteCmd(orgInviteScope, newOrgInviteSendCmd())
 }
 
 func newOrgInviteSendCmd() *cobra.Command {
-	var email, role string
+	var email, account, role string
 	cmd := &cobra.Command{
-		Use:     "send <org> --email <email>",
-		Short:   "Invite an email address to an organization",
-		Long:    "Invite an email address to an organization. The org is addressed by name. The invited address receives a link to accept. Inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with.",
-		Example: "  entire org invite send acme --email dev@example.com --role admin",
-		Args:    cobra.ExactArgs(1),
+		Use:   "send <org> (--email <email> | --account <provider:handle>)",
+		Short: "Invite an email address or an existing account to an organization",
+		Long: "Invite someone to an organization. The org is addressed by name. " +
+			"With --email, the address receives a link to accept; inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with. " +
+			"With --account (a provider-qualified handle, e.g. github:alice), the existing account is invited and has no access until it accepts; the command prints the invitation and when it expires. " +
+			"Inviting an account that already has an open invitation with the same role reports that invitation without a second mail, and one with another role is refused until the open one is revoked. " +
+			"An account that is already a member is refused.",
+		Example: "  entire org invite send acme --email dev@example.com --role admin\n" +
+			"  entire org invite send acme --account github:alice",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed("role") {
-				if err := validateChoice("role", role, orgRoles); err != nil {
-					cmd.SilenceUsage = true
-					return err
-				}
+			if err := validateInviteSendFlags(cmd, email, account, role); err != nil {
+				cmd.SilenceUsage = true
+				return err
 			}
 			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				orgID, err := resolveInviteOrg(ctx, c, args[0])
 				if err != nil {
 					return "", nil, err
 				}
-				body := &coreapi.CreateOrgInvitationInputBody{
-					Email: email,
-					Role:  coreapi.CreateOrgInvitationInputBodyRole(role),
+				if account != "" {
+					return sendAccountInvitation(ctx, c, args[0], orgID, account, role)
 				}
-				res, err := c.CreateOrgInvitation(ctx, body, coreapi.CreateOrgInvitationParams{OrgId: orgID})
-				if err != nil {
-					return "", nil, err
-				}
-				switch out := res.(type) {
-				case *coreapi.CreateOrgInvitationCreated:
-					// An invitation is the one object with an accept token. Its
-					// modeled fields carry none today, but ogen
-					// round-trips any response property this schema doesn't
-					// declare, verbatim, into --json output, so blank the bag
-					// rather than trust the endpoint's contract never grows one.
-					inv := coreapi.Invitation(*out)
-					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Invited %s to org %s as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
-				case *coreapi.CreateOrgInvitationOK:
-					// The role here is the stored one, which an earlier invite
-					// chose; saying so stops a --role that did not take effect
-					// from reading as though it had.
-					inv := coreapi.Invitation(*out)
-					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
-				default:
-					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", email, res)
-				}
+				return sendEmailInvitation(ctx, c, args[0], orgID, email, role)
 			})
 		},
 	}
 	// The wire field is required, so an omitted flag still sends a role: the
 	// same default the API documents.
 	cmd.Flags().StringVar(&email, "email", "", "Email address to invite")
+	cmd.Flags().StringVar(&account, "account", "", "Existing account to invite, as a provider-qualified handle (e.g. github:alice)")
 	cmd.Flags().StringVar(&role, "role", orgRoleMember, "Role the invitation grants: one of "+strings.Join(orgRoles, ", "))
-	markRequired(cmd, "email")
+	cmd.MarkFlagsMutuallyExclusive("email", "account")
+	cmd.MarkFlagsOneRequired("email", "account")
 	addJSONFlag(cmd)
 	return cmd
 }
 
-func newOrgInviteListCmd() *cobra.Command {
-	var status string
-	cmd := &cobra.Command{
-		Use:     "list <org>",
-		Short:   "List an organization's invitations",
-		Long:    "List an organization's invitations, open ones by default. The org is addressed by name.",
-		Example: "  entire org invite list acme --status all",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateChoice("status", status, invitationStatuses); err != nil {
-				cmd.SilenceUsage = true
-				return err
-			}
-			return runCoreList(cmd, "No invitations found.", invitationColumns, invitationRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Invitation, error) {
-				orgID, err := resolveInviteOrg(ctx, c, args[0])
-				if err != nil {
-					return nil, err
-				}
-				return listOrgInvitations(ctx, c, orgID, status)
-			})
-		},
+// validateInviteSendFlags settles before any request what the command line
+// alone decides: the role, and a value given to the wrong one of --email and
+// --account. The two cannot be confused by the command, because each is its
+// own flag, but a person can put a handle in --email or an address in
+// --account; each is named back with the flag it belongs to.
+func validateInviteSendFlags(cmd *cobra.Command, email, account, role string) error {
+	if cmd.Flags().Changed("role") {
+		if err := validateChoice("role", role, orgRoles); err != nil {
+			return err
+		}
 	}
-	cmd.Flags().StringVar(&status, "status", "open", "Lifecycle state to list: one of "+strings.Join(invitationStatuses, ", "))
-	addJSONFlag(cmd)
-	return cmd
+	if email != "" && !strings.Contains(email, "@") {
+		if _, _, err := parseQualifiedHandle(email); err == nil {
+			return fmt.Errorf("invalid --email %q: that is an account handle; invite it with --account %s", email, email)
+		}
+	}
+	if account != "" {
+		if strings.Contains(account, "@") && !strings.Contains(account, ":") {
+			return fmt.Errorf("invalid --account %q: that is an email address; invite it with --email %s", account, account)
+		}
+		if err := ensureGranteeIsHandle(account); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func listOrgInvitations(ctx context.Context, c *coreapi.Client, orgID, status string) ([]coreapi.Invitation, error) {
-	invitations, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Invitation, string, error) {
-		params := coreapi.ListOrgInvitationsParams{
-			OrgId:  orgID,
-			Status: coreapi.NewOptListOrgInvitationsStatus(coreapi.ListOrgInvitationsStatus(status)),
-		}
-		if cursor != "" {
-			params.PageToken = coreapi.NewOptString(cursor)
-		}
-		out, err := c.ListOrgInvitations(ctx, params)
-		if err != nil {
-			return nil, "", err
-		}
-		return out.Invitations, out.NextPageToken.Or(""), nil
-	})
+// sendEmailInvitation creates, or resends, the invitation for an address.
+func sendEmailInvitation(ctx context.Context, c *coreapi.Client, orgRef, orgID, email, role string) (string, any, error) {
+	body := &coreapi.CreateOrgInvitationInputBody{
+		Email: email,
+		Role:  coreapi.CreateOrgInvitationInputBodyRole(role),
+	}
+	res, err := c.CreateOrgInvitation(ctx, body, coreapi.CreateOrgInvitationParams{OrgId: orgID})
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	// Same defense as the create path above, applied to every invitation the
-	// listing returns.
-	for i := range invitations {
-		invitations[i].AdditionalProps = nil
+	switch out := res.(type) {
+	case *coreapi.CreateOrgInvitationCreated:
+		// An invitation is the one object with an accept token. Its
+		// modeled fields carry none today, but ogen
+		// round-trips any response property this schema doesn't
+		// declare, verbatim, into --json output, so blank the bag
+		// rather than trust the endpoint's contract never grows one.
+		inv := coreapi.Invitation(*out)
+		inv.AdditionalProps = nil
+		return fmt.Sprintf("✓ Invited %s to org %s as %s (%s)", inv.Email.Or(email), orgRef, inv.Role, inv.ID), &inv, nil
+	case *coreapi.CreateOrgInvitationOK:
+		// The role here is the stored one, which an earlier invite
+		// chose; saying so stops a --role that did not take effect
+		// from reading as though it had.
+		inv := coreapi.Invitation(*out)
+		inv.AdditionalProps = nil
+		return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s (%s)", inv.Email.Or(email), orgRef, inv.Role, inv.ID), &inv, nil
+	default:
+		return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", email, res)
 	}
-	return invitations, nil
 }
 
-func newOrgInviteRevokeCmd() *cobra.Command {
-	var email string
-	cmd := &cobra.Command{
-		Use:     "revoke <org> --email <email>",
-		Short:   "Revoke an organization invitation",
-		Long:    "Revoke the open invitation for an email address so its link stops working. The org is addressed by name.",
-		Example: "  entire org invite revoke acme --email dev@example.com",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				orgID, err := resolveInviteOrg(ctx, c, args[0])
-				if err != nil {
-					return err
-				}
-				subject := "the invitation for " + email + " to org " + args[0]
-				invitationID, err := openInvitationIDForEmail(ctx, c, orgID, email)
-				if err != nil {
-					return err
-				}
-				if invitationID == "" {
-					// Same end state as revokeGrant's 404: nothing is open for
-					// that address, so there is nothing to revoke.
-					fmt.Fprintf(cmd.OutOrStdout(), "%s: no open invitation; nothing to revoke\n", subject)
-					return nil
-				}
-				return revokeGrant(cmd, subject, func() error {
-					return c.RevokeOrgInvitation(ctx, coreapi.RevokeOrgInvitationParams{OrgId: orgID, ID: invitationID})
-				})
-			})
-		},
+// sendAccountInvitation invites an existing account. It is the org add with
+// the invitation allowed — the call the hidden `org grant add` makes — so the outcome
+// and its wording are grant add's: Core answers 202 with the invitation, or,
+// before it requires consent, 201 with the membership it wrote, which is
+// reported as the grant it is.
+func sendAccountInvitation(ctx context.Context, c *coreapi.Client, orgRef, orgID, account, role string) (string, any, error) {
+	pt := grantPickerTarget{noun: cmdOrg, ref: orgRef}
+	provider, providerUserID, err := resolveGranteeProvider(ctx, c, account, false)
+	if err != nil {
+		return "", nil, err
 	}
-	cmd.Flags().StringVar(&email, "email", "", "Email address whose open invitation to revoke")
-	markRequired(cmd, "email")
-	return cmd
+	outcome, err := orgGrantTarget.grant(ctx, c, orgID, provider, providerUserID, role)
+	if err != nil {
+		return "", nil, withRoleMismatchHint(orgGrantTarget, pt, err)
+	}
+	return grantOutcomeLine(account, pt, outcome), outcome.wire, nil
 }
 
 // resolveInviteOrg resolves the <org> the invite commands take. Their help
@@ -201,22 +153,4 @@ func resolveInviteOrg(ctx context.Context, c *coreapi.Client, name string) (stri
 		return "", fmt.Errorf("no org named %q (run `entire org list` to see org names)", name)
 	}
 	return id, err
-}
-
-// openInvitationIDForEmail finds the open invitation for an address, or ""
-// when the org has none. The revoke route takes a ULID, so an email is resolved
-// through the listing. Only open invitations are searched: re-revoking an
-// accepted or revoked one is not what the user asked for. The server stores the
-// address lowercased, so the match folds case.
-func openInvitationIDForEmail(ctx context.Context, c *coreapi.Client, orgID, email string) (string, error) {
-	invitations, err := listOrgInvitations(ctx, c, orgID, "open")
-	if err != nil {
-		return "", err
-	}
-	for _, inv := range invitations {
-		if strings.EqualFold(inv.Email, email) {
-			return inv.ID, nil
-		}
-	}
-	return "", nil
 }

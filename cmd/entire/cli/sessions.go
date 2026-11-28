@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
 
@@ -415,19 +416,19 @@ func writeSessionListJSON(w io.Writer, states []*strategy.SessionState) error {
 
 // writeSessionCard renders a single session in status-style card format.
 func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
-	agentLabel := string(s.AgentType)
+	agentLabel := tuiutil.SanitizeDisplayLine(string(s.AgentType))
 	if agentLabel == "" {
 		agentLabel = "(unknown)"
 	}
-	wt := sessionWorktreeLabel(s)
+	wt := tuiutil.SanitizeDisplayLine(sessionWorktreeLabel(s))
 
 	// Line 1: Agent · Model · worktree · session <id> [· checkpoint <id>]
 	fmt.Fprint(w, sty.render(sty.agent, agentLabel))
 	if s.ModelName != "" {
-		fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.dim, s.ModelName))
+		fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.dim, tuiutil.SanitizeDisplayLine(s.ModelName)))
 	}
 	fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), wt)
-	fmt.Fprintf(w, " %s session %s", sty.render(sty.dim, "·"), s.SessionID)
+	fmt.Fprintf(w, " %s session %s", sty.render(sty.dim, "·"), tuiutil.SanitizeDisplayLine(s.SessionID))
 	if s.LastCheckpointID != "" {
 		fmt.Fprintf(w, " %s checkpoint %s", sty.render(sty.dim, "·"), string(s.LastCheckpointID))
 	}
@@ -435,13 +436,13 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 
 	// Line 2: > "prompt" (truncated)
 	if s.LastPrompt != "" {
-		prompt := stringutil.TruncateRunes(s.LastPrompt, 60, "...")
+		prompt := stringutil.TruncateRunes(tuiutil.SanitizeDisplayLine(s.LastPrompt), 60, "...")
 		fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
 	}
 
 	// Line 3: status · [imported (read-only) ·] started X ago · active X ago · tokens X.Xk
 	var stats []string
-	stats = append(stats, sessionPhaseLabel(s))
+	stats = append(stats, tuiutil.SanitizeDisplayLine(sessionPhaseLabel(s)))
 	if s.Kind.IsImported() {
 		stats = append(stats, "imported (read-only)")
 	}
@@ -556,16 +557,13 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
-		msg := fmt.Sprintf("session %s has no transcript path recorded", state.SessionID)
-		fmt.Fprintln(cmd.ErrOrStderr(), msg)
-		return NewSilentError(errors.New(msg))
+		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("session %s has no transcript path recorded", state.SessionID))
 	}
 
 	path, err := strategy.ResolveTranscriptPath(state)
 	if err != nil {
 		cmd.SilenceUsage = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "transcript unavailable: %v\n", err)
-		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
+		return printSilentError(cmd.ErrOrStderr(), fmt.Errorf("transcript unavailable: %w", err))
 	}
 
 	// Errors from streaming are runtime issues (Stat failure, mid-write JSON,
@@ -671,27 +669,27 @@ func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status stri
 }
 
 func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string, resolution strategy.SessionResolution) error {
-	fmt.Fprintf(w, "Session %s\n\n", state.SessionID)
+	fmt.Fprintf(w, "Session %s\n\n", tuiutil.SanitizeDisplayLine(state.SessionID))
 	if label := sessionResolutionLabel(resolution); label != "" {
 		fmt.Fprintf(w, "Resolved:    %s\n", label)
 	}
 
-	agentLabel := string(state.AgentType)
+	agentLabel := tuiutil.SanitizeDisplayLine(string(state.AgentType))
 	if agentLabel == "" {
 		agentLabel = "(unknown)"
 	}
 	fmt.Fprintf(w, "Agent:       %s\n", agentLabel)
 	if state.ModelName != "" {
-		fmt.Fprintf(w, "Model:       %s\n", state.ModelName)
+		fmt.Fprintf(w, "Model:       %s\n", tuiutil.SanitizeDisplayLine(state.ModelName))
 	}
 
-	fmt.Fprintf(w, "Status:      %s\n", status)
+	fmt.Fprintf(w, "Status:      %s\n", tuiutil.SanitizeDisplayLine(status))
 
 	if state.Kind.IsImported() {
 		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable)\n")
 	}
 
-	wt := sessionWorktreeLabel(state)
+	wt := tuiutil.SanitizeDisplayLine(sessionWorktreeLabel(state))
 	fmt.Fprintf(w, "Worktree:    %s\n", wt)
 
 	fmt.Fprintf(w, "Started:     %s (%s)\n",
@@ -747,7 +745,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 	if files := state.PendingFiles(); len(files) > 0 {
 		fmt.Fprintln(w, "\nFiles touched:")
 		for _, f := range files {
-			fmt.Fprintf(w, "  %s\n", f)
+			fmt.Fprintf(w, "  %s\n", tuiutil.SanitizeDisplayLine(f))
 		}
 	}
 
@@ -840,7 +838,7 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 			prompt := stringutil.TruncateRunes(s.LastPrompt, 40, "...")
 			label = fmt.Sprintf("%s · %q", label, prompt)
 		}
-		options[i] = huh.NewOption(label, s.SessionID)
+		options[i] = huh.NewOption(tuiutil.SanitizeDisplayLine(label), s.SessionID)
 	}
 
 	var selectedIDs []string
@@ -882,7 +880,7 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 			toStop = append(toStop, s)
 		} else {
 			// Session was concurrently stopped between form render and confirmation.
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: session %s no longer found, skipping.\n", id)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: session %s no longer found, skipping.\n", tuiutil.SanitizeDisplayLine(id))
 		}
 	}
 	if len(toStop) == 0 {
@@ -920,7 +918,7 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 		return fmt.Errorf("failed to stop session %s: %w", sessionID, err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "✓ Session %s stopped.\n", sessionID)
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ Session %s stopped.\n", tuiutil.SanitizeDisplayLine(sessionID))
 	switch {
 	case lastCheckpointID != "":
 		fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint: %s\n", lastCheckpointID)

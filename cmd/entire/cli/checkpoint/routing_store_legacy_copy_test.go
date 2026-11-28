@@ -374,6 +374,48 @@ func TestKindRoutingStore_BackfillBuildsOnTheRemoteRefInsteadOfCopying(t *testin
 	assert.Equal(t, v1Before.Hash(), v1After.Hash(), "the backfill must not land on v1")
 }
 
+// A copied checkpoint can be stored under the other spelling of its shard, and
+// its canonical name stops resolving once git packs it. The next write must
+// still find it. Asking the remote instead brings in a second ref for the
+// checkpoint, and the write lands there without the sessions this clone has
+// not pushed.
+func TestKindRoutingStore_ReservedSessionBuildsOnALocalRefStoredFolded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t)
+	remoteTip := f.remoteCopy(t)
+
+	unpushed := WriteOptions(afterSwitchSession(f.cid))
+	unpushed.SessionID = "unpushed"
+	require.NoError(t, f.router.Write(ctx, ReservedSession(unpushed)))
+	var folded plumbing.ReferenceName
+	f.refs, folded = foldShardRefAndPack(t, f.refs, f.cid)
+	f.repo = f.refs.repo
+	f.branch = NewGitStore(f.repo, DefaultV1Refs())
+
+	fetches := 0
+	f = f.withLegacyRefFetcher(func(_ context.Context, ref plumbing.ReferenceName) error {
+		fetches++
+		return f.repo.Storer.SetReference(plumbing.NewHashReference(ref, remoteTip))
+	})
+	require.NoError(t, f.router.Write(ctx, afterSwitchSession(f.cid)))
+
+	assert.Zero(t, fetches, "a checkpoint this clone holds is not fetched again")
+	summary, err := f.refs.Read(ctx, f.cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	var sessions []string
+	for i := range summary.Sessions {
+		meta, err := f.refs.ReadSessionMetadata(ctx, f.cid, i)
+		require.NoError(t, err)
+		sessions = append(sessions, meta.SessionID)
+	}
+	assert.Equal(t, []string{"before-switch", "unpushed", "after-switch"}, sessions,
+		"the write must build on the ref this clone holds")
+	assert.Equal(t, []string{folded.String()}, checkpointRefNames(t, f.refs),
+		"the checkpoint must keep the one ref it had")
+}
+
 func TestKindRoutingStore_ReservedSessionCopiesWhenTheRemoteHasNoRef(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

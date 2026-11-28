@@ -53,7 +53,7 @@ func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.
 	}{}
 	body := f.resolutionJSON
 	if body == "" {
-		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, params.Host, params.Project)
+		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, params.ForgePrefix, params.Project)
 	}
 	if err := json.Unmarshal([]byte(body), &resolved); err != nil {
 		return nil, err
@@ -145,7 +145,7 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-id/changes", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 			ID: projectTrailTestChange, Number: 7, Branch: "feature/a", Title: "Code work",
 			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
@@ -239,7 +239,7 @@ func TestProjectTrailShowSelectorWithBranchMarksCurrent(t *testing.T) {
 		}
 	})
 	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		assert.Equal(t, "/api/v1/repos/repo-id/changes", r.URL.Path)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
 			ID: projectTrailTestChange, Number: 7, Branch: "feature/work",
 			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,

@@ -16,6 +16,7 @@ const (
 	cmdReview     = "review"
 	cmdSession    = "session"
 	cmdStatus     = "status"
+	cmdTeam       = "team"
 	cmdTokens     = "tokens"
 	cmdTrail      = "trail"
 
